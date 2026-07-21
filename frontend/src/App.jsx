@@ -1,0 +1,995 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { mockApi } from "./mockApi";
+import { useUiStore } from "./store";
+
+const initialJobs = [
+  {
+    id: "job-live",
+    shortId: "8F2A",
+    name: "Atrium lighting",
+    file: "atrium_final.blend",
+    status: "ready",
+    progress: 0,
+    frame: "1–240",
+    engine: "Cycles",
+    device: "OptiX",
+    version: "4.5.11",
+    created: "Just now",
+  },
+  {
+    id: "job-queued",
+    shortId: "B17C",
+    name: "Product turntable",
+    file: "headphones.blend",
+    status: "ready",
+    progress: 0,
+    frame: "1–72",
+    engine: "Cycles",
+    device: "CUDA",
+    version: "4.5.11",
+    created: "8 min ago",
+  },
+  {
+    id: "job-complete",
+    shortId: "41DE",
+    name: "Loft still",
+    file: "loft_camera_03.blend",
+    status: "completed",
+    progress: 100,
+    frame: "Frame 48",
+    engine: "Cycles",
+    device: "OptiX",
+    version: "4.2.22",
+    created: "Yesterday",
+  },
+  {
+    id: "job-failed",
+    shortId: "90AA",
+    name: "Forest study",
+    file: "forest_v12.blend",
+    status: "failed",
+    progress: 36,
+    frame: "1–240",
+    engine: "Cycles",
+    device: "OptiX",
+    version: "4.1.1",
+    created: "2 days ago",
+  },
+];
+
+const logLines = [
+  ["09:41:12", "Scene loaded in 2.8s"],
+  ["09:41:13", "Cycles: using NVIDIA RTX 4090 (OptiX)"],
+  ["09:41:14", "Synchronizing object | Atrium_Glass_04"],
+  ["09:41:16", "Loading render kernels (may take a few minutes)"],
+  ["09:41:18", "Fra: 001 | Mem: 4.21G | Time: 00:00.82"],
+  ["09:41:20", "Path Tracing Sample 48 / 512"],
+];
+
+const FRAME_COUNT = 240;
+const FRAMES_PER_PAGE = 150;
+
+function getInitialTheme() {
+  const storedTheme = window.localStorage.getItem("render-node-theme");
+  if (storedTheme === "light" || storedTheme === "dark") return storedTheme;
+  return "dark";
+}
+
+function Icon({ name, size = 18 }) {
+  const common = {
+    width: size,
+    height: size,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.8,
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+    "aria-hidden": true,
+  };
+
+  const paths = {
+    chevron: <path d="m9 18 6-6-6-6" />,
+    down: <path d="m6 9 6 6 6-6" />,
+    play: <path d="m8 5 11 7-11 7Z" />,
+    stop: <rect x="7" y="7" width="10" height="10" rx="1" />,
+    layers: (
+      <>
+        <path d="m12 3-9 5 9 5 9-5-9-5Z" />
+        <path d="m3 12 9 5 9-5M3 16l9 5 9-5" />
+      </>
+    ),
+    gpu: (
+      <>
+        <rect x="5" y="6" width="14" height="12" rx="2" />
+        <path d="M9 10h6v4H9zM9 2v4m6-4v4M9 18v4m6-4v4M2 9h3m-3 6h3m14-6h3m-3 6h3" />
+      </>
+    ),
+    clock: (
+      <>
+        <circle cx="12" cy="12" r="9" />
+        <path d="M12 7v5l3 2" />
+      </>
+    ),
+    sun: (
+      <>
+        <circle cx="12" cy="12" r="4" />
+        <path d="M12 2v2m0 16v2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M2 12h2m16 0h2M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42" />
+      </>
+    ),
+    moon: <path d="M20 15.2A8.4 8.4 0 0 1 8.8 4 8.5 8.5 0 1 0 20 15.2Z" />,
+    file: (
+      <>
+        <path d="M6 2h8l4 4v16H6z" />
+        <path d="M14 2v5h5" />
+      </>
+    ),
+    image: (
+      <>
+        <rect x="3" y="4" width="18" height="16" rx="2" />
+        <circle cx="9" cy="10" r="2" />
+        <path d="m4 18 5-5 3 3 3-3 5 5" />
+      </>
+    ),
+    terminal: (
+      <>
+        <rect x="3" y="4" width="18" height="16" rx="2" />
+        <path d="m7 9 3 3-3 3m6 0h4" />
+      </>
+    ),
+    download: (
+      <>
+        <path d="M12 3v12m-5-5 5 5 5-5" />
+        <path d="M5 21h14" />
+      </>
+    ),
+    settings: (
+      <>
+        <circle cx="12" cy="12" r="3" />
+        <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3A1.7 1.7 0 0 0 10 3V2.8h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z" />
+      </>
+    ),
+    close: <path d="m6 6 12 12M18 6 6 18" />,
+    check: <path d="m5 12 4 4L19 6" />,
+    cube: (
+      <>
+        <path d="m12 2 9 5-9 5-9-5 9-5Z" />
+        <path d="m3 7 9 5v10l-9-5V7Zm18 0-9 5v10l9-5V7Z" />
+      </>
+    ),
+    more: (
+      <>
+        <circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" />
+        <circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" />
+        <circle cx="19" cy="12" r="1" fill="currentColor" stroke="none" />
+      </>
+    ),
+  };
+
+  return <svg {...common}>{paths[name]}</svg>;
+}
+
+function StatusBadge({ status }) {
+  const labels = {
+    ready: "Ready",
+    queued: "Queued",
+    rendering: "Rendering",
+    completed: "Completed",
+    failed: "Failed",
+    cancelled: "Cancelled",
+  };
+  return (
+    <span className={`status-badge status-${status}`}>
+      <span className="status-dot" />
+      {labels[status] ?? status}
+    </span>
+  );
+}
+
+function Header({ activeVersion, gpuCount, onThemeChange, onVersions, queuedCount, theme }) {
+  return (
+    <header className="app-header">
+      <div className="brand-block">
+        <div className="brand-mark" aria-hidden="true">
+          <span />
+          <span />
+          <span />
+        </div>
+        <div>
+          <div className="brand-name">Render Node</div>
+          <div className="brand-caption">BLENDER WORKSPACE</div>
+        </div>
+      </div>
+
+      <div className="header-controls">
+        <nav className="header-summary" aria-label="Node summary">
+          <span className="summary-pill summary-queue">
+            <Icon name="layers" size={15} />
+            <strong>{queuedCount}</strong> queued
+          </span>
+          <span className="summary-pill summary-gpu">
+            <Icon name="gpu" size={15} />
+            <strong>{gpuCount}</strong> GPUs ready
+          </span>
+          <span className="summary-pill summary-time">
+            <Icon name="clock" size={15} />
+            <strong>12m</strong> avg. frame
+          </span>
+        </nav>
+
+        <div className="header-actions">
+          <div className="connection-pill">
+            <span className="connection-dot" />
+            Node online
+            <span className="latency">12 ms</span>
+          </div>
+          <button className="version-button" onClick={onVersions} type="button">
+            <span className="version-icon">
+              <Icon name="cube" size={16} />
+            </span>
+            <span>
+              Blender {activeVersion ?? "—"}
+            </span>
+            <Icon name="down" size={15} />
+          </button>
+          <button className="icon-button" type="button" aria-label="Settings">
+            <Icon name="settings" />
+          </button>
+          <div className="theme-switch" role="group" aria-label="Color theme">
+            <button
+              className={theme === "light" ? "active" : ""}
+              onClick={() => onThemeChange("light")}
+              type="button"
+              aria-label="Light theme"
+              aria-pressed={theme === "light"}
+            >
+              <Icon name="sun" size={16} />
+            </button>
+            <button
+              className={theme === "dark" ? "active" : ""}
+              onClick={() => onThemeChange("dark")}
+              type="button"
+              aria-label="Dark theme"
+              aria-pressed={theme === "dark"}
+            >
+              <Icon name="moon" size={16} />
+            </button>
+          </div>
+        </div>
+      </div>
+    </header>
+  );
+}
+
+function SectionHeading({ eyebrow, title, action }) {
+  return (
+    <div className="section-heading">
+      <div>
+        <span className="eyebrow">{eyebrow}</span>
+        <h2>{title}</h2>
+      </div>
+      {action}
+    </div>
+  );
+}
+
+function JobSetup({ activeVersion, devices, job, onStart, onCancel }) {
+  const [engine, setEngine] = useState("Cycles");
+  const [device, setDevice] = useState("OptiX");
+  const [frameMode, setFrameMode] = useState("range");
+  const [selectedGpus, setSelectedGpus] = useState(null);
+  const [fileName, setFileName] = useState(job.file);
+  const fileInput = useRef(null);
+  const isRendering = job.status === "rendering";
+  const activeGpuIds = selectedGpus ?? devices.map((gpu) => gpu.id);
+
+  const toggleGpu = (gpuId) => {
+    setSelectedGpus((current) => {
+      const currentSelection = current ?? devices.map((gpu) => gpu.id);
+      return (
+        currentSelection.includes(gpuId)
+          ? currentSelection.filter((id) => id !== gpuId)
+          : [...currentSelection, gpuId]
+      );
+    });
+  };
+
+  return (
+    <section className="panel setup-panel">
+      <SectionHeading eyebrow="New render" title="Job setup" />
+
+      <div className="field-group">
+        <div className="field-label-row">
+          <label>Scene file</label>
+          <span>BLEND / ZIP</span>
+        </div>
+        <input
+          ref={fileInput}
+          type="file"
+          accept=".blend,.zip"
+          className="sr-only"
+          onChange={(event) => {
+            const nextFile = event.target.files?.[0];
+            if (nextFile) setFileName(nextFile.name);
+          }}
+        />
+        <button
+          className="file-drop"
+          onClick={() => fileInput.current?.click()}
+          type="button"
+        >
+          <span className="file-icon">
+            <Icon name="file" size={20} />
+          </span>
+          <span className="file-copy">
+            <strong>{fileName}</strong>
+            <small>182.4 MB · Ready to render</small>
+          </span>
+          <span className="replace-file">Replace</span>
+        </button>
+      </div>
+
+      <div className="two-column-fields">
+        <label className="select-field">
+          <span>Render engine</span>
+          <select value={engine} onChange={(event) => setEngine(event.target.value)}>
+            <option>Cycles</option>
+            <option>Eevee</option>
+            <option>Workbench</option>
+          </select>
+        </label>
+        <label className="select-field">
+          <span>Compute device</span>
+          <select value={device} onChange={(event) => setDevice(event.target.value)}>
+            <option>OptiX</option>
+            <option>CUDA</option>
+            <option>CPU</option>
+          </select>
+        </label>
+      </div>
+
+      <div className="field-group">
+        <div className="field-label-row">
+          <label>Frames</label>
+          <span>SCENE 1–240</span>
+        </div>
+        <div className="segmented-control" role="group" aria-label="Frame mode">
+          {["single", "range", "all"].map((mode) => (
+            <button
+              className={frameMode === mode ? "active" : ""}
+              key={mode}
+              onClick={() => setFrameMode(mode)}
+              type="button"
+            >
+              {mode === "single" ? "Single" : mode === "range" ? "Range" : "All"}
+            </button>
+          ))}
+        </div>
+        {frameMode === "range" && (
+          <div className="frame-range">
+            <label>
+              <span>Start</span>
+              <input defaultValue="1" inputMode="numeric" />
+            </label>
+            <span className="range-line" />
+            <label>
+              <span>End</span>
+              <input defaultValue="240" inputMode="numeric" />
+            </label>
+          </div>
+        )}
+        {frameMode === "single" && (
+          <div className="frame-range single-frame">
+            <label>
+              <span>Frame</span>
+              <input defaultValue="1" inputMode="numeric" />
+            </label>
+          </div>
+        )}
+      </div>
+
+      <div className="field-group gpu-field">
+        <div className="field-label-row">
+          <label>GPU allocation</label>
+          <span>{activeGpuIds.length} SELECTED</span>
+        </div>
+        <div className="gpu-list">
+          {devices.map((gpu) => {
+            const selected = activeGpuIds.includes(gpu.id);
+            return (
+              <button
+                className={`gpu-option ${selected ? "selected" : ""}`}
+                key={gpu.id}
+                onClick={() => toggleGpu(gpu.id)}
+                type="button"
+              >
+                <span className="gpu-check">
+                  {selected && <Icon name="check" size={13} />}
+                </span>
+                <span className="gpu-index">0{gpu.id}</span>
+                <span className="gpu-name">{gpu.name.replace("NVIDIA ", "")}</span>
+                <span className="gpu-memory">{gpu.memoryTotal} GB</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="active-runtime">
+        <span>
+          <Icon name="cube" size={15} />
+          Runtime
+        </span>
+        <strong>Blender {activeVersion}</strong>
+      </div>
+
+      <button
+        className={`primary-action ${isRendering ? "danger-action" : ""}`}
+        onClick={isRendering ? onCancel : onStart}
+        type="button"
+      >
+        <Icon name={isRendering ? "stop" : "play"} size={18} />
+        {isRendering ? "Cancel render" : "Start render"}
+        {!isRendering && <span>⌘ ↵</span>}
+      </button>
+    </section>
+  );
+}
+
+function RenderPreview({ job }) {
+  const previewTab = useUiStore((state) => state.previewTab);
+  const setPreviewTab = useUiStore((state) => state.setPreviewTab);
+  const isRendering = job.status === "rendering";
+  const hasOutput = job.status === "completed" || isRendering;
+  const shownProgress = isRendering ? job.progress : job.status === "completed" ? 100 : 0;
+
+  return (
+    <section className="panel preview-panel">
+      <div className="preview-header">
+        <div className="preview-tabs" role="tablist">
+          <button
+            className={previewTab === "preview" ? "active" : ""}
+            onClick={() => setPreviewTab("preview")}
+            role="tab"
+            type="button"
+          >
+            <Icon name="image" size={16} /> Preview
+          </button>
+          <button
+            className={previewTab === "log" ? "active" : ""}
+            onClick={() => setPreviewTab("log")}
+            role="tab"
+            type="button"
+          >
+            <Icon name="terminal" size={16} /> Live log
+          </button>
+        </div>
+        <div className="preview-meta">
+          <StatusBadge status={job.status} />
+          <button className="icon-button subtle" type="button" aria-label="More options">
+            <Icon name="more" />
+          </button>
+        </div>
+      </div>
+
+      {previewTab === "preview" ? (
+        <div className={`render-viewport ${hasOutput ? "has-output" : ""}`}>
+          <div className="viewport-grid" />
+          <div className="scene-glow scene-glow-left" />
+          <div className="scene-glow scene-glow-right" />
+          <div className="scene-platform">
+            <div className="scene-object object-back" />
+            <div className="scene-object object-main">
+              <div className="object-cutout" />
+            </div>
+            <div className="scene-object object-front" />
+            <div className="scene-sphere" />
+          </div>
+          {!hasOutput && (
+            <div className="preview-empty">
+              <span className="empty-icon"><Icon name="image" size={24} /></span>
+              <strong>Preview will appear here</strong>
+              <small>Start the ready job to run the interactive mock render.</small>
+            </div>
+          )}
+          {hasOutput && (
+            <>
+              <div className="viewport-topline">
+                <span>CAMERA 01</span>
+                <span>1920 × 1080 · 100%</span>
+              </div>
+              <div className="frame-chip">FRAME {String(Math.max(1, Math.round(shownProgress * 2.4))).padStart(3, "0")}</div>
+            </>
+          )}
+        </div>
+      ) : (
+        <div className="log-view" role="log" aria-label="Blender live log">
+          <div className="log-toolbar">
+            <span>blender.log</span>
+            <span>Following output</span>
+          </div>
+          <div className="log-lines">
+            {logLines.map(([time, line], index) => (
+              <div className={index === logLines.length - 1 ? "latest" : ""} key={`${time}-${line}`}>
+                <time>{time}</time>
+                <code>{line}</code>
+              </div>
+            ))}
+            <span className="log-caret" />
+          </div>
+        </div>
+      )}
+
+      <div className="render-progress-block">
+        <div className="render-progress-copy">
+          <div>
+            <span className="eyebrow">Current task</span>
+            <strong>{isRendering ? "Rendering frame 38 of 240" : job.status === "completed" ? "Render completed" : "Ready to start"}</strong>
+          </div>
+          <div className="progress-stats">
+            <span><small>SAMPLES</small>{isRendering ? "384 / 512" : "—"}</span>
+            <span><small>ELAPSED</small>{isRendering ? "06:42" : "—"}</span>
+            <b>{shownProgress}%</b>
+          </div>
+        </div>
+        <div className="progress-track" aria-label={`Render progress ${shownProgress}%`}>
+          <span style={{ width: `${shownProgress}%` }} />
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function JobQueue({ jobs, selectedJobId, onSelect }) {
+  return (
+    <section className="panel queue-panel">
+      <SectionHeading
+        eyebrow="Workspace"
+        title="Jobs"
+        action={<span className="queue-count">{jobs.length}</span>}
+      />
+      <div className="job-list">
+        {jobs.map((job) => (
+          <button
+            className={`job-row ${selectedJobId === job.id ? "selected" : ""}`}
+            key={job.id}
+            onClick={() => onSelect(job.id)}
+            type="button"
+          >
+            <span className="job-status-rail" data-status={job.status} />
+            <span className="job-main">
+              <span className="job-title-line">
+                <strong>{job.name}</strong>
+                <small>#{job.shortId}</small>
+              </span>
+              <span className="job-detail">{job.engine} · {job.device} · {job.frame}</span>
+              <span className="job-bottom-line">
+                <StatusBadge status={job.status} />
+                <small>{job.created}</small>
+              </span>
+              {job.status === "rendering" && (
+                <span className="job-mini-progress"><i style={{ width: `${job.progress}%` }} /></span>
+              )}
+            </span>
+            <Icon name="chevron" size={15} />
+          </button>
+        ))}
+      </div>
+      <button className="text-action" type="button">
+        View complete history <Icon name="chevron" size={14} />
+      </button>
+    </section>
+  );
+}
+
+function makeMetricHistory(current, seed) {
+  const offsets = [-13, -5, -9, 4, -2, 9, 3, 0];
+  return offsets.map((offset, index) => (
+    Math.max(0, Math.min(100, current + offset * (0.55 + seed * 0.08) + ((index + seed) % 3) * 2))
+  ));
+}
+
+function MetricChart({ chartId, history, tone }) {
+  const width = 240;
+  const height = 88;
+  const points = history.map((value, index) => ({
+    x: (index / (history.length - 1)) * width,
+    y: 8 + ((100 - value) / 100) * (height - 18),
+  }));
+  const linePath = points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(" ");
+  const areaPath = `${linePath} L ${width} ${height} L 0 ${height} Z`;
+  const color = `var(--${tone})`;
+
+  return (
+    <svg aria-hidden="true" className="metric-chart" preserveAspectRatio="none" viewBox={`0 0 ${width} ${height}`}>
+      <defs>
+        <linearGradient id={chartId} x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.38" />
+          <stop offset="100%" stopColor={color} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <path className="metric-area" d={areaPath} fill={`url(#${chartId})`} />
+      <path className="metric-line" d={linePath} stroke={color} />
+    </svg>
+  );
+}
+
+function MetricCard({ chartId, history, label, percent, tone, value }) {
+  return (
+    <article className="metric-item">
+      <div aria-label={`${label}: ${value}`} className="metric-ring" style={{ "--metric": percent, "--tone": `var(--${tone})` }}>
+        <div className="metric-ring-content">
+          <span>{label}</span>
+          <strong>{value}</strong>
+        </div>
+      </div>
+      <MetricChart chartId={chartId} history={history} tone={tone} />
+    </article>
+  );
+}
+
+function ResourceRow({ detail, kind, metrics, name }) {
+  const resourceKey = `${kind}-${name}`.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+  return (
+    <div className="resource-row">
+      <div className="resource-identity">
+        <span>{kind}</span>
+        <strong>{name}</strong>
+        <small>{detail}</small>
+      </div>
+      <div className="resource-metrics">
+        {metrics.map((metric, index) => (
+          <MetricCard chartId={`${resourceKey}-${index}`} key={metric.label} {...metric} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Metrics({ devices, processors }) {
+  const gpuRows = devices.map((gpu) => ({
+    detail: `${gpu.memoryTotal} GB VRAM`,
+    kind: `GPU ${String(gpu.id + 1).padStart(2, "0")}`,
+    name: gpu.name.replace("NVIDIA ", ""),
+    metrics: [
+      { label: "Load", value: `${gpu.utilization}%`, percent: gpu.utilization, tone: "blue", history: makeMetricHistory(gpu.utilization, gpu.id + 1) },
+      { label: "VRAM", value: `${gpu.memoryUsed} GB`, percent: (gpu.memoryUsed / gpu.memoryTotal) * 100, tone: "violet", history: makeMetricHistory((gpu.memoryUsed / gpu.memoryTotal) * 100, gpu.id + 2) },
+      { label: "Temp", value: `${gpu.temperature}°`, percent: gpu.temperature, tone: gpu.temperature < 80 ? "green" : "red", history: makeMetricHistory(gpu.temperature, gpu.id + 3) },
+    ],
+  }));
+  const cpuRows = processors.map((cpu) => ({
+    detail: `${cpu.cores} cores`,
+    kind: `CPU ${String(cpu.id + 1).padStart(2, "0")}`,
+    name: cpu.name,
+    metrics: [
+      { label: "Load", value: `${cpu.utilization}%`, percent: cpu.utilization, tone: "green", history: makeMetricHistory(cpu.utilization, cpu.id + 4) },
+      { label: "Memory", value: `${cpu.memoryUsed} GB`, percent: (cpu.memoryUsed / cpu.memoryTotal) * 100, tone: "orange", history: makeMetricHistory((cpu.memoryUsed / cpu.memoryTotal) * 100, cpu.id + 5) },
+      { label: "Temp", value: `${cpu.temperature}°`, percent: cpu.temperature, tone: cpu.temperature < 80 ? "green" : "red", history: makeMetricHistory(cpu.temperature, cpu.id + 6) },
+    ],
+  }));
+
+  return (
+    <section aria-label="Resource metrics" className="metrics-strip">
+      <div className="metrics-scroll" style={{ "--visible-resource-rows": Math.min(2, gpuRows.length + cpuRows.length || 1) }}>
+        {[...gpuRows, ...cpuRows].map((resource) => (
+          <ResourceRow key={`${resource.kind}-${resource.name}`} {...resource} />
+        ))}
+        {gpuRows.length + cpuRows.length === 0 && (
+          <div className="metrics-empty">No hardware metrics available</div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function FrameSequencePanel({ onClose }) {
+  const closeButton = useRef(null);
+  const [page, setPage] = useState(1);
+  const framesQuery = useQuery({
+    queryKey: ["frames", page, FRAMES_PER_PAGE],
+    queryFn: () => mockApi.getFrames({ page, pageSize: FRAMES_PER_PAGE }),
+  });
+  const frames = framesQuery.data?.items ?? [];
+  const totalFrames = framesQuery.data?.total ?? FRAME_COUNT;
+  const pageCount = Math.ceil(totalFrames / FRAMES_PER_PAGE);
+  const pageStart = (page - 1) * FRAMES_PER_PAGE;
+  const pageEnd = Math.min(pageStart + FRAMES_PER_PAGE, totalFrames);
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") onClose();
+    };
+
+    document.body.style.overflow = "hidden";
+    document.addEventListener("keydown", onKeyDown);
+    closeButton.current?.focus();
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [onClose]);
+
+  return (
+    <div className="modal-backdrop frames-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        aria-describedby="frames-description"
+        aria-labelledby="frames-title"
+        aria-modal="true"
+        className="frames-modal"
+        onMouseDown={(event) => event.stopPropagation()}
+        role="dialog"
+      >
+        <div className="frames-modal-header">
+          <div>
+            <span className="eyebrow">Render sequence</span>
+            <h2 id="frames-title">Frames 1–240</h2>
+            <p id="frames-description">240 PNG files · 2 pages</p>
+          </div>
+          <div className="frames-modal-actions">
+            <button className="sequence-download" type="button" aria-label="Download all frames as ZIP">
+              <Icon name="download" size={16} /> Download ZIP
+            </button>
+            <button ref={closeButton} className="icon-button" onClick={onClose} type="button" aria-label="Close frame sequence">
+              <Icon name="close" />
+            </button>
+          </div>
+        </div>
+
+        <ol aria-busy={framesQuery.isPending} className="frame-list" key={page}>
+          {framesQuery.isPending && <li className="frame-list-loading">Loading frames…</li>}
+          {frames.map((frame) => (
+            <li className="frame-row" key={frame.frame}>
+              <strong>{frame.name}</strong>
+              <button type="button" aria-label={`Download ${frame.name}`}>
+                <Icon name="download" size={16} />
+              </button>
+            </li>
+          ))}
+        </ol>
+
+        <div className="frame-pagination">
+          <span>{pageStart + 1}–{pageEnd} of {totalFrames}</span>
+          <div>
+            <button disabled={page === 1 || framesQuery.isFetching} onClick={() => setPage((current) => current - 1)} type="button">Previous</button>
+            <strong>Page {page} of {pageCount}</strong>
+            <button disabled={page === pageCount || framesQuery.isFetching} onClick={() => setPage((current) => current + 1)} type="button">Next</button>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function Artifacts() {
+  const [framesOpen, setFramesOpen] = useState(false);
+
+  return (
+    <>
+      <section className="panel artifacts-panel">
+        <SectionHeading eyebrow="Selected job" title="Artifacts" />
+        <div className="artifact-list">
+          <button
+            aria-haspopup="dialog"
+            aria-label="Open frame sequence, 240 frames"
+            className="artifact-row artifact-sequence-trigger"
+            onClick={() => setFramesOpen(true)}
+            type="button"
+          >
+            <span className="artifact-kind">SEQ</span>
+            <span><strong>frames_0001–0240</strong><small>240 frames · 2 pages</small></span>
+            <span className="artifact-open-icon"><Icon name="chevron" size={16} /></span>
+          </button>
+          <div className="artifact-row">
+            <span className="artifact-kind">LOG</span>
+            <span><strong>blender.log</strong><small>284 KB</small></span>
+            <button type="button" aria-label="Download blender.log"><Icon name="download" size={16} /></button>
+          </div>
+        </div>
+      </section>
+      {framesOpen && <FrameSequencePanel onClose={() => setFramesOpen(false)} />}
+    </>
+  );
+}
+
+function VersionPanel({ versions, blocked, onClose, onInstall, onActivate, installing, activating }) {
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        aria-labelledby="versions-title"
+        aria-modal="true"
+        className="version-modal"
+        onMouseDown={(event) => event.stopPropagation()}
+        role="dialog"
+      >
+        <div className="modal-header">
+          <div>
+            <span className="eyebrow">Runtime manager</span>
+            <h2 id="versions-title">Blender versions</h2>
+            <p>One installed version is active for every new render job.</p>
+          </div>
+          <button className="icon-button" onClick={onClose} type="button" aria-label="Close version manager">
+            <Icon name="close" />
+          </button>
+        </div>
+
+        {blocked && (
+          <div className="modal-notice">
+            <span className="notice-pulse" />
+            Finish or cancel the active render before switching versions.
+          </div>
+        )}
+
+        <div className="version-list">
+          {versions.map((version) => (
+            <article className={`version-row ${version.active ? "active" : ""}`} key={version.version}>
+              <span className="version-cube"><Icon name="cube" size={20} /></span>
+              <div className="version-info">
+                <div>
+                  <strong>Blender {version.version}</strong>
+                  <span className={`channel-tag ${version.channel === "LTS" ? "lts" : ""}`}>{version.channel}</span>
+                </div>
+                <small>{version.source === "bundled" ? "Included in image" : version.installed ? "Downloaded from blender.org" : `Official archive · ${version.size}`}</small>
+              </div>
+              <div className="version-flags">
+                {version.supported ? <span className="supported"><Icon name="check" size={12} /> Supported</span> : <span>Untested</span>}
+              </div>
+              <div className="version-action">
+                {version.active ? (
+                  <span className="active-label"><span /> Active</span>
+                ) : version.installed ? (
+                  <button
+                    disabled={blocked || activating}
+                    onClick={() => onActivate(version.version)}
+                    type="button"
+                  >
+                    {activating ? "Switching…" : "Make active"}
+                  </button>
+                ) : (
+                  <button disabled={installing} onClick={() => onInstall(version.version)} type="button">
+                    {installing ? "Installing…" : "Install"}
+                  </button>
+                )}
+              </div>
+            </article>
+          ))}
+        </div>
+        <div className="modal-footer">
+          <span>Downloads are verified with the official SHA-256 before installation.</span>
+          <a href="https://download.blender.org/release/" target="_blank" rel="noreferrer">Official archive <Icon name="chevron" size={13} /></a>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+export default function App() {
+  const queryClient = useQueryClient();
+  const versionPanelOpen = useUiStore((state) => state.versionPanelOpen);
+  const setVersionPanelOpen = useUiStore((state) => state.setVersionPanelOpen);
+  const selectedJobId = useUiStore((state) => state.selectedJobId);
+  const setSelectedJobId = useUiStore((state) => state.setSelectedJobId);
+  const [jobs, setJobs] = useState(initialJobs);
+  const [theme, setTheme] = useState(getInitialTheme);
+
+  const versionsQuery = useQuery({ queryKey: ["versions"], queryFn: mockApi.getVersions });
+  const devicesQuery = useQuery({ queryKey: ["devices"], queryFn: mockApi.getDevices });
+  const processorsQuery = useQuery({ queryKey: ["processors"], queryFn: mockApi.getProcessors });
+  const installMutation = useMutation({
+    mutationFn: mockApi.installVersion,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["versions"] }),
+  });
+  const activateMutation = useMutation({
+    mutationFn: mockApi.activateVersion,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["versions"] }),
+  });
+
+  const activeVersion = versionsQuery.data?.find((version) => version.active)?.version ?? "4.5.11";
+  const liveJob = jobs.find((job) => job.id === "job-live") ?? jobs[0];
+  const selectedJob = jobs.find((job) => job.id === selectedJobId) ?? liveJob;
+  const isRendering = jobs.some((job) => job.status === "rendering");
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    window.localStorage.setItem("render-node-theme", theme);
+  }, [theme]);
+
+  useEffect(() => {
+    if (!isRendering) return undefined;
+    const interval = window.setInterval(() => {
+      setJobs((currentJobs) =>
+        currentJobs.map((job) => {
+          if (job.status !== "rendering") return job;
+          const nextProgress = Math.min(100, job.progress + 3);
+          return {
+            ...job,
+            progress: nextProgress,
+            status: nextProgress >= 100 ? "completed" : "rendering",
+            created: nextProgress >= 100 ? "Completed now" : job.created,
+          };
+        }),
+      );
+    }, 650);
+    return () => window.clearInterval(interval);
+  }, [isRendering]);
+
+  const displayJob = useMemo(() => {
+    if (selectedJob.id === "job-live") return liveJob;
+    return selectedJob;
+  }, [liveJob, selectedJob]);
+
+  const startRender = () => {
+    setSelectedJobId("job-live");
+    setJobs((currentJobs) =>
+      currentJobs.map((job) =>
+        job.id === "job-live"
+          ? { ...job, status: "rendering", progress: 12, created: "Running now", version: activeVersion }
+          : job.id === "job-queued" && job.status === "ready"
+            ? { ...job, status: "queued" }
+            : job,
+      ),
+    );
+  };
+
+  const cancelRender = () => {
+    setJobs((currentJobs) =>
+      currentJobs.map((job) =>
+        job.id === "job-live" && job.status === "rendering"
+          ? { ...job, status: "cancelled", created: "Cancelled now" }
+          : job.id === "job-queued" && job.status === "queued"
+            ? { ...job, status: "ready" }
+            : job,
+      ),
+    );
+  };
+
+  return (
+    <div className="app-shell">
+      <Header
+        activeVersion={activeVersion}
+        gpuCount={(devicesQuery.data ?? []).filter((device) => device.available).length}
+        onThemeChange={setTheme}
+        onVersions={() => setVersionPanelOpen(true)}
+        queuedCount={jobs.filter((job) => job.status === "queued").length}
+        theme={theme}
+      />
+
+      <main>
+        <div className="dashboard-grid">
+          <JobSetup
+            activeVersion={activeVersion}
+            devices={devicesQuery.data ?? []}
+            job={liveJob}
+            onCancel={cancelRender}
+            onStart={startRender}
+          />
+          <RenderPreview job={displayJob} />
+          <div className="right-rail">
+            <JobQueue jobs={jobs} onSelect={setSelectedJobId} selectedJobId={selectedJobId} />
+            <Artifacts />
+          </div>
+          <Metrics devices={devicesQuery.data ?? []} processors={processorsQuery.data ?? []} />
+        </div>
+      </main>
+
+      <footer className="app-footer">
+        <span>Render Node prototype · Mock data</span>
+        <span>API offline <i /> UI sandbox</span>
+      </footer>
+
+      {versionPanelOpen && (
+        <VersionPanel
+          activating={activateMutation.isPending}
+          blocked={isRendering || jobs.some((job) => job.status === "queued")}
+          installing={installMutation.isPending}
+          onActivate={(version) => activateMutation.mutate(version)}
+          onClose={() => setVersionPanelOpen(false)}
+          onInstall={(version) => installMutation.mutate(version)}
+          versions={versionsQuery.data ?? []}
+        />
+      )}
+    </div>
+  );
+}

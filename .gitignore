@@ -1,0 +1,40 @@
+# Reference project: used only for study, not part of Render Node.
+/проект пример/
+
+# Local instructions for coding agents.
+/AGENTS.md
+/PYTHON_PROJECT_ARCHITECTURE.md
+/UI_REQUIREMENTS.md
+
+# Frontend dependencies and generated output.
+/frontend/node_modules/
+/frontend/dist/
+/frontend/test-results/
+
+# Python caches, environments, tests, and coverage.
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local configuration and secrets.
+.env
+.env.*
+!.env.example
+
+# Runtime data.
+*.log
+*.db
+*.sqlite
+*.sqlite3
+
+# Editor and operating-system files.
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

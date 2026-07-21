@@ -1,0 +1,39 @@
+{
+  "name": "Python 3.13 + Codex + Gemini (с uv)",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "."
+  },
+
+  "features": {
+    "ghcr.io/devcontainers/features/sshd:1": { "version": "latest" },
+    "ghcr.io/devcontainers/features/node:1": { "version": "22" }
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-toolsai.jupyter",
+        "ms-toolsai.jupyter-keymap",
+        "ms-toolsai.jupyter-renderers",
+        "charliermarsh.ruff",
+        "kevinrose.vsc-python-indent",
+        "openai.chatgpt",
+        "Google.geminicodeassist"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/home/vscode/.venv/bin/python",
+        "editor.formatOnSave": true,
+        "python.testing.pytestEnabled": true
+      }
+    }
+  },
+
+  // Установка пакетов из requirements.txt через uv (очень быстро)
+  "postCreateCommand": "uv pip install --upgrade pip uv && uv pip install -r requirements.txt || echo 'requirements.txt не найден — ок'",
+
+  "forwardPorts": [5173, 8888],
+  "remoteUser": "vscode"
+}
