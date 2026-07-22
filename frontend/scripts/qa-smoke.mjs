@@ -81,12 +81,54 @@ try {
   assert(await desktop.locator("html[data-theme='light']").count() === 1, "Selected theme was not restored after reload");
   await desktop.getByRole("button", { name: "Dark theme" }).click();
   assert(await desktop.locator("html[data-theme='dark']").count() === 1, "Dark theme did not reactivate");
+
+  for (const passiveHeaderItem of [desktop.locator(".summary-queue"), desktop.locator(".connection-pill")]) {
+    const backgroundBeforeHover = await passiveHeaderItem.evaluate((element) => getComputedStyle(element).background);
+    await passiveHeaderItem.hover();
+    const backgroundAfterHover = await passiveHeaderItem.evaluate((element) => getComputedStyle(element).background);
+    assert(backgroundAfterHover === backgroundBeforeHover, "A non-interactive header item has a hover highlight");
+  }
+
+  const engineDropdown = desktop.getByRole("button", { name: "Render engine: Cycles" });
+  assert(await engineDropdown.evaluate((element) => getComputedStyle(element).borderTopWidth === "0px"), "Render engine dropdown still has a border");
+  await engineDropdown.click();
+  const engineMenu = desktop.getByRole("listbox", { name: "Render engine" });
+  assert(await engineMenu.isVisible(), "Render engine dropdown did not open");
+  const dropdownMotion = await engineMenu.evaluate((element) => ({
+    backdropFilter: getComputedStyle(element).backdropFilter,
+    transitionProperty: getComputedStyle(element).transitionProperty,
+  }));
+  assert(dropdownMotion.backdropFilter === "none", "Dropdown uses an expensive backdrop filter");
+  assert(dropdownMotion.transitionProperty.includes("opacity") && dropdownMotion.transitionProperty.includes("transform"), "Dropdown is missing compositor-friendly motion");
+  await engineMenu.getByRole("option", { name: "Eevee" }).click();
+  assert(await desktop.getByRole("button", { name: "Render engine: Eevee" }).isVisible(), "Render engine selection did not update");
+
+  const deviceDropdown = desktop.getByRole("button", { name: "Compute device: OptiX" });
+  assert(await deviceDropdown.evaluate((element) => getComputedStyle(element).borderTopWidth === "0px"), "Compute device dropdown still has a border");
+  await deviceDropdown.click();
+  await desktop.getByRole("listbox", { name: "Compute device" }).getByRole("option", { name: "CUDA" }).click();
+  assert(await desktop.getByRole("button", { name: "Compute device: CUDA" }).isVisible(), "Compute device selection did not update");
+
+  const frameMode = desktop.getByRole("group", { name: "Frame mode" });
+  const rangeIndicatorTransform = await frameMode.evaluate((element) => getComputedStyle(element, "::before").transform);
+  await frameMode.getByRole("button", { name: "Single" }).click();
+  await desktop.waitForTimeout(200);
+  const singleIndicatorTransform = await frameMode.evaluate((element) => getComputedStyle(element, "::before").transform);
+  assert(singleIndicatorTransform !== rangeIndicatorTransform, "Frame mode indicator did not move smoothly");
+  assert(await frameMode.getByRole("button", { name: "Single" }).getAttribute("aria-pressed") === "true", "Single frame mode is not selected");
+  await frameMode.getByRole("button", { name: "Range" }).click();
+
   const gpuOptions = desktop.locator(".gpu-option");
   assert((await gpuOptions.count()) > 0, "No GPU options are visible");
   assert((await desktop.locator(".gpu-option.selected").count()) === (await gpuOptions.count()), "Not all available GPUs are selected by default");
 
   const dashboardBox = await desktop.locator(".dashboard-grid").boundingBox();
+  const headerControlsBox = await desktop.locator(".header-controls").boundingBox();
   const metricsBox = await desktop.locator(".metrics-strip").boundingBox();
+  assert(
+    dashboardBox && headerControlsBox && Math.abs(headerControlsBox.x + headerControlsBox.width - dashboardBox.x - dashboardBox.width) <= 1,
+    "Desktop header controls and dashboard do not share the same right edge",
+  );
   assert(dashboardBox && metricsBox && metricsBox.width >= dashboardBox.width - 2, "Desktop metrics do not span the dashboard width");
   assert((await desktop.locator(".resource-row").count()) === 3, "Metrics do not render one row per CPU and GPU");
   const metricComposition = await desktop.locator(".metric-item").first().evaluate((card) => {
@@ -108,8 +150,10 @@ try {
   await desktop.getByRole("button", { name: "Open frame sequence, 240 frames" }).click();
   const desktopFramesModal = desktop.getByRole("dialog", { name: "Frames 1–240" });
   assert(await desktopFramesModal.isVisible(), "Frame sequence popup did not open on desktop");
-  await desktopFramesModal.getByText("frame_0150.png", { exact: true }).waitFor();
-  assert((await desktopFramesModal.locator(".frame-row").count()) === 150, "The first frame page does not contain 150 frames");
+  await desktopFramesModal.getByText("frame_0050.png", { exact: true }).waitFor();
+  assert((await desktopFramesModal.locator(".frame-row").count()) === 50, "The first frame page does not contain 50 frames");
+  assert(await desktopFramesModal.getByText("240 PNG files · 5 pages", { exact: true }).isVisible(), "Frame sequence page count is incorrect");
+  assert(await desktopFramesModal.getByText("1–50 of 240", { exact: true }).isVisible(), "The first frame range is incorrect");
   assert((await desktopFramesModal.locator("img").count()) === 0, "Frame popup unexpectedly loads previews");
   assert(await desktopFramesModal.getByRole("button", { name: "Download all frames as ZIP" }).isVisible(), "Sequence ZIP action is not visible");
   const desktopFrameList = desktopFramesModal.locator(".frame-list");
@@ -119,12 +163,20 @@ try {
   }));
   assert(desktopFrameListFit.scrollHeight > desktopFrameListFit.clientHeight, "Long frame sequence does not scroll inside the popup");
   await desktopFramesModal.getByRole("button", { name: "Next" }).click();
-  await desktopFramesModal.getByText("frame_0151.png", { exact: true }).waitFor();
-  assert((await desktopFramesModal.locator(".frame-row").count()) === 90, "The final frame page does not contain the remaining 90 frames");
+  await desktopFramesModal.getByText("frame_0051.png", { exact: true }).waitFor();
+  assert((await desktopFramesModal.locator(".frame-row").count()) === 50, "The second frame page does not contain 50 frames");
+  for (const firstFrame of [101, 151, 201]) {
+    await desktopFramesModal.getByRole("button", { name: "Next" }).click();
+    await desktopFramesModal.getByText(`frame_${String(firstFrame).padStart(4, "0")}.png`, { exact: true }).waitFor();
+  }
+  assert((await desktopFramesModal.locator(".frame-row").count()) === 40, "The final frame page does not contain the remaining 40 frames");
+  assert(await desktopFramesModal.getByText("201–240 of 240", { exact: true }).isVisible(), "The final frame range is incorrect");
   await desktopFramesModal.locator(".frame-row").last().scrollIntoViewIfNeeded();
-  assert(await desktopFramesModal.getByText("frame_0240.png", { exact: true }).isVisible(), "The final frame is missing from page two");
-  await desktopFramesModal.getByRole("button", { name: "Previous" }).click();
-  await desktopFramesModal.getByText("frame_0001.png", { exact: true }).waitFor();
+  assert(await desktopFramesModal.getByText("frame_0240.png", { exact: true }).isVisible(), "The final frame is missing from page five");
+  for (const firstFrame of [151, 101, 51, 1]) {
+    await desktopFramesModal.getByRole("button", { name: "Previous" }).click();
+    await desktopFramesModal.getByText(`frame_${String(firstFrame).padStart(4, "0")}.png`, { exact: true }).waitFor();
+  }
   assert(await desktopFramesModal.getByText("frame_0001.png", { exact: true }).isVisible(), "Returning to the first frame page failed");
   await desktop.screenshot({ path: path.join(outputDirectory, "desktop-frames.png"), scale: "css" });
   await desktop.keyboard.press("Escape");
@@ -143,9 +195,28 @@ try {
   assert(await desktop.getByRole("button", { name: /Cancel render/ }).isVisible(), "Cancel action is not available during render");
   assert(await headerSummary.getByText("1 queued", { exact: true }).isVisible(), "Queued job count does not update after starting a render");
 
-  await desktop.getByRole("tab", { name: /Live log/ }).click();
-  assert(await desktop.getByRole("log", { name: "Blender live log" }).isVisible(), "Live log did not open");
-  await desktop.getByRole("tab", { name: /Preview/ }).click();
+  assert((await desktop.getByRole("tab", { name: /Live log/ }).count()) === 0, "Live log tab was not removed");
+  assert((await desktop.getByRole("button", { name: "More options" }).count()) === 0, "Preview overflow placeholder was not removed");
+  assert(await desktop.getByRole("log", { name: "Blender live log" }).isVisible(), "Live log overlay is not visible on the rendered frame");
+  assert((await desktop.getByRole("button", { name: /Download frame/ }).count()) === 0, "Incomplete frame exposes a download action");
+  const frameChipBox = await desktop.locator(".frame-chip").boundingBox();
+  const frameActionsBox = await desktop.locator(".preview-frame-actions").boundingBox();
+  assert(frameChipBox && frameActionsBox && frameChipBox.x < frameActionsBox.x, "Frame number is not positioned to the left of preview actions");
+
+  await desktop.getByRole("button", { name: /Open frame .* in full resolution/ }).click();
+  const fullFrameDialog = desktop.getByRole("dialog", { name: /Frame .* full resolution/ });
+  assert(await fullFrameDialog.isVisible(), "Full resolution frame dialog did not open");
+  const fullFrameBox = await fullFrameDialog.boundingBox();
+  assert(
+    fullFrameBox && fullFrameBox.width >= 1600 * 0.65 && fullFrameBox.width <= 1600 * 0.72
+      && fullFrameBox.height >= 900 * 0.65 && fullFrameBox.height <= 900 * 0.72,
+    "Full resolution frame dialog does not use approximately 70% of the desktop viewport",
+  );
+  await fullFrameDialog.getByRole("button", { name: "Close full resolution frame" }).click();
+  await fullFrameDialog.waitFor({ state: "hidden" });
+
+  await desktop.locator(".job-row").filter({ hasText: "Loft still" }).click();
+  assert(await desktop.getByRole("button", { name: /Download frame/ }).isVisible(), "Completed frame has no download action");
   await desktop.screenshot({ path: path.join(outputDirectory, "desktop-rendering.png"), scale: "css" });
 
   const desktopFit = await desktop.evaluate(() => ({
@@ -210,6 +281,7 @@ try {
       viewportHeight: window.innerHeight,
       headerOrder: brand.left < headerSummary.left && headerSummary.left < headerActions.left,
       headerRightGap: header.right - headerControls.right,
+      headerDashboardRightDelta: Math.abs(headerControls.right - dashboard.right),
       themeIsLast: Math.abs(themeSwitch.right - headerActions.right) <= 1,
       pageWidth: document.documentElement.scrollWidth,
       pageHeight: document.documentElement.scrollHeight,
@@ -241,6 +313,7 @@ try {
   assert(ultrawideLayout.pageWidth <= ultrawideLayout.viewportWidth, "Ultrawide page has horizontal overflow");
   assert(ultrawideLayout.headerOrder, "Header controls have an unexpected order");
   assert(ultrawideLayout.headerRightGap <= 49, "Header controls are not grouped on the right on an ultrawide screen");
+  assert(ultrawideLayout.headerDashboardRightDelta <= 1, "Header controls and dashboard do not share the same right edge");
   assert(ultrawideLayout.themeIsLast, "Theme switch is not positioned after Settings");
   assert(ultrawideLayout.mainWidth >= ultrawideLayout.viewportWidth * 0.95, "Ultrawide main content does not use the available width");
   assert(ultrawideLayout.dashboardWidth >= ultrawideLayout.viewportWidth * 0.95, "Ultrawide dashboard does not stretch with the screen");
@@ -289,11 +362,24 @@ try {
   assert(await mobile.locator(".header-summary").isHidden(), "Mobile header summary should be hidden");
   assert(await mobile.getByRole("group", { name: "Color theme" }).isVisible(), "Mobile theme switch is not visible");
 
+  await mobile.getByRole("button", { name: /Start render/ }).tap();
+  await mobile.getByRole("button", { name: /Open frame .* in full resolution/ }).tap();
+  const mobileFullFrameDialog = mobile.getByRole("dialog", { name: /Frame .* full resolution/ });
+  assert(await mobileFullFrameDialog.isVisible(), "Full resolution frame dialog did not open on mobile");
+  const mobileFullFrameBox = await mobileFullFrameDialog.boundingBox();
+  assert(
+    mobileFullFrameBox && mobileFullFrameBox.x >= 0 && mobileFullFrameBox.x + mobileFullFrameBox.width <= 390
+      && mobileFullFrameBox.width >= 360,
+    "Mobile full resolution frame dialog is not adaptively fitted to the viewport",
+  );
+  await mobileFullFrameDialog.getByRole("button", { name: "Close full resolution frame" }).tap();
+  await mobile.getByRole("button", { name: /Cancel render/ }).tap();
+
   await mobile.getByRole("button", { name: "Open frame sequence, 240 frames" }).tap();
   const mobileFramesModal = mobile.getByRole("dialog", { name: "Frames 1–240" });
   assert(await mobileFramesModal.isVisible(), "Frame sequence popup did not open after a mobile tap");
-  await mobileFramesModal.getByText("frame_0150.png", { exact: true }).waitFor();
-  assert((await mobileFramesModal.locator(".frame-row").count()) === 150, "Mobile frame page does not contain 150 frames");
+  await mobileFramesModal.getByText("frame_0050.png", { exact: true }).waitFor();
+  assert((await mobileFramesModal.locator(".frame-row").count()) === 50, "Mobile frame page does not contain 50 frames");
   await mobile.waitForTimeout(220);
   const mobileFramesBox = await mobileFramesModal.boundingBox();
   assert(
@@ -301,12 +387,19 @@ try {
     "Mobile frame sequence popup extends beyond the viewport",
   );
   await mobileFramesModal.getByRole("button", { name: "Next" }).tap();
-  await mobileFramesModal.getByText("frame_0151.png", { exact: true }).waitFor();
-  assert((await mobileFramesModal.locator(".frame-row").count()) === 90, "Mobile final frame page does not contain the remaining 90 frames");
+  await mobileFramesModal.getByText("frame_0051.png", { exact: true }).waitFor();
+  assert((await mobileFramesModal.locator(".frame-row").count()) === 50, "Mobile second frame page does not contain 50 frames");
+  for (const firstFrame of [101, 151, 201]) {
+    await mobileFramesModal.getByRole("button", { name: "Next" }).tap();
+    await mobileFramesModal.getByText(`frame_${String(firstFrame).padStart(4, "0")}.png`, { exact: true }).waitFor();
+  }
+  assert((await mobileFramesModal.locator(".frame-row").count()) === 40, "Mobile final frame page does not contain the remaining 40 frames");
   await mobileFramesModal.locator(".frame-row").last().scrollIntoViewIfNeeded();
   assert(await mobileFramesModal.getByText("frame_0240.png", { exact: true }).isVisible(), "The final paged frame is not reachable on mobile");
-  await mobileFramesModal.getByRole("button", { name: "Previous" }).tap();
-  await mobileFramesModal.getByText("frame_0001.png", { exact: true }).waitFor();
+  for (const firstFrame of [151, 101, 51, 1]) {
+    await mobileFramesModal.getByRole("button", { name: "Previous" }).tap();
+    await mobileFramesModal.getByText(`frame_${String(firstFrame).padStart(4, "0")}.png`, { exact: true }).waitFor();
+  }
   assert(await mobileFramesModal.getByText("frame_0001.png", { exact: true }).isVisible(), "Returning to mobile frame page one failed");
   await mobile.waitForTimeout(220);
   await mobile.screenshot({ path: path.join(outputDirectory, "mobile-frames.png"), scale: "css" });
@@ -317,6 +410,10 @@ try {
   const mobileFit = await mobile.evaluate(() => ({
     width: document.documentElement.clientWidth,
     scrollWidth: document.documentElement.scrollWidth,
+    headerDashboardRightDelta: Math.abs(
+      document.querySelector(".header-controls").getBoundingClientRect().right
+        - document.querySelector(".dashboard-grid").getBoundingClientRect().right,
+    ),
     metricClientWidth: document.querySelector(".metrics-scroll").clientWidth,
     metricScrollWidth: document.querySelector(".metrics-scroll").scrollWidth,
     metricClientHeight: document.querySelector(".metrics-scroll").clientHeight,
@@ -328,6 +425,7 @@ try {
     }),
   }));
   assert(mobileFit.scrollWidth <= mobileFit.width, "Mobile page has horizontal overflow");
+  assert(mobileFit.headerDashboardRightDelta <= 1, "Mobile header controls and dashboard do not share the same right edge");
   assert(mobileFit.metricScrollWidth <= mobileFit.metricClientWidth, "Mobile metrics have horizontal overflow");
   assert(mobileFit.resourceRows === 3, "Mobile metrics lost CPU or GPU rows");
   assert(mobileFit.metricScrollHeight > mobileFit.metricClientHeight, "Additional mobile hardware rows do not scroll inside the metrics panel");

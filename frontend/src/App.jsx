@@ -68,7 +68,10 @@ const logLines = [
 ];
 
 const FRAME_COUNT = 240;
-const FRAMES_PER_PAGE = 150;
+const FRAMES_PER_PAGE = 50;
+const COMPUTE_DEVICES = ["OptiX", "CUDA", "CPU"];
+const FRAME_MODES = ["single", "range", "all"];
+const RENDER_ENGINES = ["Cycles", "Eevee", "Workbench"];
 
 function getInitialTheme() {
   const storedTheme = window.localStorage.getItem("render-node-theme");
@@ -132,12 +135,6 @@ function Icon({ name, size = 18 }) {
         <path d="m4 18 5-5 3 3 3-3 5 5" />
       </>
     ),
-    terminal: (
-      <>
-        <rect x="3" y="4" width="18" height="16" rx="2" />
-        <path d="m7 9 3 3-3 3m6 0h4" />
-      </>
-    ),
     download: (
       <>
         <path d="M12 3v12m-5-5 5 5 5-5" />
@@ -152,17 +149,11 @@ function Icon({ name, size = 18 }) {
     ),
     close: <path d="m6 6 12 12M18 6 6 18" />,
     check: <path d="m5 12 4 4L19 6" />,
+    expand: <path d="M8 3H3v5m13-5h5v5M8 21H3v-5m13 5h5v-5" />,
     cube: (
       <>
         <path d="m12 2 9 5-9 5-9-5 9-5Z" />
         <path d="m3 7 9 5v10l-9-5V7Zm18 0-9 5v10l9-5V7Z" />
-      </>
-    ),
-    more: (
-      <>
-        <circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" />
-        <circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" />
-        <circle cx="19" cy="12" r="1" fill="currentColor" stroke="none" />
       </>
     ),
   };
@@ -274,6 +265,117 @@ function SectionHeading({ eyebrow, title, action }) {
   );
 }
 
+function DropdownField({ label, onChange, options, value }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+  const triggerRef = useRef(null);
+  const optionRefs = useRef([]);
+  const fieldId = `dropdown-${label.toLowerCase().replace(/\s+/g, "-")}`;
+  const selectedIndex = Math.max(0, options.indexOf(value));
+
+  useEffect(() => {
+    if (!open) return undefined;
+
+    const closeOnOutsidePress = (event) => {
+      if (!rootRef.current?.contains(event.target)) setOpen(false);
+    };
+    const closeOnEscape = (event) => {
+      if (event.key !== "Escape") return;
+      setOpen(false);
+      triggerRef.current?.focus();
+    };
+
+    document.addEventListener("pointerdown", closeOnOutsidePress);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePress);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  const focusOption = (index) => {
+    const nextIndex = (index + options.length) % options.length;
+    optionRefs.current[nextIndex]?.focus();
+  };
+
+  const openWithKeyboard = (event) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    event.preventDefault();
+    setOpen(true);
+    window.requestAnimationFrame(() => {
+      focusOption(event.key === "ArrowDown" ? selectedIndex : selectedIndex - 1);
+    });
+  };
+
+  const handleOptionKeyDown = (event, index) => {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      focusOption(index + (event.key === "ArrowDown" ? 1 : -1));
+    } else if (event.key === "Home" || event.key === "End") {
+      event.preventDefault();
+      focusOption(event.key === "Home" ? 0 : options.length - 1);
+    }
+  };
+
+  const selectOption = (option) => {
+    onChange(option);
+    setOpen(false);
+    triggerRef.current?.focus();
+  };
+
+  return (
+    <div
+      className={`select-field dropdown-field ${open ? "open" : ""}`}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
+      }}
+      ref={rootRef}
+    >
+      <span id={`${fieldId}-label`}>{label}</span>
+      <div className="dropdown-shell">
+        <button
+          aria-controls={`${fieldId}-menu`}
+          aria-expanded={open}
+          aria-haspopup="listbox"
+          aria-label={`${label}: ${value}`}
+          className="dropdown-trigger"
+          onClick={() => setOpen((current) => !current)}
+          onKeyDown={openWithKeyboard}
+          ref={triggerRef}
+          type="button"
+        >
+          <span>{value}</span>
+          <span className="dropdown-chevron"><Icon name="down" size={15} /></span>
+        </button>
+        <div
+          aria-hidden={!open}
+          aria-labelledby={`${fieldId}-label`}
+          className="dropdown-menu"
+          id={`${fieldId}-menu`}
+          role="listbox"
+        >
+          {options.map((option, index) => (
+            <button
+              aria-selected={option === value}
+              className={`dropdown-option ${option === value ? "selected" : ""}`}
+              key={option}
+              onClick={() => selectOption(option)}
+              onKeyDown={(event) => handleOptionKeyDown(event, index)}
+              ref={(element) => { optionRefs.current[index] = element; }}
+              role="option"
+              tabIndex={open ? 0 : -1}
+              type="button"
+            >
+              {option}
+              <span className="dropdown-option-check">{option === value && <Icon name="check" size={14} />}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function JobSetup({ activeVersion, devices, job, onStart, onCancel }) {
   const [engine, setEngine] = useState("Cycles");
   const [device, setDevice] = useState("OptiX");
@@ -331,22 +433,8 @@ function JobSetup({ activeVersion, devices, job, onStart, onCancel }) {
       </div>
 
       <div className="two-column-fields">
-        <label className="select-field">
-          <span>Render engine</span>
-          <select value={engine} onChange={(event) => setEngine(event.target.value)}>
-            <option>Cycles</option>
-            <option>Eevee</option>
-            <option>Workbench</option>
-          </select>
-        </label>
-        <label className="select-field">
-          <span>Compute device</span>
-          <select value={device} onChange={(event) => setDevice(event.target.value)}>
-            <option>OptiX</option>
-            <option>CUDA</option>
-            <option>CPU</option>
-          </select>
-        </label>
+        <DropdownField label="Render engine" onChange={setEngine} options={RENDER_ENGINES} value={engine} />
+        <DropdownField label="Compute device" onChange={setDevice} options={COMPUTE_DEVICES} value={device} />
       </div>
 
       <div className="field-group">
@@ -354,9 +442,15 @@ function JobSetup({ activeVersion, devices, job, onStart, onCancel }) {
           <label>Frames</label>
           <span>SCENE 1–240</span>
         </div>
-        <div className="segmented-control" role="group" aria-label="Frame mode">
-          {["single", "range", "all"].map((mode) => (
+        <div
+          className="segmented-control"
+          role="group"
+          aria-label="Frame mode"
+          style={{ "--segment-index": FRAME_MODES.indexOf(frameMode) }}
+        >
+          {FRAME_MODES.map((mode) => (
             <button
+              aria-pressed={frameMode === mode}
               className={frameMode === mode ? "active" : ""}
               key={mode}
               onClick={() => setFrameMode(mode)}
@@ -431,61 +525,96 @@ function JobSetup({ activeVersion, devices, job, onStart, onCancel }) {
       >
         <Icon name={isRendering ? "stop" : "play"} size={18} />
         {isRendering ? "Cancel render" : "Start render"}
-        {!isRendering && <span>⌘ ↵</span>}
       </button>
     </section>
   );
 }
 
-function RenderPreview({ job }) {
-  const previewTab = useUiStore((state) => state.previewTab);
-  const setPreviewTab = useUiStore((state) => state.setPreviewTab);
-  const isRendering = job.status === "rendering";
-  const hasOutput = job.status === "completed" || isRendering;
-  const shownProgress = isRendering ? job.progress : job.status === "completed" ? 100 : 0;
+function RenderFrameVisual() {
+  return (
+    <>
+      <div className="viewport-grid" />
+      <div className="scene-glow scene-glow-left" />
+      <div className="scene-glow scene-glow-right" />
+      <div className="scene-platform">
+        <div className="scene-object object-back" />
+        <div className="scene-object object-main">
+          <div className="object-cutout" />
+        </div>
+        <div className="scene-object object-front" />
+        <div className="scene-sphere" />
+      </div>
+    </>
+  );
+}
+
+function FramePreviewModal({ frameNumber, onClose }) {
+  const closeButton = useRef(null);
+  const entered = useModalEntrance();
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    const closeOnEscape = (event) => {
+      if (event.key === "Escape") onClose();
+    };
+
+    document.body.style.overflow = "hidden";
+    document.addEventListener("keydown", closeOnEscape);
+    closeButton.current?.focus();
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [onClose]);
 
   return (
-    <section className="panel preview-panel">
-      <div className="preview-header">
-        <div className="preview-tabs" role="tablist">
-          <button
-            className={previewTab === "preview" ? "active" : ""}
-            onClick={() => setPreviewTab("preview")}
-            role="tab"
-            type="button"
-          >
-            <Icon name="image" size={16} /> Preview
-          </button>
-          <button
-            className={previewTab === "log" ? "active" : ""}
-            onClick={() => setPreviewTab("log")}
-            role="tab"
-            type="button"
-          >
-            <Icon name="terminal" size={16} /> Live log
-          </button>
-        </div>
-        <div className="preview-meta">
-          <StatusBadge status={job.status} />
-          <button className="icon-button subtle" type="button" aria-label="More options">
-            <Icon name="more" />
-          </button>
-        </div>
-      </div>
+    <div className={`modal-backdrop frame-preview-backdrop ${entered ? "is-entered" : ""}`} onMouseDown={onClose} role="presentation">
+      <section
+        aria-labelledby="frame-preview-title"
+        aria-modal="true"
+        className="frame-preview-modal"
+        onMouseDown={(event) => event.stopPropagation()}
+        role="dialog"
+      >
+        <h2 className="sr-only" id="frame-preview-title">Frame {frameNumber} full resolution</h2>
+        <RenderFrameVisual />
+        <span className="expanded-frame-number">FRAME {frameNumber}</span>
+        <button
+          aria-label="Close full resolution frame"
+          className="frame-preview-close icon-button"
+          onClick={onClose}
+          ref={closeButton}
+          type="button"
+        >
+          <Icon name="close" />
+        </button>
+      </section>
+    </div>
+  );
+}
 
-      {previewTab === "preview" ? (
-        <div className={`render-viewport ${hasOutput ? "has-output" : ""}`}>
-          <div className="viewport-grid" />
-          <div className="scene-glow scene-glow-left" />
-          <div className="scene-glow scene-glow-right" />
-          <div className="scene-platform">
-            <div className="scene-object object-back" />
-            <div className="scene-object object-main">
-              <div className="object-cutout" />
-            </div>
-            <div className="scene-object object-front" />
-            <div className="scene-sphere" />
+function RenderPreview({ job }) {
+  const [frameOpen, setFrameOpen] = useState(false);
+  const isRendering = job.status === "rendering";
+  const hasOutput = job.status === "completed" || isRendering;
+  const frameReady = job.status === "completed";
+  const shownProgress = isRendering ? job.progress : job.status === "completed" ? 100 : 0;
+  const frameNumber = String(Math.max(1, Math.round(shownProgress * 2.4))).padStart(3, "0");
+
+  return (
+    <>
+      <section className="panel preview-panel">
+        <div className="preview-header">
+          <div className="preview-title">
+            <Icon name="image" size={16} /> Preview
           </div>
+          <div className="preview-meta">
+            <StatusBadge status={job.status} />
+          </div>
+        </div>
+
+        <div className={`render-viewport ${hasOutput ? "has-output" : ""}`}>
+          <RenderFrameVisual />
           {!hasOutput && (
             <div className="preview-empty">
               <span className="empty-icon"><Icon name="image" size={24} /></span>
@@ -499,45 +628,48 @@ function RenderPreview({ job }) {
                 <span>CAMERA 01</span>
                 <span>1920 × 1080 · 100%</span>
               </div>
-              <div className="frame-chip">FRAME {String(Math.max(1, Math.round(shownProgress * 2.4))).padStart(3, "0")}</div>
+              <div aria-label="Blender live log" className="preview-log-overlay" role="log">
+                {logLines.slice(-4).map(([time, line], index, lines) => (
+                  <div className={index === lines.length - 1 ? "latest" : ""} key={`${time}-${line}`}>
+                    <time>{time}</time>
+                    <code>{line}</code>
+                  </div>
+                ))}
+              </div>
+              <div className="frame-chip">FRAME {frameNumber}</div>
+              <div className="preview-frame-actions">
+                <button aria-label={`Open frame ${frameNumber} in full resolution`} onClick={() => setFrameOpen(true)} type="button">
+                  <Icon name="expand" size={17} />
+                </button>
+                {frameReady && (
+                  <button aria-label={`Download frame ${frameNumber}`} type="button">
+                    <Icon name="download" size={17} />
+                  </button>
+                )}
+              </div>
             </>
           )}
         </div>
-      ) : (
-        <div className="log-view" role="log" aria-label="Blender live log">
-          <div className="log-toolbar">
-            <span>blender.log</span>
-            <span>Following output</span>
-          </div>
-          <div className="log-lines">
-            {logLines.map(([time, line], index) => (
-              <div className={index === logLines.length - 1 ? "latest" : ""} key={`${time}-${line}`}>
-                <time>{time}</time>
-                <code>{line}</code>
-              </div>
-            ))}
-            <span className="log-caret" />
-          </div>
-        </div>
-      )}
 
-      <div className="render-progress-block">
-        <div className="render-progress-copy">
-          <div>
-            <span className="eyebrow">Current task</span>
-            <strong>{isRendering ? "Rendering frame 38 of 240" : job.status === "completed" ? "Render completed" : "Ready to start"}</strong>
+        <div className="render-progress-block">
+          <div className="render-progress-copy">
+            <div>
+              <span className="eyebrow">Current task</span>
+              <strong>{isRendering ? "Rendering frame 38 of 240" : job.status === "completed" ? "Render completed" : "Ready to start"}</strong>
+            </div>
+            <div className="progress-stats">
+              <span><small>SAMPLES</small>{isRendering ? "384 / 512" : "—"}</span>
+              <span><small>ELAPSED</small>{isRendering ? "06:42" : "—"}</span>
+              <b>{shownProgress}%</b>
+            </div>
           </div>
-          <div className="progress-stats">
-            <span><small>SAMPLES</small>{isRendering ? "384 / 512" : "—"}</span>
-            <span><small>ELAPSED</small>{isRendering ? "06:42" : "—"}</span>
-            <b>{shownProgress}%</b>
+          <div className="progress-track" aria-label={`Render progress ${shownProgress}%`}>
+            <span style={{ width: `${shownProgress}%` }} />
           </div>
         </div>
-        <div className="progress-track" aria-label={`Render progress ${shownProgress}%`}>
-          <span style={{ width: `${shownProgress}%` }} />
-        </div>
-      </div>
-    </section>
+      </section>
+      {frameOpen && <FramePreviewModal frameNumber={frameNumber} onClose={() => setFrameOpen(false)} />}
+    </>
   );
 }
 
@@ -683,8 +815,20 @@ function Metrics({ devices, processors }) {
   );
 }
 
+function useModalEntrance() {
+  const [entered, setEntered] = useState(false);
+
+  useEffect(() => {
+    const animationFrame = window.requestAnimationFrame(() => setEntered(true));
+    return () => window.cancelAnimationFrame(animationFrame);
+  }, []);
+
+  return entered;
+}
+
 function FrameSequencePanel({ onClose }) {
   const closeButton = useRef(null);
+  const entered = useModalEntrance();
   const [page, setPage] = useState(1);
   const framesQuery = useQuery({
     queryKey: ["frames", page, FRAMES_PER_PAGE],
@@ -713,7 +857,7 @@ function FrameSequencePanel({ onClose }) {
   }, [onClose]);
 
   return (
-    <div className="modal-backdrop frames-backdrop" role="presentation" onMouseDown={onClose}>
+    <div className={`modal-backdrop frames-backdrop ${entered ? "is-entered" : ""}`} role="presentation" onMouseDown={onClose}>
       <section
         aria-describedby="frames-description"
         aria-labelledby="frames-title"
@@ -726,7 +870,7 @@ function FrameSequencePanel({ onClose }) {
           <div>
             <span className="eyebrow">Render sequence</span>
             <h2 id="frames-title">Frames 1–240</h2>
-            <p id="frames-description">240 PNG files · 2 pages</p>
+            <p id="frames-description">{totalFrames} PNG files · {pageCount} pages</p>
           </div>
           <div className="frames-modal-actions">
             <button className="sequence-download" type="button" aria-label="Download all frames as ZIP">
@@ -779,7 +923,7 @@ function Artifacts() {
             type="button"
           >
             <span className="artifact-kind">SEQ</span>
-            <span><strong>frames_0001–0240</strong><small>240 frames · 2 pages</small></span>
+            <span><strong>frames_0001–0240</strong><small>{FRAME_COUNT} frames · {Math.ceil(FRAME_COUNT / FRAMES_PER_PAGE)} pages</small></span>
             <span className="artifact-open-icon"><Icon name="chevron" size={16} /></span>
           </button>
           <div className="artifact-row">
@@ -795,8 +939,10 @@ function Artifacts() {
 }
 
 function VersionPanel({ versions, blocked, onClose, onInstall, onActivate, installing, activating }) {
+  const entered = useModalEntrance();
+
   return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+    <div className={`modal-backdrop ${entered ? "is-entered" : ""}`} role="presentation" onMouseDown={onClose}>
       <section
         aria-labelledby="versions-title"
         aria-modal="true"
