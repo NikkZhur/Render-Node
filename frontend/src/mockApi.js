@@ -1,6 +1,8 @@
 const wait = (milliseconds) =>
   new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 
+const BLENDER_ARCHIVE_URL = "https://download.blender.org/release/";
+
 let versions = [
   {
     version: "5.2.0",
@@ -47,16 +49,51 @@ let versions = [
     active: false,
     size: "260 MB",
   },
-  {
-    version: "4.4.3",
-    channel: "Archive",
-    source: "official",
-    installed: false,
-    supported: false,
-    active: false,
-    size: "340 MB",
-  },
 ];
+
+let officialVersions = [];
+let manualVersions = [];
+const downloadedVersions = new Set();
+
+const compareVersions = (left, right) => {
+  const leftParts = left.split(".").map(Number);
+  const rightParts = right.split(".").map(Number);
+  const length = Math.max(leftParts.length, rightParts.length);
+
+  for (let index = 0; index < length; index += 1) {
+    const difference = (rightParts[index] ?? 0) - (leftParts[index] ?? 0);
+    if (difference !== 0) return difference;
+  }
+
+  return 0;
+};
+
+const parseOfficialVersions = (html) => {
+  const documentNode = new DOMParser().parseFromString(html, "text/html");
+  const branches = [...documentNode.querySelectorAll("a")]
+    .map((link) => link.getAttribute("href") ?? "")
+    .map((href) => href.match(/^Blender(\d+\.\d+)\/$/)?.[1])
+    .filter(Boolean);
+
+  return [...new Set(branches)]
+    .filter((branch) => !versions.some((version) => version.version.startsWith(`${branch}.`)))
+    .sort(compareVersions)
+    .map((version) => ({
+      version,
+      channel: "Archive",
+      source: "official",
+      installed: false,
+      downloaded: downloadedVersions.has(version),
+      supported: false,
+      active: false,
+      archiveUrl: `${BLENDER_ARCHIVE_URL}Blender${version}/`,
+    }));
+};
+
+const formatFileSize = (bytes) => {
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+  return `${Math.max(1, Math.round(bytes / 1024 ** 2))} MB`;
+};
 
 const devices = [
   {
@@ -99,13 +136,91 @@ export const mockApi = {
     return versions.map((version) => ({ ...version }));
   },
 
-  async installVersion(versionNumber) {
-    await wait(1_100);
-    versions = versions.map((version) =>
-      version.version === versionNumber
-        ? { ...version, installed: true, source: "downloaded" }
-        : version,
+  async getOfficialVersions({ signal } = {}) {
+    const response = await fetch(BLENDER_ARCHIVE_URL, { signal });
+    if (!response.ok) {
+      throw new Error(`Official archive returned ${response.status}`);
+    }
+
+    const archiveVersions = parseOfficialVersions(await response.text());
+    officialVersions = [...manualVersions, ...archiveVersions]
+      .filter((version, index, collection) =>
+        collection.findIndex((candidate) => candidate.version === version.version) === index,
+      )
+      .sort((left, right) => compareVersions(left.version, right.version));
+    return officialVersions.map((version) => ({ ...version }));
+  },
+
+  async uploadVersion(file) {
+    const match = file.name.match(/^blender-(\d+\.\d+\.\d+)-linux-(?:x64|amd64)\.tar\.(?:xz|bz2)$/i);
+    if (!match) {
+      throw new Error("Choose a Blender Linux x64 .tar.xz or .tar.bz2 archive");
+    }
+    if (file.size <= 0 || file.size > 2 * 1024 ** 3) {
+      throw new Error("Installer archive must be between 1 byte and 2 GB");
+    }
+
+    const versionNumber = match[1];
+    if (versions.some((version) => version.version === versionNumber)) {
+      throw new Error(`Blender ${versionNumber} is already installed`);
+    }
+
+    await wait(350);
+    const uploadedVersion = {
+      version: versionNumber,
+      channel: "Manual",
+      source: "manual",
+      installed: false,
+      downloaded: true,
+      supported: false,
+      active: false,
+      size: formatFileSize(file.size),
+      fileName: file.name,
+    };
+    downloadedVersions.add(versionNumber);
+    manualVersions = [
+      uploadedVersion,
+      ...manualVersions.filter((version) => version.version !== versionNumber),
+    ];
+    officialVersions = [
+      uploadedVersion,
+      ...officialVersions.filter((version) => version.version !== versionNumber),
+    ].sort((left, right) => compareVersions(left.version, right.version));
+    return { ...uploadedVersion };
+  },
+
+  async downloadVersion(versionNumber) {
+    const version = officialVersions.find((candidate) => candidate.version === versionNumber);
+    if (!version) throw new Error("Version is not present in the official archive");
+
+    await wait(700);
+    downloadedVersions.add(versionNumber);
+    officialVersions = officialVersions.map((candidate) =>
+      candidate.version === versionNumber ? { ...candidate, downloaded: true } : candidate,
     );
+    return { version: versionNumber };
+  },
+
+  async installVersion(versionNumber) {
+    if (!downloadedVersions.has(versionNumber)) {
+      throw new Error("Download the version before installation");
+    }
+
+    const version = officialVersions.find((candidate) => candidate.version === versionNumber);
+    if (!version) throw new Error("Downloaded version metadata is unavailable");
+
+    await wait(900);
+    versions = [
+      ...versions,
+      {
+        ...version,
+        source: version.source === "manual" ? "manual" : "downloaded",
+        installed: true,
+        downloaded: true,
+      },
+    ].sort((left, right) => compareVersions(left.version, right.version));
+    officialVersions = officialVersions.filter((candidate) => candidate.version !== versionNumber);
+    manualVersions = manualVersions.filter((candidate) => candidate.version !== versionNumber);
     return { version: versionNumber };
   },
 

@@ -27,6 +27,23 @@ try {
   });
   const desktop = await desktopContext.newPage();
   watchErrors(desktop);
+  let officialArchiveRequests = 0;
+  await desktop.route("https://download.blender.org/release/", async (route) => {
+    officialArchiveRequests += 1;
+    await route.fulfill({
+      contentType: "text/html",
+      body: `
+        <a href="Blender5.2/">Blender5.2/</a>
+        <a href="Blender5.1/">Blender5.1/</a>
+        <a href="Blender4.5/">Blender4.5/</a>
+        <a href="Blender4.4/">Blender4.4/</a>
+        <a href="Blender4.2/">Blender4.2/</a>
+        <a href="Blender4.1/">Blender4.1/</a>
+        <a href="Blender3.6/">Blender3.6/</a>
+      `,
+      status: 200,
+    });
+  });
   await desktop.goto(targetUrl, { waitUntil: "networkidle" });
   await desktop.evaluate(() => window.localStorage.setItem("render-node-theme", "dark"));
   await desktop.reload({ waitUntil: "networkidle" });
@@ -183,8 +200,32 @@ try {
   await desktopFramesModal.waitFor({ state: "hidden" });
 
   await desktop.getByRole("button", { name: /Blender 4\.5\.11/ }).click();
-  assert(await desktop.getByRole("dialog", { name: "Blender versions" }).isVisible(), "Version manager did not open");
-  assert((await desktop.locator(".version-row").count()) === 6, "Version manager has an unexpected number of rows");
+  const versionDialog = desktop.getByRole("dialog", { name: "Blender versions" });
+  assert(await versionDialog.isVisible(), "Version manager did not open");
+  assert((await versionDialog.locator(".version-list .version-row").count()) === 5, "Installed version list has an unexpected number of rows");
+  assert(officialArchiveRequests === 0, "Official archive loaded before the user opened it");
+  await versionDialog.getByRole("button", { name: /Choose other versions/ }).click();
+  const officialVersions = versionDialog.getByLabel("Available Blender versions");
+  assert(await officialVersions.isVisible(), "Official version catalog did not open");
+  await officialVersions.getByText("Blender 4.4", { exact: true }).waitFor();
+  assert(officialArchiveRequests === 1, "Official archive was not loaded exactly once");
+  const blender44 = officialVersions.locator(".catalog-version-row").filter({ hasText: "Blender 4.4" });
+  await blender44.getByRole("button", { name: "Download" }).click();
+  await blender44.getByRole("button", { name: "Install" }).waitFor();
+  await blender44.getByRole("button", { name: "Install" }).click();
+  await versionDialog.locator(".version-list .version-row").filter({ hasText: "Blender 4.4" }).waitFor();
+  assert((await versionDialog.locator(".version-list .version-row").count()) === 6, "Installed version did not move to the main list");
+  await versionDialog.locator('input[type="file"]').setInputFiles({
+    name: "blender-4.3.3-linux-x64.tar.xz",
+    mimeType: "application/x-xz",
+    buffer: Buffer.alloc(1024),
+  });
+  const manualVersion = officialVersions.locator(".catalog-version-row").filter({ hasText: "Blender 4.3.3" });
+  await manualVersion.getByText(/ready to install/).waitFor();
+  assert(await manualVersion.getByText("Manual", { exact: true }).isVisible(), "Uploaded installer is not marked as manual");
+  await manualVersion.getByRole("button", { name: "Install" }).click();
+  await versionDialog.locator(".version-list .version-row").filter({ hasText: "Blender 4.3.3" }).waitFor();
+  assert((await versionDialog.locator(".version-list .version-row").count()) === 7, "Manually uploaded version did not move to the main list");
   const blender52 = desktop.locator(".version-row").filter({ hasText: "Blender 5.2.0" });
   await blender52.getByRole("button", { name: "Make active" }).click();
   await blender52.getByText("Active", { exact: true }).waitFor();

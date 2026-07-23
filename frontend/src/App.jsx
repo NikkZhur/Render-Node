@@ -141,6 +141,12 @@ function Icon({ name, size = 18 }) {
         <path d="M5 21h14" />
       </>
     ),
+    upload: (
+      <>
+        <path d="M12 21V9m-5 5 5-5 5 5" />
+        <path d="M5 3h14" />
+      </>
+    ),
     settings: (
       <>
         <circle cx="12" cy="12" r="3" />
@@ -938,8 +944,29 @@ function Artifacts() {
   );
 }
 
-function VersionPanel({ versions, blocked, onClose, onInstall, onActivate, installing, activating }) {
+function VersionPanel({
+  versions,
+  blocked,
+  onClose,
+  onDownload,
+  onUpload,
+  onInstall,
+  onActivate,
+  downloadingVersion,
+  uploadingFile,
+  uploadError,
+  installingVersion,
+  activating,
+}) {
   const entered = useModalEntrance();
+  const [catalogOpen, setCatalogOpen] = useState(false);
+  const installerInput = useRef(null);
+  const catalogQuery = useQuery({
+    queryKey: ["official-versions"],
+    queryFn: mockApi.getOfficialVersions,
+    enabled: catalogOpen,
+    staleTime: 5 * 60 * 1000,
+  });
 
   return (
     <div className={`modal-backdrop ${entered ? "is-entered" : ""}`} role="presentation" onMouseDown={onClose}>
@@ -977,7 +1004,13 @@ function VersionPanel({ versions, blocked, onClose, onInstall, onActivate, insta
                   <strong>Blender {version.version}</strong>
                   <span className={`channel-tag ${version.channel === "LTS" ? "lts" : ""}`}>{version.channel}</span>
                 </div>
-                <small>{version.source === "bundled" ? "Included in image" : version.installed ? "Downloaded from blender.org" : `Official archive · ${version.size}`}</small>
+                <small>
+                  {version.source === "bundled"
+                    ? "Included in image"
+                    : version.source === "manual"
+                      ? "Uploaded manually"
+                      : "Downloaded from blender.org"}
+                </small>
               </div>
               <div className="version-flags">
                 {version.supported ? <span className="supported"><Icon name="check" size={12} /> Supported</span> : <span>Untested</span>}
@@ -993,15 +1026,109 @@ function VersionPanel({ versions, blocked, onClose, onInstall, onActivate, insta
                   >
                     {activating ? "Switching…" : "Make active"}
                   </button>
-                ) : (
-                  <button disabled={installing} onClick={() => onInstall(version.version)} type="button">
-                    {installing ? "Installing…" : "Install"}
-                  </button>
-                )}
+                ) : null}
               </div>
             </article>
           ))}
         </div>
+
+        <div className="version-catalog">
+          <div className="version-catalog-actions">
+            <button
+              aria-expanded={catalogOpen}
+              className="version-catalog-toggle"
+              onClick={() => setCatalogOpen((open) => !open)}
+              type="button"
+            >
+              <span>
+                <strong>Choose other versions</strong>
+                <small>Loaded from the official Blender archive</small>
+              </span>
+              <Icon name="chevron" size={16} />
+            </button>
+            <input
+              accept=".tar.xz,.tar.bz2"
+              className="sr-only"
+              onChange={(event) => {
+                const [file] = event.target.files;
+                if (file) {
+                  setCatalogOpen(true);
+                  onUpload(file);
+                }
+                event.target.value = "";
+              }}
+              ref={installerInput}
+              type="file"
+            />
+            <button
+              className="manual-version-upload"
+              disabled={uploadingFile}
+              onClick={() => installerInput.current?.click()}
+              type="button"
+            >
+              <Icon name="upload" size={16} />
+              {uploadingFile ? "Uploading…" : "Upload installer"}
+            </button>
+          </div>
+
+          {uploadError && <p className="manual-upload-error">{uploadError}</p>}
+
+          {catalogOpen && (
+            <div aria-label="Available Blender versions" className="version-catalog-content">
+              {catalogQuery.isPending && <p className="version-catalog-status">Loading official versions…</p>}
+              {catalogQuery.isError && (
+                <div className="version-catalog-status error">
+                  <span>Could not load the official archive.</span>
+                  <button onClick={() => catalogQuery.refetch()} type="button">Retry</button>
+                </div>
+              )}
+              {catalogQuery.isSuccess && catalogQuery.data.length === 0 && (
+                <p className="version-catalog-status">No other release branches are available.</p>
+              )}
+              {catalogQuery.data?.map((version) => (
+                <article className="version-row catalog-version-row" key={version.version}>
+                  <span className="version-cube"><Icon name="cube" size={20} /></span>
+                  <div className="version-info">
+                    <div>
+                      <strong>Blender {version.version}</strong>
+                      <span className="channel-tag">{version.channel}</span>
+                    </div>
+                    <small>
+                      {version.source === "manual"
+                        ? `${version.fileName} · ${version.size} · ready to install`
+                        : version.downloaded
+                          ? "Downloaded · ready to install"
+                          : "Official release branch"}
+                    </small>
+                  </div>
+                  <div className="version-flags">
+                    <span>Untested</span>
+                  </div>
+                  <div className="version-action">
+                    {version.downloaded ? (
+                      <button
+                        disabled={Boolean(installingVersion)}
+                        onClick={() => onInstall(version.version)}
+                        type="button"
+                      >
+                        {installingVersion === version.version ? "Installing…" : "Install"}
+                      </button>
+                    ) : (
+                      <button
+                        disabled={Boolean(downloadingVersion)}
+                        onClick={() => onDownload(version.version)}
+                        type="button"
+                      >
+                        {downloadingVersion === version.version ? "Downloading…" : "Download"}
+                      </button>
+                    )}
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+        </div>
+
         <div className="modal-footer">
           <span>Downloads are verified with the official SHA-256 before installation.</span>
           <a href="https://download.blender.org/release/" target="_blank" rel="noreferrer">Official archive <Icon name="chevron" size={13} /></a>
@@ -1023,9 +1150,25 @@ export default function App() {
   const versionsQuery = useQuery({ queryKey: ["versions"], queryFn: mockApi.getVersions });
   const devicesQuery = useQuery({ queryKey: ["devices"], queryFn: mockApi.getDevices });
   const processorsQuery = useQuery({ queryKey: ["processors"], queryFn: mockApi.getProcessors });
+  const downloadMutation = useMutation({
+    mutationFn: mockApi.downloadVersion,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["official-versions"] }),
+  });
+  const uploadMutation = useMutation({
+    mutationFn: mockApi.uploadVersion,
+    onSuccess: (uploadedVersion) => {
+      queryClient.setQueryData(["official-versions"], (current = []) => [
+        uploadedVersion,
+        ...current.filter((version) => version.version !== uploadedVersion.version),
+      ]);
+    },
+  });
   const installMutation = useMutation({
     mutationFn: mockApi.installVersion,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["versions"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["versions"] });
+      queryClient.invalidateQueries({ queryKey: ["official-versions"] });
+    },
   });
   const activateMutation = useMutation({
     mutationFn: mockApi.activateVersion,
@@ -1129,10 +1272,15 @@ export default function App() {
         <VersionPanel
           activating={activateMutation.isPending}
           blocked={isRendering || jobs.some((job) => job.status === "queued")}
-          installing={installMutation.isPending}
+          downloadingVersion={downloadMutation.isPending ? downloadMutation.variables : null}
+          installingVersion={installMutation.isPending ? installMutation.variables : null}
           onActivate={(version) => activateMutation.mutate(version)}
           onClose={() => setVersionPanelOpen(false)}
+          onDownload={(version) => downloadMutation.mutate(version)}
+          onUpload={(file) => uploadMutation.mutate(file)}
           onInstall={(version) => installMutation.mutate(version)}
+          uploadError={uploadMutation.error?.message ?? ""}
+          uploadingFile={uploadMutation.isPending}
           versions={versionsQuery.data ?? []}
         />
       )}
