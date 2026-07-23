@@ -246,6 +246,15 @@ try {
   assert(compactFit.metricScrollWidth <= compactFit.metricClientWidth, "Compact metrics have horizontal overflow");
   assert(compactFit.resourceRows === 3, "Compact metrics lost CPU or GPU rows");
   assert(await compact.locator(".header-summary").isHidden(), "Compact header summary should collapse before it causes overflow");
+  const compactJobsBox = await compact.locator(".queue-panel").boundingBox();
+  const compactArtifactsBox = await compact.locator(".artifacts-panel").boundingBox();
+  assert(
+    compactJobsBox
+      && compactArtifactsBox
+      && Math.abs(compactJobsBox.y - compactArtifactsBox.y) <= 1
+      && Math.abs(compactJobsBox.height - compactArtifactsBox.height) <= 1,
+    "Compact Artifacts panel does not stretch to match Jobs",
+  );
   await compact.screenshot({ path: path.join(outputDirectory, "desktop-compact.png"), fullPage: true, scale: "css" });
   await compactContext.close();
 

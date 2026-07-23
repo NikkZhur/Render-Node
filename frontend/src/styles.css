@@ -2159,7 +2159,10 @@ main {
   .setup-panel,
   .preview-panel { height: auto; }
 
-  .artifacts-panel { height: auto; }
+  .artifacts-panel {
+    height: auto;
+    align-self: stretch;
+  }
 
   .active-runtime { margin-top: 17px; }
 
