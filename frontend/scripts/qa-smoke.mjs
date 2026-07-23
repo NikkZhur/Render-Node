@@ -55,6 +55,7 @@ try {
   assert(await headerSummary.getByText("0 queued", { exact: true }).isVisible(), "Queued job count is missing from the header");
   assert(await headerSummary.getByText("2 GPUs ready", { exact: true }).isVisible(), "Ready GPU count is missing from the header");
   assert(await headerSummary.getByText("12m avg. frame", { exact: true }).isVisible(), "Average frame time is missing from the header");
+  assert((await headerSummary.locator(".summary-storage-warning").count()) === 0, "Healthy storage exposes a critical header warning");
   const headerControlHeights = await desktop.locator(".app-header").evaluate((header) =>
     [...header.querySelectorAll(".summary-pill, .connection-pill, .version-button, .icon-button, .theme-switch")].map(
       (element) => element.getBoundingClientRect().height,
@@ -147,7 +148,11 @@ try {
     "Desktop header controls and dashboard do not share the same right edge",
   );
   assert(dashboardBox && metricsBox && metricsBox.width >= dashboardBox.width - 2, "Desktop metrics do not span the dashboard width");
-  assert((await desktop.locator(".resource-row").count()) === 3, "Metrics do not render one row per CPU and GPU");
+  assert((await desktop.locator(".resource-row").count()) === 4, "Metrics do not render every CPU, GPU, and storage row");
+  const storageRow = desktop.locator(".resource-row").filter({ hasText: "STORAGE 01" });
+  assert(await storageRow.getByText("Workspace NVMe", { exact: true }).isVisible(), "Workspace storage identity is missing");
+  assert(await storageRow.getByText("/workspace · 412 GB free of 1 TB", { exact: true }).isVisible(), "Available workspace capacity is missing");
+  assert(await storageRow.getByLabel("Used: 59%").isVisible(), "Storage usage indicator is missing");
   const metricComposition = await desktop.locator(".metric-item").first().evaluate((card) => {
     const ring = card.querySelector(".metric-ring").getBoundingClientRect();
     const chart = card.querySelector(".metric-chart").getBoundingClientRect();
@@ -162,7 +167,7 @@ try {
   assert(metricComposition.ringWidth > 0 && metricComposition.ringText.includes("Load") && metricComposition.ringText.includes("72%"), "Metric label and value are not inside the ring");
   assert(metricComposition.chartWidth > metricComposition.ringWidth, "Metric line chart does not use the available side space");
   assert(metricComposition.stops[0] > 0 && metricComposition.stops.at(-1) === 0, "Metric chart fill does not fade through alpha");
-  assert((await desktop.locator(".metric-chart").count()) === 9, "Not every hardware metric has a line chart");
+  assert((await desktop.locator(".metric-chart").count()) === 12, "Not every hardware metric has a line chart");
 
   await desktop.getByRole("button", { name: "Open frame sequence, 240 frames" }).click();
   const desktopFramesModal = desktop.getByRole("dialog", { name: "Frames 1–240" });
@@ -199,9 +204,15 @@ try {
   await desktop.keyboard.press("Escape");
   await desktopFramesModal.waitFor({ state: "hidden" });
 
-  await desktop.getByRole("button", { name: /Blender 4\.5\.11/ }).click();
+  const desktopVersionButton = desktop.locator(".version-button");
+  await desktopVersionButton.click();
   const versionDialog = desktop.getByRole("dialog", { name: "Blender versions" });
   assert(await versionDialog.isVisible(), "Version manager did not open");
+  const closeVersionButton = versionDialog.getByRole("button", { name: "Close version manager" });
+  assert(await closeVersionButton.evaluate((button) => button === document.activeElement), "Version manager did not focus its close action");
+  assert(await desktop.locator("body").evaluate((body) => body.style.overflow === "hidden"), "Version manager did not lock background scrolling");
+  await desktop.keyboard.press("Shift+Tab");
+  assert(await versionDialog.evaluate((dialog) => dialog.contains(document.activeElement)), "Version manager focus escaped the dialog");
   assert((await versionDialog.locator(".version-list .version-row").count()) === 5, "Installed version list has an unexpected number of rows");
   assert(officialArchiveRequests === 0, "Official archive loaded before the user opened it");
   await versionDialog.getByRole("button", { name: /Choose other versions/ }).click();
@@ -229,7 +240,10 @@ try {
   const blender52 = desktop.locator(".version-row").filter({ hasText: "Blender 5.2.0" });
   await blender52.getByRole("button", { name: "Make active" }).click();
   await blender52.getByText("Active", { exact: true }).waitFor();
-  await desktop.getByRole("button", { name: "Close version manager" }).click();
+  await desktop.keyboard.press("Escape");
+  await versionDialog.waitFor({ state: "hidden" });
+  assert(await desktopVersionButton.evaluate((button) => button === document.activeElement), "Version manager did not restore focus to its opener");
+  assert(await desktop.locator("body").evaluate((body) => body.style.overflow === ""), "Version manager did not restore background scrolling");
 
   await desktop.getByRole("button", { name: /Start render/ }).click();
   await desktop.getByText("Rendering", { exact: true }).first().waitFor();
@@ -285,7 +299,7 @@ try {
   }));
   assert(compactFit.scrollWidth <= compactFit.width, "Compact desktop page has horizontal overflow");
   assert(compactFit.metricScrollWidth <= compactFit.metricClientWidth, "Compact metrics have horizontal overflow");
-  assert(compactFit.resourceRows === 3, "Compact metrics lost CPU or GPU rows");
+  assert(compactFit.resourceRows === 4, "Compact metrics lost a CPU, GPU, or storage row");
   assert(await compact.locator(".header-summary").isHidden(), "Compact header summary should collapse before it causes overflow");
   const compactJobsBox = await compact.locator(".queue-panel").boundingBox();
   const compactArtifactsBox = await compact.locator(".artifacts-panel").boundingBox();
@@ -378,10 +392,10 @@ try {
   assert(Math.abs(ultrawideLayout.setupPanelHeight - ultrawideLayout.previewPanelHeight) <= 1, "Top desktop panels do not share the available height");
   assert(ultrawideLayout.footerTop - ultrawideLayout.metricsBottom <= 26, "Metrics leave unused space above the footer");
   assert(Math.abs(ultrawideLayout.footerBottom - ultrawideLayout.pageHeight) <= 2, "Status labels are not anchored in the page footer");
-  assert(ultrawideLayout.resourceRows === 3, "Ultrawide metrics lost CPU or GPU rows");
+  assert(ultrawideLayout.resourceRows === 4, "Ultrawide metrics lost a CPU, GPU, or storage row");
   assert(ultrawideLayout.metricsOverflowY === "auto", "Hardware rows are not configured for internal scrolling");
   assert(ultrawideLayout.visibleMetricRows === 2, "Metrics panel does not limit the viewport to two resource rows");
-  assert(ultrawideLayout.metricsScrollHeight > ultrawideLayout.metricsClientHeight, "The third hardware row does not create internal scrolling");
+  assert(ultrawideLayout.metricsScrollHeight > ultrawideLayout.metricsClientHeight, "Additional resource rows do not create internal scrolling");
   assert(Math.abs(ultrawideLayout.rootFont - compactFit.rootFont) < 0.1, "Root typography overrides the browser base size");
   assert(ultrawideLayout.controlFont > compactFit.controlFont, "Control typography does not scale with the viewport");
   await ultrawide.screenshot({ path: path.join(outputDirectory, "desktop-ultrawide.png"), fullPage: true, scale: "css" });
@@ -390,12 +404,12 @@ try {
   await ultrawide.mouse.wheel(0, 600);
   await ultrawide.waitForTimeout(150);
   assert((await ultrawideMetricsScroll.evaluate((element) => element.scrollTop)) > 0, "Metrics panel does not scroll to additional hardware rows");
-  const cpuRowInView = await ultrawide.locator(".resource-row").filter({ hasText: "CPU 01" }).evaluate((row) => {
+  const storageRowInView = await ultrawide.locator(".resource-row").filter({ hasText: "STORAGE 01" }).evaluate((row) => {
     const rowBounds = row.getBoundingClientRect();
     const scrollBounds = row.closest(".metrics-scroll").getBoundingClientRect();
     return rowBounds.top < scrollBounds.bottom && rowBounds.bottom > scrollBounds.top;
   });
-  assert(cpuRowInView, "The third hardware row is not reachable by scrolling");
+  assert(storageRowInView, "The storage row is not reachable by scrolling");
   await ultrawide.screenshot({ path: path.join(outputDirectory, "desktop-ultrawide-metrics-scrolled.png"), fullPage: true, scale: "css" });
   await ultrawideContext.close();
 
@@ -411,6 +425,14 @@ try {
   assert(await mobile.locator("html[data-theme='dark']").count() === 1, "A fresh session does not default to dark theme");
   assert(await mobile.locator(".header-summary").isHidden(), "Mobile header summary should be hidden");
   assert(await mobile.getByRole("group", { name: "Color theme" }).isVisible(), "Mobile theme switch is not visible");
+  const mobileSetupBox = await mobile.locator(".setup-panel").boundingBox();
+  const mobilePreviewBox = await mobile.locator(".preview-panel").boundingBox();
+  const mobileStartBox = await mobile.getByRole("button", { name: /Start render/ }).boundingBox();
+  assert(
+    mobileSetupBox && mobilePreviewBox && mobileSetupBox.y < mobilePreviewBox.y,
+    "Mobile job setup is not positioned before the preview",
+  );
+  assert(mobileStartBox && mobileStartBox.y + mobileStartBox.height <= 844, "Mobile primary render action is below the initial viewport");
 
   await mobile.getByRole("button", { name: /Start render/ }).tap();
   await mobile.getByRole("button", { name: /Open frame .* in full resolution/ }).tap();
@@ -477,7 +499,7 @@ try {
   assert(mobileFit.scrollWidth <= mobileFit.width, "Mobile page has horizontal overflow");
   assert(mobileFit.headerDashboardRightDelta <= 1, "Mobile header controls and dashboard do not share the same right edge");
   assert(mobileFit.metricScrollWidth <= mobileFit.metricClientWidth, "Mobile metrics have horizontal overflow");
-  assert(mobileFit.resourceRows === 3, "Mobile metrics lost CPU or GPU rows");
+  assert(mobileFit.resourceRows === 4, "Mobile metrics lost a CPU, GPU, or storage row");
   assert(mobileFit.metricScrollHeight > mobileFit.metricClientHeight, "Additional mobile hardware rows do not scroll inside the metrics panel");
   assert(mobileFit.resourceBounds.every((row, index, rows) => index === 0 || row.top >= rows[index - 1].bottom - 1), "Mobile hardware rows overlap");
   await mobile.screenshot({ path: path.join(outputDirectory, "mobile-initial.png"), fullPage: true, scale: "css" });

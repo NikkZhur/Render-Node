@@ -368,6 +368,16 @@ button:disabled {
 .summary-gpu svg { color: var(--violet); }
 .summary-time svg { color: var(--blue); }
 
+.summary-storage-warning {
+  color: var(--orange);
+  background: rgb(243 166 90 / 7%);
+}
+
+.summary-storage-warning strong,
+.summary-storage-warning svg {
+  color: var(--orange);
+}
+
 .summary-pill svg {
   flex: 0 0 auto;
 }
@@ -2333,8 +2343,8 @@ main {
 
   .dashboard-grid { flex: none; }
 
-  .preview-panel { grid-row: 1; }
-  .setup-panel { grid-row: 2; }
+  .setup-panel { grid-row: 1; }
+  .preview-panel { grid-row: 2; }
   .right-rail { grid-row: 3; grid-column: 1; }
 
   .metrics-strip {

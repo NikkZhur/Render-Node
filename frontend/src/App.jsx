@@ -109,6 +109,12 @@ function Icon({ name, size = 18 }) {
         <path d="M9 10h6v4H9zM9 2v4m6-4v4M9 18v4m6-4v4M2 9h3m-3 6h3m14-6h3m-3 6h3" />
       </>
     ),
+    disk: (
+      <>
+        <ellipse cx="12" cy="5" rx="8" ry="3" />
+        <path d="M4 5v7c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12v7c0 1.7 3.6 3 8 3s8-1.3 8-3v-7" />
+      </>
+    ),
     clock: (
       <>
         <circle cx="12" cy="12" r="9" />
@@ -184,7 +190,7 @@ function StatusBadge({ status }) {
   );
 }
 
-function Header({ activeVersion, gpuCount, onThemeChange, onVersions, queuedCount, theme }) {
+function Header({ activeVersion, gpuCount, onThemeChange, onVersions, queuedCount, storageWarning, theme }) {
   return (
     <header className="app-header">
       <div className="brand-block">
@@ -213,6 +219,12 @@ function Header({ activeVersion, gpuCount, onThemeChange, onVersions, queuedCoun
             <Icon name="clock" size={15} />
             <strong>12m</strong> avg. frame
           </span>
+          {storageWarning && (
+            <span className="summary-pill summary-storage-warning" title={`${storageWarning.mountPoint} is running low on space`}>
+              <Icon name="disk" size={15} />
+              <strong>{storageWarning.freeGb} GB</strong> left
+            </span>
+          )}
         </nav>
 
         <div className="header-actions">
@@ -556,22 +568,8 @@ function RenderFrameVisual() {
 
 function FramePreviewModal({ frameNumber, onClose }) {
   const closeButton = useRef(null);
+  const dialogRef = useDialogBehavior(onClose, closeButton);
   const entered = useModalEntrance();
-
-  useEffect(() => {
-    const previousOverflow = document.body.style.overflow;
-    const closeOnEscape = (event) => {
-      if (event.key === "Escape") onClose();
-    };
-
-    document.body.style.overflow = "hidden";
-    document.addEventListener("keydown", closeOnEscape);
-    closeButton.current?.focus();
-    return () => {
-      document.body.style.overflow = previousOverflow;
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [onClose]);
 
   return (
     <div className={`modal-backdrop frame-preview-backdrop ${entered ? "is-entered" : ""}`} onMouseDown={onClose} role="presentation">
@@ -580,6 +578,7 @@ function FramePreviewModal({ frameNumber, onClose }) {
         aria-modal="true"
         className="frame-preview-modal"
         onMouseDown={(event) => event.stopPropagation()}
+        ref={dialogRef}
         role="dialog"
       >
         <h2 className="sr-only" id="frame-preview-title">Frame {frameNumber} full resolution</h2>
@@ -785,7 +784,7 @@ function ResourceRow({ detail, kind, metrics, name }) {
   );
 }
 
-function Metrics({ devices, processors }) {
+function Metrics({ devices, processors, storages }) {
   const gpuRows = devices.map((gpu) => ({
     detail: `${gpu.memoryTotal} GB VRAM`,
     kind: `GPU ${String(gpu.id + 1).padStart(2, "0")}`,
@@ -806,14 +805,31 @@ function Metrics({ devices, processors }) {
       { label: "Temp", value: `${cpu.temperature}°`, percent: cpu.temperature, tone: cpu.temperature < 80 ? "green" : "red", history: makeMetricHistory(cpu.temperature, cpu.id + 6) },
     ],
   }));
+  const storageRows = storages.map((storage) => {
+    const usedPercent = ((storage.totalGb - storage.freeGb) / storage.totalGb) * 100;
+    const freePercent = (storage.freeGb / storage.totalGb) * 100;
+    const capacity = storage.totalGb >= 1000 ? `${storage.totalGb / 1000} TB` : `${storage.totalGb} GB`;
+
+    return {
+      detail: `${storage.mountPoint} · ${storage.freeGb} GB free of ${capacity}`,
+      kind: `STORAGE ${String(storage.id + 1).padStart(2, "0")}`,
+      name: storage.name,
+      metrics: [
+        { label: "Used", value: `${Math.round(usedPercent)}%`, percent: usedPercent, tone: freePercent < 10 ? "red" : freePercent < 20 ? "orange" : "blue", history: makeMetricHistory(usedPercent, storage.id + 7) },
+        { label: "Read", value: `${storage.readMbps} MB/s`, percent: (storage.readMbps / storage.maxThroughputMbps) * 100, tone: "green", history: makeMetricHistory((storage.readMbps / storage.maxThroughputMbps) * 100, storage.id + 8) },
+        { label: "Write", value: `${storage.writeMbps} MB/s`, percent: (storage.writeMbps / storage.maxThroughputMbps) * 100, tone: "violet", history: makeMetricHistory((storage.writeMbps / storage.maxThroughputMbps) * 100, storage.id + 9) },
+      ],
+    };
+  });
+  const resourceRows = [...gpuRows, ...cpuRows, ...storageRows];
 
   return (
     <section aria-label="Resource metrics" className="metrics-strip">
-      <div className="metrics-scroll" style={{ "--visible-resource-rows": Math.min(2, gpuRows.length + cpuRows.length || 1) }}>
-        {[...gpuRows, ...cpuRows].map((resource) => (
+      <div className="metrics-scroll" style={{ "--visible-resource-rows": Math.min(2, resourceRows.length || 1) }}>
+        {resourceRows.map((resource) => (
           <ResourceRow key={`${resource.kind}-${resource.name}`} {...resource} />
         ))}
-        {gpuRows.length + cpuRows.length === 0 && (
+        {resourceRows.length === 0 && (
           <div className="metrics-empty">No hardware metrics available</div>
         )}
       </div>
@@ -832,8 +848,63 @@ function useModalEntrance() {
   return entered;
 }
 
+function useDialogBehavior(onClose, initialFocusRef) {
+  const dialogRef = useRef(null);
+  const onCloseRef = useRef(onClose);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    const previousFocus = document.activeElement;
+    const focusFrame = window.requestAnimationFrame(() => initialFocusRef.current?.focus());
+
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== "Tab") return;
+
+      const focusable = [...(dialogRef.current?.querySelectorAll(
+        'a[href], button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ) ?? [])].filter((element) => element.tabIndex >= 0);
+      if (focusable.length === 0) {
+        event.preventDefault();
+        return;
+      }
+
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (event.shiftKey && (document.activeElement === first || !dialogRef.current?.contains(document.activeElement))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (document.activeElement === last || !dialogRef.current?.contains(document.activeElement))) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.body.style.overflow = "hidden";
+    document.addEventListener("keydown", onKeyDown);
+
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", onKeyDown);
+      if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus();
+    };
+  }, [initialFocusRef]);
+
+  return dialogRef;
+}
+
 function FrameSequencePanel({ onClose }) {
   const closeButton = useRef(null);
+  const dialogRef = useDialogBehavior(onClose, closeButton);
   const entered = useModalEntrance();
   const [page, setPage] = useState(1);
   const framesQuery = useQuery({
@@ -846,22 +917,6 @@ function FrameSequencePanel({ onClose }) {
   const pageStart = (page - 1) * FRAMES_PER_PAGE;
   const pageEnd = Math.min(pageStart + FRAMES_PER_PAGE, totalFrames);
 
-  useEffect(() => {
-    const previousOverflow = document.body.style.overflow;
-    const onKeyDown = (event) => {
-      if (event.key === "Escape") onClose();
-    };
-
-    document.body.style.overflow = "hidden";
-    document.addEventListener("keydown", onKeyDown);
-    closeButton.current?.focus();
-
-    return () => {
-      document.body.style.overflow = previousOverflow;
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [onClose]);
-
   return (
     <div className={`modal-backdrop frames-backdrop ${entered ? "is-entered" : ""}`} role="presentation" onMouseDown={onClose}>
       <section
@@ -870,6 +925,7 @@ function FrameSequencePanel({ onClose }) {
         aria-modal="true"
         className="frames-modal"
         onMouseDown={(event) => event.stopPropagation()}
+        ref={dialogRef}
         role="dialog"
       >
         <div className="frames-modal-header">
@@ -960,6 +1016,8 @@ function VersionPanel({
 }) {
   const entered = useModalEntrance();
   const [catalogOpen, setCatalogOpen] = useState(false);
+  const closeButton = useRef(null);
+  const dialogRef = useDialogBehavior(onClose, closeButton);
   const installerInput = useRef(null);
   const catalogQuery = useQuery({
     queryKey: ["official-versions"],
@@ -975,6 +1033,7 @@ function VersionPanel({
         aria-modal="true"
         className="version-modal"
         onMouseDown={(event) => event.stopPropagation()}
+        ref={dialogRef}
         role="dialog"
       >
         <div className="modal-header">
@@ -983,7 +1042,13 @@ function VersionPanel({
             <h2 id="versions-title">Blender versions</h2>
             <p>One installed version is active for every new render job.</p>
           </div>
-          <button className="icon-button" onClick={onClose} type="button" aria-label="Close version manager">
+          <button
+            aria-label="Close version manager"
+            className="icon-button"
+            onClick={onClose}
+            ref={closeButton}
+            type="button"
+          >
             <Icon name="close" />
           </button>
         </div>
@@ -1058,6 +1123,7 @@ function VersionPanel({
                 event.target.value = "";
               }}
               ref={installerInput}
+              tabIndex={-1}
               type="file"
             />
             <button
@@ -1150,6 +1216,7 @@ export default function App() {
   const versionsQuery = useQuery({ queryKey: ["versions"], queryFn: mockApi.getVersions });
   const devicesQuery = useQuery({ queryKey: ["devices"], queryFn: mockApi.getDevices });
   const processorsQuery = useQuery({ queryKey: ["processors"], queryFn: mockApi.getProcessors });
+  const storagesQuery = useQuery({ queryKey: ["storages"], queryFn: mockApi.getStorages });
   const downloadMutation = useMutation({
     mutationFn: mockApi.downloadVersion,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["official-versions"] }),
@@ -1179,6 +1246,9 @@ export default function App() {
   const liveJob = jobs.find((job) => job.id === "job-live") ?? jobs[0];
   const selectedJob = jobs.find((job) => job.id === selectedJobId) ?? liveJob;
   const isRendering = jobs.some((job) => job.status === "rendering");
+  const storageWarning = storagesQuery.data?.find(
+    (storage) => storage.freeGb < 50 || storage.freeGb / storage.totalGb < 0.1,
+  );
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -1242,6 +1312,7 @@ export default function App() {
         onThemeChange={setTheme}
         onVersions={() => setVersionPanelOpen(true)}
         queuedCount={jobs.filter((job) => job.status === "queued").length}
+        storageWarning={storageWarning}
         theme={theme}
       />
 
@@ -1259,7 +1330,11 @@ export default function App() {
             <JobQueue jobs={jobs} onSelect={setSelectedJobId} selectedJobId={selectedJobId} />
             <Artifacts />
           </div>
-          <Metrics devices={devicesQuery.data ?? []} processors={processorsQuery.data ?? []} />
+          <Metrics
+            devices={devicesQuery.data ?? []}
+            processors={processorsQuery.data ?? []}
+            storages={storagesQuery.data ?? []}
+          />
         </div>
       </main>
 

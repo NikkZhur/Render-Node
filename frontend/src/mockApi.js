@@ -128,6 +128,20 @@ const processors = [
   },
 ];
 
+const storages = [
+  {
+    id: 0,
+    name: "Workspace NVMe",
+    mountPoint: "/workspace",
+    totalGb: 1000,
+    freeGb: 412,
+    readMbps: 128,
+    writeMbps: 86,
+    maxThroughputMbps: 1000,
+    status: "healthy",
+  },
+];
+
 const frameCount = 240;
 
 export const mockApi = {
@@ -241,6 +255,11 @@ export const mockApi = {
   async getProcessors() {
     await wait(120);
     return processors.map((processor) => ({ ...processor }));
+  },
+
+  async getStorages() {
+    await wait(120);
+    return storages.map((storage) => ({ ...storage }));
   },
 
   async getFrames({ page, pageSize }) {
