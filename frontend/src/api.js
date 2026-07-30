@@ -1,7 +1,5 @@
 const API_PREFIX = import.meta.env.VITE_RENDER_NODE_API_URL ?? "/api/v1";
 
-export const isMockMode = import.meta.env.VITE_RENDER_NODE_MOCK === "true";
-
 const engineLabels = {
   CYCLES: "Cycles",
   BLENDER_EEVEE: "Eevee",

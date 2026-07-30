@@ -36,7 +36,8 @@ separate node later.
 - Playwright smoke tests for the main UI workflows;
 - FastAPI application lifecycle and versioned API router;
 - async SQLite persistence with SQLAlchemy and Alembic migrations;
-- health/readiness endpoints, shared error responses, and development CORS.
+- public health/readiness probes, shared error responses, bounded request bodies,
+  exact-origin CORS, and a production Bearer boundary for REST and WebSocket.
 
 ## Target MVP
 
@@ -90,7 +91,9 @@ is forwarded.
 `npm run dev` uses the real Job API through Vite's `/api` proxy. Run
 `npm run dev:mock` only when the explicit legacy mock mode is needed. Set
 `RENDER_NODE_BACKEND_URL` when the backend is not available at
-`http://127.0.0.1:8000`.
+`http://127.0.0.1:8000`. For a locally authenticated backend, the Vite server can
+inject `RENDER_NODE_BACKEND_AUTH_TOKEN` into proxied HTTP and WebSocket requests;
+this variable is server-side and must never use a `VITE_` prefix.
 
 ## Quick Start: Backend
 
@@ -111,6 +114,55 @@ available; the development fallback is never accepted there.
 Open [http://localhost:8000/health](http://localhost:8000/health) for liveness,
 [http://localhost:8000/ready](http://localhost:8000/ready) for SQLite readiness,
 and [http://localhost:8000/docs](http://localhost:8000/docs) for Swagger UI.
+Interactive API documentation is disabled when `RENDER_NODE_ENV=production`.
+
+## Production Boundary
+
+Production startup requires both a secret `RENDER_NODE_AUTH_TOKEN` of at least
+32 characters and one or more exact HTTPS origins in
+`RENDER_NODE_ALLOWED_ORIGINS`. Keep the token outside git and frontend build
+variables. `/health` and `/ready` remain public for probes; every route under
+`/api/v1`, including `WS /api/v1/events`, requires the same
+`Authorization: Bearer ...` credential. Browser origins that are present but not
+allowlisted are rejected before the API handler runs.
+
+Browsers cannot attach a Bearer header to native WebSocket connections or plain
+artifact download links. Deploy the static frontend and API behind one HTTPS
+reverse proxy that injects the backend credential into both HTTP requests and
+WebSocket upgrades, and keep port 8000 private. The proxy-facing browser origin
+must be in `RENDER_NODE_ALLOWED_ORIGINS`. Do not expose the backend token to
+JavaScript or place it in a `VITE_*` variable.
+
+Production rendering remains deliberately fail-closed: this repository does not
+yet ship the required OS-isolated worker image/namespace, so enabling the render
+scheduler in production prevents application readiness. The development
+container is non-root for normal commands, but it is not a production image and
+does not prove the required network, filesystem, device, capability, or secret
+isolation.
+
+## Limits, Cleanup, and Backup
+
+JSON mutations default to 1 MiB and WebSocket client messages to 64 KiB. Scene,
+Blender archive, ZIP extraction, render time, process memory/pids, logs, and
+outputs have separate settings in [`.env.example`](.env.example). Uploads are
+bounded streaming multipart requests; resumable uploads are not implemented.
+
+Cleanup is conservative and explicit:
+
+- `DELETE /api/v1/jobs/{id}` removes the database row, artifacts, and the whole
+  server-generated job directory when the job is not active;
+- retry removes old output, previews, logs, temporary files, and artifact rows,
+  while preserving the uploaded scene;
+- startup clears per-job temporary directories and discards an input directory
+  left by an upload that never advanced its job beyond `CREATED`;
+- failed Blender download/install operations remove incomplete downloads and
+  quarantine/extraction data.
+
+There is no automatic age-based retention. Operators should delete completed
+jobs explicitly and monitor the low-space signal. For a consistent backup, stop
+new mutations and renders, then back up the SQLite database together with
+`/workspace/jobs` and `/workspace/blender/versions`. Restore the matching set and
+run `uv run alembic upgrade head` before startup.
 
 ### Dev Container
 
@@ -202,8 +254,10 @@ client.
 - secrets, uploads, Blender binaries, and render results are never committed;
 - production processes must not run as root.
 
-## Next Steps
+## Remaining Deployment Work
 
-1. Complete the phase-6 security, limits, cleanup, and restart-recovery audit.
-2. Remove remaining mock-only dependencies from the production path.
-3. Add an OS-isolated production worker boundary and cloud GPU smoke tests.
+- add the OS-isolated, non-root production worker boundary;
+- validate CUDA/OptiX and process isolation in a cloud GPU environment;
+- add resumable uploads if deployment networks require them;
+- add an operator-selected retention policy instead of deleting user results by
+  age implicitly.

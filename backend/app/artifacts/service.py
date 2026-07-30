@@ -58,6 +58,11 @@ class ArtifactService:
         self._max_zip_bytes = max_zip_bytes
         self._locks: dict[UUID, asyncio.Lock] = {}
 
+    def forget_job(self, job_id: UUID) -> None:
+        lock = self._locks.get(job_id)
+        if lock is None or not lock.locked():
+            self._locks.pop(job_id, None)
+
     async def register_output(self, job_id: UUID, output_path: Path) -> None:
         job_root = self._storage.job_directory(job_id)
         output_root = contained_path(job_root, job_root / "output")

@@ -7,7 +7,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Self
 
-from pydantic import AnyHttpUrl, Field, field_validator, model_validator
+from pydantic import AnyHttpUrl, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     api_prefix: str = "/api/v1"
     workspace: Path = Path("/workspace")
     database_url: str = ""
+    auth_token: SecretStr | None = None
+    max_api_request_mb: float = Field(default=1, gt=0, le=100)
+    websocket_message_max_kb: int = Field(default=64, ge=1, le=1024)
     max_upload_gb: float = Field(default=20, gt=0, le=1024)
     max_zip_files: int = Field(default=10_000, ge=1, le=100_000)
     max_zip_extracted_gb: float = Field(default=50, gt=0, le=2048)
@@ -102,6 +105,23 @@ class Settings(BaseSettings):
 
         if any(str(origin) == "*" for origin in self.allowed_origins):
             raise ValueError("allowed_origins cannot contain a wildcard")
+        if self.env is Environment.PRODUCTION and not self.allowed_origins:
+            raise ValueError("allowed_origins must contain an HTTPS origin in production")
+        for origin in self.allowed_origins:
+            if (
+                origin.path not in {"", "/"}
+                or origin.query is not None
+                or origin.fragment is not None
+                or origin.username is not None
+                or origin.password is not None
+            ):
+                raise ValueError("allowed_origins entries must be bare origins")
+            if self.env is Environment.PRODUCTION and origin.scheme != "https":
+                raise ValueError("production allowed_origins must use HTTPS")
+        if self.auth_token is not None and len(self.auth_token.get_secret_value()) < 32:
+            raise ValueError("auth_token must contain at least 32 characters")
+        if self.env is Environment.PRODUCTION and self.auth_token is None:
+            raise ValueError("auth_token is required in production")
         if self.blender_executable_override is not None:
             self.blender_executable_override = (
                 self.blender_executable_override.expanduser().resolve()
@@ -130,6 +150,14 @@ class Settings(BaseSettings):
     @property
     def max_upload_bytes(self) -> int:
         return int(self.max_upload_gb * 1024**3)
+
+    @property
+    def max_api_request_bytes(self) -> int:
+        return int(self.max_api_request_mb * 1024**2)
+
+    @property
+    def websocket_message_max_bytes(self) -> int:
+        return self.websocket_message_max_kb * 1024
 
     @property
     def max_zip_extracted_bytes(self) -> int:

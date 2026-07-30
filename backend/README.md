@@ -15,6 +15,12 @@ Set `RENDER_NODE_ALLOW_UNSANDBOXED_RUNNER=true` only for explicit local
 development. The production configuration fails closed while the deployment has
 no OS-isolated worker sandbox.
 
+Production additionally requires a secret `RENDER_NODE_AUTH_TOKEN` with at least
+32 characters and exact HTTPS `RENDER_NODE_ALLOWED_ORIGINS`. `/health` and
+`/ready` are public probes; every REST and WebSocket route below `/api/v1`
+requires the Bearer token. Keep the backend private behind an HTTPS reverse proxy
+that injects the credential for the browser frontend and WebSocket upgrades.
+
 Development checks:
 
 ```bash

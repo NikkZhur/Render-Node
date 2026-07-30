@@ -31,6 +31,12 @@ class JobUploadService:
         self._locks = locks
         self._events = event_hub
 
+    async def recover_incomplete_uploads(self) -> None:
+        async with self._database.session_factory() as session:
+            jobs = await JobRepository(session).list_by_status(JobStatus.CREATED)
+        for job in jobs:
+            await self._job_storage.delete_input(job.id)
+
     async def upload(self, job_id: UUID, file: UploadFile) -> Job:
         lock = await self._locks.get(job_id)
         async with lock:

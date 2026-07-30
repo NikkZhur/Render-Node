@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from uuid import UUID
 
 from httpx import ASGITransport, AsyncClient
@@ -90,6 +91,12 @@ async def test_jobs_survive_application_restart(job_settings: Settings) -> None:
         async with AsyncClient(transport=first_transport, base_url="http://test") as client:
             response = await client.post("/api/v1/jobs", json=job_payload("Persistent scene"))
             job_id = response.json()["id"]
+            job_root = job_settings.jobs_root / job_id
+            await asyncio.to_thread((job_root / "temp" / "upload.part").write_bytes, b"partial")
+            await asyncio.to_thread((job_root / "input").mkdir)
+            await asyncio.to_thread(
+                (job_root / "input" / "scene.blend").write_bytes, b"BLENDER-v300"
+            )
 
     second_app = create_app(job_settings)
     async with second_app.router.lifespan_context(second_app):
@@ -99,6 +106,26 @@ async def test_jobs_survive_application_restart(job_settings: Settings) -> None:
 
     assert jobs[0]["id"] == job_id
     assert jobs[0]["name"] == "Persistent scene"
+    assert list((job_settings.jobs_root / job_id / "temp").iterdir()) == []
+    assert not (job_settings.jobs_root / job_id / "input").exists()
+
+
+async def test_job_cannot_start_when_uploaded_scene_disappears(
+    job_client: AsyncClient, job_settings: Settings
+) -> None:
+    created = await job_client.post("/api/v1/jobs", json=job_payload())
+    job_id = created.json()["id"]
+    uploaded = await job_client.post(
+        f"/api/v1/jobs/{job_id}/uploads",
+        files={"file": ("scene.blend", b"BLENDER-v300", "application/octet-stream")},
+    )
+    assert uploaded.status_code == 200
+    await asyncio.to_thread((job_settings.jobs_root / job_id / "input" / "scene.blend").unlink)
+
+    response = await job_client.post(f"/api/v1/jobs/{job_id}/start")
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "job_scene_unavailable"
 
 
 async def test_unknown_job_uses_shared_error_contract(job_client: AsyncClient) -> None:

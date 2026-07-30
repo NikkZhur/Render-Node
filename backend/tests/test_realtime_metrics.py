@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 from uuid import UUID, uuid4
 
 from fastapi import FastAPI
@@ -14,9 +15,12 @@ from app.system.schemas import StorageStatus
 
 def receive_type(websocket: object, expected: str) -> dict[str, object]:
     for _ in range(10):
-        event = websocket.receive_json()  # type: ignore[attr-defined,no-any-return]
+        event = cast(
+            dict[str, object],
+            websocket.receive_json(),  # type: ignore[attr-defined]
+        )
         if event.get("type") == expected:
-            return event  # type: ignore[no-any-return]
+            return event
     raise AssertionError(f"WebSocket event {expected!r} was not received")
 
 

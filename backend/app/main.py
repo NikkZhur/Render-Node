@@ -13,14 +13,15 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.api.errors import register_error_handlers
 from app.api.router import api_v1_router, router
-from app.config import Settings
+from app.config import Environment, Settings
 from app.lifespan import lifespan
 from app.schemas import ErrorBody, ErrorResponse
+from app.security import ApiSecurityMiddleware, SecurityHeadersMiddleware
 
 MULTIPART_OVERHEAD_BYTES = 1024 * 1024
 
 
-class UploadBodyLimitMiddleware:
+class RequestBodyLimitMiddleware:
     def __init__(
         self,
         app: ASGIApp,
@@ -28,25 +29,27 @@ class UploadBodyLimitMiddleware:
         api_prefix: str,
         max_upload_bytes: int,
         max_blender_archive_bytes: int,
+        max_api_request_bytes: int,
     ) -> None:
         self.app = app
         self._path_prefix = f"{api_prefix}/jobs/"
         self._job_max_request_bytes = max_upload_bytes + MULTIPART_OVERHEAD_BYTES
         self._blender_upload_path = f"{api_prefix}/blender/versions/upload"
         self._blender_max_request_bytes = max_blender_archive_bytes + MULTIPART_OVERHEAD_BYTES
+        self._default_max_request_bytes = max_api_request_bytes
 
-    def _upload_limit(self, scope: Scope) -> int | None:
+    def _request_limit(self, scope: Scope) -> int | None:
         path = str(scope.get("path", ""))
-        if scope["type"] != "http" or scope.get("method") != "POST":
+        if scope["type"] != "http" or scope.get("method") not in {"POST", "PUT", "PATCH"}:
             return None
         if path.startswith(self._path_prefix) and path.endswith("/uploads"):
             return self._job_max_request_bytes
         if path == self._blender_upload_path:
             return self._blender_max_request_bytes
-        return None
+        return self._default_max_request_bytes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        max_request_bytes = self._upload_limit(scope)
+        max_request_bytes = self._request_limit(scope)
         if max_request_bytes is None:
             await self.app(scope, receive, send)
             return
@@ -93,7 +96,7 @@ class UploadBodyLimitMiddleware:
         payload = ErrorResponse(
             error=ErrorBody(
                 code="request_body_too_large",
-                message="Upload request exceeds the configured size limit",
+                message="Request body exceeds the configured size limit",
                 request_id=request_id,
             )
         )
@@ -132,6 +135,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         title=resolved_settings.app_name,
         version=resolved_settings.app_version,
         lifespan=lifespan,
+        docs_url=None if resolved_settings.env is Environment.PRODUCTION else "/docs",
+        redoc_url=None if resolved_settings.env is Environment.PRODUCTION else "/redoc",
+        openapi_url=(None if resolved_settings.env is Environment.PRODUCTION else "/openapi.json"),
     )
     app.state.settings = resolved_settings
     app.state.ready = False
@@ -140,17 +146,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(router)
     app.include_router(api_v1_router, prefix=resolved_settings.api_prefix)
     app.add_middleware(
-        CORSMiddleware,
-        allow_origins=resolved_settings.cors_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        ApiSecurityMiddleware,
+        api_prefix=resolved_settings.api_prefix,
+        auth_token=(
+            resolved_settings.auth_token.get_secret_value()
+            if resolved_settings.auth_token is not None
+            else None
+        ),
+        allowed_origins=resolved_settings.cors_origins,
     )
     app.add_middleware(
-        UploadBodyLimitMiddleware,
+        CORSMiddleware,
+        allow_origins=resolved_settings.cors_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
+        expose_headers=["Content-Disposition", "X-Request-ID"],
+    )
+    app.add_middleware(
+        RequestBodyLimitMiddleware,
         api_prefix=resolved_settings.api_prefix,
         max_upload_bytes=resolved_settings.max_upload_bytes,
         max_blender_archive_bytes=resolved_settings.max_blender_archive_bytes,
+        max_api_request_bytes=resolved_settings.max_api_request_bytes,
+    )
+    app.add_middleware(
+        SecurityHeadersMiddleware,
+        production=resolved_settings.env is Environment.PRODUCTION,
     )
     app.add_middleware(RequestIdMiddleware)
     return app

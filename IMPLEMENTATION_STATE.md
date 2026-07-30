@@ -1,77 +1,76 @@
 # Implementation state
 
-Краткий handoff между фазами backend-реализации. Код и миграции имеют приоритет,
-если этот файл с ними расходится.
+Краткий handoff backend-реализации. Код и миграции имеют приоритет, если этот
+файл с ними расходится.
 
 ## Текущее состояние
 
 - Обновлено: 2026-07-30.
-- Завершена фаза 5 — Realtime и artifacts.
-- Следующая фаза: 6 — Hardening и финал. Она не начата.
+- Фазы 1–6 из `BACKEND_IMPLEMENTATION_MASTER_PROMPT.md` завершены.
+- Следующей фазы в master prompt нет; дальнейшая работа — отдельные deployment
+  задачи, перечисленные ниже.
 - Пользовательский `Untitled.blend` не изменялся.
 
 ## Реализовано
 
-- Фазы 1–4: FastAPI/SQLite/Alembic foundation, safe Job/upload lifecycle,
-  Blender registry, backend-owned command, `SandboxRunner`, FIFO Job Manager,
-  progress, timeout и process-group cancel/recovery.
-- In-process `EventHub` и `WS /api/v1/events`: bounded subscriber queues,
-  job subscriptions, sequence/timestamp, overflow-событие `resync.required`.
-  Публикуются job status, render log/progress/preview/frame, Blender operation и
-  system metrics; изображения передаются только как HTTP URL.
-- Artifact metadata сохраняется в SQLite. Output watcher регистрирует закрытые
-  кадры; original остаётся неизменным, browser-safe PNG preview создаётся Pillow
-  с pixel/dimension limits. Пути проверяются внутри job, symlink запрещён.
-- Реализованы list/download/delete artifacts, frame pagination максимум 50,
-  preview/original, disk-built `frames.zip`, `blender.log` и bounded log tail.
-- CPU/RAM, best-effort temperature, NVML GPU/VRAM/power и storage free/throughput
-  доступны через REST и WebSocket. `low_space` означает <10% или <50 GiB
-  (пороги настраиваются); одинаковые filesystem mounts не дублируются.
-- Frontend использует TanStack Query для REST snapshot и WebSocket invalidation,
-  reconnect с exponential backoff и REST resync. Реальными стали Jobs,
-  log overlay, preview/full frame, frame/ZIP/log downloads, artifacts и metrics;
-  переключение job и reload восстанавливают данные с backend.
+- Фазы 1–5: FastAPI/SQLite/Alembic, безопасные jobs/uploads, Blender registry,
+  `SandboxRunner`, FIFO Job Manager, realtime, artifacts/previews и metrics.
+- Единая security boundary для REST и WebSocket: production требует Bearer
+  token длиной 32+ символа и точные HTTPS origins; `/health` и `/ready` публичны.
+  Origin проверяется до API handler, Swagger/OpenAPI в production отключены.
+- CORS ограничен настроенными origins, методами и заголовками; добавлены HSTS в
+  production и общие browser security headers. JSON mutation body по умолчанию
+  ограничен 1 MiB, клиентское WS-сообщение — 64 KiB; upload/archive limits
+  остаются отдельными.
+- Production scheduler fail-closed без OS sandbox. Development override не
+  разрешается в production и не считается production-проверкой.
+- Restart очищает per-job `temp` и input незавершённого `CREATED` upload.
+  Start/retry проверяет наличие contained regular scene. Retry очищает старые
+  output/preview/log/temp и artifact metadata, сохраняя input; delete освобождает
+  runtime locks.
+- Frontend mock API загружается только по `VITE_RENDER_NODE_MOCK=true`; mock
+  fixtures/chunk отсутствуют в production bundle. Vite proxy умеет server-side
+  Bearer injection для HTTP и WebSocket без передачи секрета в browser bundle.
+- README и env examples описывают auth/reverse proxy, limits, cleanup, backup и
+  остаточные production-риски.
 
 ## Контракты и миграции
 
-- Новый Alembic head: `20260730_0004`; таблица `artifacts` с UUID, job FK,
-  kind, contained relative path, content type/size, frame и UTC created time.
-- `WS /api/v1/events`; client action `{"action":"subscribe","job_ids":[...]}`
-  либо `null` для всех jobs. При потере backpressure клиент получает
-  `resync.required` и обновляет REST queries.
-- `GET /api/v1/jobs/{id}/artifacts`, `GET/DELETE .../artifacts/{artifact_id}`.
-- `GET /api/v1/jobs/{id}/frames?page=1&page_size=50`,
-  `.../frames/{frame}/preview`, `.../original`, `.../frames.zip`.
-- `GET /api/v1/jobs/{id}/logs/blender` и `.../logs/blender/tail?lines=100`.
-- `GET /api/v1/system/metrics` возвращает CPU, GPU, storage и число WS clients.
+- Alembic head остаётся `20260730_0004`; schema change в фазе 6 не требовался,
+  `alembic check` не обнаруживает новых операций.
+- Все `/api/v1/**` REST/WS routes используют один Bearer contract, если настроен
+  `RENDER_NODE_AUTH_TOKEN`; production без token или HTTPS allowlist не стартует.
+- `WS /api/v1/events` закрывает unauthorized/forbidden handshake кодами 4401/4403
+  и oversized client message кодом 1009.
+- Новые настройки: `RENDER_NODE_AUTH_TOKEN`, `RENDER_NODE_MAX_API_REQUEST_MB`,
+  `RENDER_NODE_WEBSOCKET_MESSAGE_MAX_KB`.
 
 ## Последняя проверка
 
-- Backend: Ruff format/lint и strict mypy — успешно; `pytest` — 100 passed.
-  Покрыты EventHub filter/backpressure, WS contract, metrics/low-space,
-  persisted preview/original/log/ZIP, pagination 51 -> 50+1, URL-only frame
-  events, fake render/cancel и тесты предыдущих фаз.
-- Frontend: ESLint и production Vite build — успешно.
-- Playwright real backend + fake Blender: WebSocket log/progress, HTTP preview,
-  full-size frame, frame и ZIP downloads, artifacts, CPU/storage metrics, job
-  switch, reload recovery, empty artifact state и cancel — успешно.
-- Playwright mock desktop/mobile smoke и real API upload/reload smoke — успешно.
-  Dashboard 1440x900 проверен визуально и на horizontal overflow/viewport fit.
+- Backend: Ruff format/lint — успешно; strict mypy `app tests` — успешно;
+  все 113 pytest tests пройдены двумя исчерпывающими группами (39 + 74).
+  Покрыты auth/CORS/headers, REST+WS boundary, body/WS limits, production sandbox
+  fail-closed, retry cleanup, missing scene и restart cleanup/recovery.
+- Alembic: upgrade пустой БД, `alembic check` и `current` — успешно, head
+  `20260730_0004`.
+- Frontend: ESLint, production Vite build и explicit mock build — успешно.
+  Production bundle проверен на отсутствие mock chunk и fixture markers.
+- Playwright mock smoke: desktop/mobile fit, versions, render/cancel, live log и
+  dialogs — успешно. Playwright real API smoke: upload -> `READY` и reload —
+  успешно как без auth, так и через server-side Bearer proxy для REST+WebSocket.
 
-## Известные ограничения
+## Известные ограничения и дальнейшая работа
 
-- В dev-контейнере нет production Blender image и GPU. Реальный CPU Blender,
-  CUDA/OptiX и bundled binaries не проверялись; GPU/OptiX работа не заявляется.
-- Локальный test/development runner не является OS sandbox. Production
-  fail-closed до появления отдельного namespace/container worker.
-- EventHub однопроцессный и неперсистентный; REST является источником resync.
-  Это соответствует одноузловому MVP, но не горизонтальному deployment.
-- EXR/TIFF original скачивается без изменений; preview создаётся только для
-  форматов, которые Pillow может безопасно декодировать. Если decode невозможен,
-  original остаётся доступным без preview.
-
-## Handoff следующей фазе
-
-После следующего сообщения `продолжай` выполнить только фазу 6: auth/CORS/limits,
-cleanup/restart audit, production sandbox fail-closed, удаление mock-зависимостей
-из production path, финальная документация и полный verification matrix.
+- Production worker image/namespace с network/filesystem/device isolation и
+  non-root runtime ещё не реализован; поэтому production rendering намеренно не
+  достигает readiness при включённом scheduler.
+- В контейнере нет production Blender image и GPU. Реальный Blender CPU,
+  CUDA/OptiX, GPU isolation и bundled binaries не проверялись; их работа не
+  заявляется.
+- Browser deployment с Bearer требует приватного backend за HTTPS reverse proxy,
+  который добавляет credential в HTTP и WebSocket upgrades. Токен нельзя
+  помещать в `VITE_*` или JavaScript.
+- Resumable upload и автоматическая retention policy не реализованы. Cleanup
+  explicit; оператор удаляет jobs и выполняет согласованный backup SQLite/jobs.
+- TestClient выдаёт upstream Starlette deprecation warning о будущем `httpx2`;
+  на результат тестов это не влияет.

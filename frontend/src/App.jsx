@@ -1,75 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { artifactsApi, blenderApi, devicesApi, isMockMode, jobsApi, systemApi } from "./api";
-import { mockApi } from "./mockApi";
+import { artifactsApi, blenderApi, devicesApi, jobsApi, systemApi } from "./api";
 import { useRenderEvents } from "./realtime";
 import { useUiStore } from "./store";
 
-const initialJobs = [
-  {
-    id: "job-live",
-    shortId: "8F2A",
-    name: "Atrium lighting",
-    file: "atrium_final.blend",
-    status: "ready",
-    progress: 0,
-    frame: "1–240",
-    engine: "Cycles",
-    device: "OptiX",
-    version: "4.5.11",
-    created: "Just now",
-  },
-  {
-    id: "job-queued",
-    shortId: "B17C",
-    name: "Product turntable",
-    file: "headphones.blend",
-    status: "ready",
-    progress: 0,
-    frame: "1–72",
-    engine: "Cycles",
-    device: "CUDA",
-    version: "4.5.11",
-    created: "8 min ago",
-  },
-  {
-    id: "job-complete",
-    shortId: "41DE",
-    name: "Loft still",
-    file: "loft_camera_03.blend",
-    status: "completed",
-    progress: 100,
-    frame: "Frame 48",
-    engine: "Cycles",
-    device: "OptiX",
-    version: "4.2.22",
-    created: "Yesterday",
-  },
-  {
-    id: "job-failed",
-    shortId: "90AA",
-    name: "Forest study",
-    file: "forest_v12.blend",
-    status: "failed",
-    progress: 36,
-    frame: "1–240",
-    engine: "Cycles",
-    device: "OptiX",
-    version: "4.1.1",
-    created: "2 days ago",
-  },
-];
-
-const logLines = [
-  ["09:41:12", "Scene loaded in 2.8s"],
-  ["09:41:13", "Cycles: using NVIDIA RTX 4090 (OptiX)"],
-  ["09:41:14", "Synchronizing object | Atrium_Glass_04"],
-  ["09:41:16", "Loading render kernels (may take a few minutes)"],
-  ["09:41:18", "Fra: 001 | Mem: 4.21G | Time: 00:00.82"],
-  ["09:41:20", "Path Tracing Sample 48 / 512"],
-];
-
-const FRAME_COUNT = 240;
 const FRAMES_PER_PAGE = 50;
 const COMPUTE_DEVICES = ["OptiX", "CUDA", "CPU"];
 const FRAME_MODES = ["single", "range", "all"];
@@ -79,6 +13,7 @@ const ENGINE_API_VALUES = {
   Eevee: "BLENDER_EEVEE",
   Workbench: "BLENDER_WORKBENCH",
 };
+const emptyListQuery = async () => [];
 const draftJob = {
   id: "draft",
   shortId: "NEW",
@@ -414,7 +349,17 @@ function DropdownField({ label, onChange, options, value }) {
   );
 }
 
-function JobSetup({ activeVersion, devices, job, onStart, onCancel, onSceneUpload, uploadError, uploading }) {
+function JobSetup({
+  activeVersion,
+  devices,
+  isMockMode,
+  job,
+  onStart,
+  onCancel,
+  onSceneUpload,
+  uploadError,
+  uploading,
+}) {
   const [engine, setEngine] = useState(job.engine ?? "Cycles");
   const [device, setDevice] = useState(job.device ?? "OptiX");
   const [frameMode, setFrameMode] = useState(job.frame_mode?.toLowerCase() ?? "range");
@@ -639,7 +584,7 @@ function FramePreviewModal({ frameNumber, imageUrl, onClose }) {
   );
 }
 
-function RenderPreview({ job, liveLogs = [] }) {
+function RenderPreview({ isMockMode, job, liveLogs = [], mockLogLines = [] }) {
   const [frameOpen, setFrameOpen] = useState(false);
   const isRendering = job.status === "rendering";
   const canLoadOutput = !isMockMode && job.id !== "draft";
@@ -665,7 +610,7 @@ function RenderPreview({ job, liveLogs = [] }) {
   const currentFrame = latestFrame?.frame ?? job.current_frame ?? job.frame_start ?? 1;
   const frameNumber = String(currentFrame).padStart(3, "0");
   const displayedLogs = isMockMode
-    ? logLines.slice(-4)
+    ? mockLogLines.slice(-4)
     : (liveLogs.length ? liveLogs : (logQuery.data?.lines ?? []))
       .slice(-4)
       .map((line) => ["", line]);
@@ -986,7 +931,8 @@ function useDialogBehavior(onClose, initialFocusRef) {
   return dialogRef;
 }
 
-function FrameSequencePanel({ jobId, onClose }) {
+function FrameSequencePanel({ jobId, mockApi, onClose }) {
+  const isMockMode = mockApi !== null;
   const closeButton = useRef(null);
   const dialogRef = useDialogBehavior(onClose, closeButton);
   const entered = useModalEntrance();
@@ -998,7 +944,7 @@ function FrameSequencePanel({ jobId, onClose }) {
       : artifactsApi.frames(jobId, { page, pageSize: FRAMES_PER_PAGE, signal }),
   });
   const frames = framesQuery.data?.items ?? [];
-  const totalFrames = framesQuery.data?.total ?? (isMockMode ? FRAME_COUNT : 0);
+  const totalFrames = framesQuery.data?.total ?? (mockApi?.frameCount ?? 0);
   const pageCount = Math.max(1, framesQuery.data?.pages ?? Math.ceil(totalFrames / FRAMES_PER_PAGE));
   const pageStart = (page - 1) * FRAMES_PER_PAGE;
   const pageEnd = Math.min(pageStart + FRAMES_PER_PAGE, totalFrames);
@@ -1055,7 +1001,8 @@ function FrameSequencePanel({ jobId, onClose }) {
   );
 }
 
-function Artifacts({ job }) {
+function Artifacts({ job, mockApi }) {
+  const isMockMode = mockApi !== null;
   const [framesOpen, setFramesOpen] = useState(false);
   const enabled = !isMockMode && job.id !== "draft";
   const framesQuery = useQuery({
@@ -1068,7 +1015,7 @@ function Artifacts({ job }) {
     queryFn: ({ signal }) => artifactsApi.list(job.id, { signal }),
     enabled,
   });
-  const frameCount = isMockMode ? FRAME_COUNT : (framesQuery.data?.total ?? 0);
+  const frameCount = mockApi?.frameCount ?? framesQuery.data?.total ?? 0;
   const pageCount = Math.max(1, Math.ceil(frameCount / FRAMES_PER_PAGE));
   const logArtifact = isMockMode
     ? { filename: "blender.log", size_bytes: 284 * 1024 }
@@ -1098,7 +1045,13 @@ function Artifacts({ job }) {
           {!frameCount && !logArtifact && <p className="artifacts-empty">No artifacts yet</p>}
         </div>
       </section>
-      {framesOpen && <FrameSequencePanel jobId={job.id} onClose={() => setFramesOpen(false)} />}
+      {framesOpen && (
+        <FrameSequencePanel
+          jobId={job.id}
+          mockApi={mockApi}
+          onClose={() => setFramesOpen(false)}
+        />
+      )}
     </>
   );
 }
@@ -1315,29 +1268,38 @@ function VersionPanel({
   );
 }
 
-export default function App() {
+export default function App({ mockApi = null }) {
+  const isMockMode = mockApi !== null;
   const queryClient = useQueryClient();
   const versionPanelOpen = useUiStore((state) => state.versionPanelOpen);
   const setVersionPanelOpen = useUiStore((state) => state.setVersionPanelOpen);
   const selectedJobId = useUiStore((state) => state.selectedJobId);
   const setSelectedJobId = useUiStore((state) => state.setSelectedJobId);
-  const [mockJobs, setMockJobs] = useState(initialJobs);
+  const [mockJobs, setMockJobs] = useState(() => mockApi?.initialJobs ?? []);
   const [theme, setTheme] = useState(getInitialTheme);
-  const realtime = useRenderEvents(queryClient);
+  const realtime = useRenderEvents(queryClient, !isMockMode);
 
   const jobsQuery = useQuery({
     queryKey: ["jobs"],
     queryFn: jobsApi.list,
     enabled: !isMockMode,
   });
-  const versionApi = isMockMode ? mockApi : blenderApi;
+  const versionApi = mockApi ?? blenderApi;
   const versionsQuery = useQuery({ queryKey: ["versions"], queryFn: versionApi.getVersions });
   const devicesQuery = useQuery({
     queryKey: ["devices"],
     queryFn: isMockMode ? mockApi.getDevices : devicesApi.list,
   });
-  const processorsQuery = useQuery({ queryKey: ["processors"], queryFn: mockApi.getProcessors, enabled: isMockMode });
-  const storagesQuery = useQuery({ queryKey: ["storages"], queryFn: mockApi.getStorages, enabled: isMockMode });
+  const processorsQuery = useQuery({
+    queryKey: ["processors"],
+    queryFn: mockApi?.getProcessors ?? emptyListQuery,
+    enabled: isMockMode,
+  });
+  const storagesQuery = useQuery({
+    queryKey: ["storages"],
+    queryFn: mockApi?.getStorages ?? emptyListQuery,
+    enabled: isMockMode,
+  });
   const metricsQuery = useQuery({
     queryKey: ["metrics"],
     queryFn: systemApi.metrics,
@@ -1408,7 +1370,7 @@ export default function App() {
     onSuccess: updateJobCache,
   });
   const liveJob = isMockMode
-    ? (jobs.find((job) => job.id === "job-live") ?? jobs[0])
+    ? (jobs[0] ?? draftJob)
     : (jobs.find((job) => job.status === "rendering" || job.status === "queued")
       ?? jobs.find((job) => job.status === "ready")
       ?? jobs[0]
@@ -1447,28 +1409,28 @@ export default function App() {
       );
     }, 650);
     return () => window.clearInterval(interval);
-  }, [isRendering]);
+  }, [isMockMode, isRendering]);
 
-  const displayJob = useMemo(() => {
-    if (isMockMode && selectedJob.id === "job-live") return liveJob;
-    return selectedJob;
-  }, [liveJob, selectedJob]);
+  const displayJob = selectedJob;
 
   const startRender = () => {
     if (!isMockMode) {
       if (liveJob.status === "ready") startJobMutation.mutate(liveJob.id);
       return;
     }
-    setSelectedJobId("job-live");
-    setMockJobs((currentJobs) =>
-      currentJobs.map((job) =>
-        job.id === "job-live"
+    setSelectedJobId(liveJob.id);
+    setMockJobs((currentJobs) => {
+      const nextReadyJob = currentJobs.find(
+        (job) => job.id !== liveJob.id && job.status === "ready",
+      );
+      return currentJobs.map((job) =>
+        job.id === liveJob.id
           ? { ...job, status: "rendering", progress: 12, created: "Running now", version: activeVersion }
-          : job.id === "job-queued" && job.status === "ready"
+          : job.id === nextReadyJob?.id
             ? { ...job, status: "queued" }
             : job,
-      ),
-    );
+      );
+    });
   };
 
   const cancelRender = () => {
@@ -1478,15 +1440,16 @@ export default function App() {
       }
       return;
     }
-    setMockJobs((currentJobs) =>
-      currentJobs.map((job) =>
-        job.id === "job-live" && job.status === "rendering"
+    setMockJobs((currentJobs) => {
+      const queuedJob = currentJobs.find((job) => job.status === "queued");
+      return currentJobs.map((job) =>
+        job.id === liveJob.id && job.status === "rendering"
           ? { ...job, status: "cancelled", created: "Cancelled now" }
-          : job.id === "job-queued" && job.status === "queued"
+          : job.id === queuedJob?.id
             ? { ...job, status: "ready" }
             : job,
-      ),
-    );
+      );
+    });
   };
 
   return (
@@ -1507,6 +1470,7 @@ export default function App() {
           <JobSetup
             activeVersion={activeVersion}
             devices={devicesQuery.data ?? []}
+            isMockMode={isMockMode}
             job={liveJob}
             key={liveJob.id}
             onCancel={cancelRender}
@@ -1523,10 +1487,15 @@ export default function App() {
             }
             uploading={sceneUploadMutation.isPending}
           />
-          <RenderPreview job={displayJob} liveLogs={realtime.logsByJob[displayJob.id] ?? []} />
+          <RenderPreview
+            isMockMode={isMockMode}
+            job={displayJob}
+            liveLogs={realtime.logsByJob[displayJob.id] ?? []}
+            mockLogLines={mockApi?.logLines}
+          />
           <div className="right-rail">
             <JobQueue jobs={jobs} onSelect={setSelectedJobId} selectedJobId={selectedJobId} />
-            <Artifacts job={displayJob} />
+            <Artifacts job={displayJob} mockApi={mockApi} />
           </div>
           <Metrics
             devices={metricDevices}

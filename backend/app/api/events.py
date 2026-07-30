@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any, cast
 from uuid import UUID
 
@@ -50,7 +51,18 @@ async def events(websocket: WebSocket) -> None:
     sender = asyncio.create_task(_send_events(websocket, subscription))
     try:
         while True:
-            message = await websocket.receive_json()
+            raw_message = await websocket.receive_text()
+            max_message_bytes = websocket.app.state.settings.websocket_message_max_bytes
+            if len(raw_message.encode("utf-8")) > max_message_bytes:
+                await websocket.close(code=1009, reason="WebSocket message is too large")
+                return
+            try:
+                message = json.loads(raw_message)
+            except json.JSONDecodeError:
+                await websocket.send_json(
+                    {"type": "connection.error", "message": "Expected valid JSON"}
+                )
+                continue
             if not isinstance(message, dict):
                 await websocket.send_json(
                     {"type": "connection.error", "message": "Expected a JSON object"}

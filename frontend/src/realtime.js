@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { eventsApi, isMockMode, presentMetrics } from "./api";
+import { eventsApi, presentMetrics } from "./api";
 
 const MAX_LOG_LINES = 500;
 
@@ -13,12 +13,12 @@ const resync = (queryClient) => {
   queryClient.invalidateQueries({ queryKey: ["log-tail"] });
 };
 
-export function useRenderEvents(queryClient) {
+export function useRenderEvents(queryClient, enabled = true) {
   const [logsByJob, setLogsByJob] = useState({});
-  const [connectionState, setConnectionState] = useState(isMockMode ? "mock" : "connecting");
+  const [connectionState, setConnectionState] = useState(enabled ? "connecting" : "mock");
 
   useEffect(() => {
-    if (isMockMode) return undefined;
+    if (!enabled) return undefined;
     let closed = false;
     let retryTimer;
     let retryDelay = 500;
@@ -84,7 +84,7 @@ export function useRenderEvents(queryClient) {
       window.clearTimeout(retryTimer);
       socket?.close();
     };
-  }, [queryClient]);
+  }, [enabled, queryClient]);
 
   return { connectionState, logsByJob };
 }

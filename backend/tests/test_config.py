@@ -35,5 +35,7 @@ def test_database_driver_must_be_async_sqlite() -> None:
 
 def test_environment_uses_documented_variable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RENDER_NODE_ENV", "production")
+    monkeypatch.setenv("RENDER_NODE_AUTH_TOKEN", "a" * 32)
+    monkeypatch.setenv("RENDER_NODE_ALLOWED_ORIGINS", "https://render.example.com")
 
     assert Settings().env is Environment.PRODUCTION

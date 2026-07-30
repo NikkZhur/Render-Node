@@ -222,6 +222,38 @@ async def test_frame_pagination_is_persistent_and_bounded(render_settings: Setti
     assert [item["frame"] for item in second_page.json()["items"]] == [51]
 
 
+async def test_retry_clears_previous_runtime_files_and_artifacts(
+    render_settings: Settings,
+) -> None:
+    app = create_app(render_settings.model_copy(update={"render_scheduler_enabled": False}))
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            job_id = await create_ready_job(client, "Retry cleanup", b"BLENDER-v300")
+            assert (await client.post(f"/api/v1/jobs/{job_id}/start")).status_code == 200
+            cancelled = await client.post(f"/api/v1/jobs/{job_id}/cancel")
+            assert cancelled.json()["status"] == "cancelled"
+
+            job_root = render_settings.jobs_root / str(job_id)
+            output_path = job_root / "output" / "frame_0001.png"
+            log_path = job_root / "logs" / "blender.log"
+            await asyncio.to_thread(output_path.write_bytes, PNG_1X1)
+            await asyncio.to_thread(log_path.write_text, "old render log", encoding="utf-8")
+            await asyncio.to_thread((job_root / "temp" / "scratch").write_bytes, b"old")
+            await app.state.artifact_service.register_output(job_id, output_path)
+            await app.state.artifact_service.register_log(job_id)
+            assert len((await client.get(f"/api/v1/jobs/{job_id}/artifacts")).json()) == 3
+
+            retried = await client.post(f"/api/v1/jobs/{job_id}/retry")
+
+            assert retried.status_code == 200
+            assert retried.json()["status"] == "queued"
+            assert (job_root / "input" / "scene.blend").is_file()
+            for name in ("output", "preview", "logs", "temp"):
+                assert list((job_root / name).iterdir()) == []
+            assert (await client.get(f"/api/v1/jobs/{job_id}/artifacts")).json() == []
+
+
 async def test_rendering_cancel_stops_fake_blender_process_group(
     render_settings: Settings,
 ) -> None:

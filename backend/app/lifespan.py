@@ -36,7 +36,9 @@ async def _prepare_storage(settings: Settings) -> BlenderStorage:
     await asyncio.to_thread(settings.workspace.mkdir, parents=True, exist_ok=True)
     if settings.database_path is not None:
         await asyncio.to_thread(settings.database_path.parent.mkdir, parents=True, exist_ok=True)
-    await JobStorage(settings.jobs_root).prepare_root()
+    job_storage = JobStorage(settings.jobs_root)
+    await job_storage.prepare_root()
+    await job_storage.cleanup_runtime_temporaries()
     blender_storage = BlenderStorage(
         settings.blender_versions_root,
         settings.blender_downloads_root,
@@ -111,10 +113,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.gpu_discovery = gpu_discovery
     app.state.job_manager = job_manager
-    app.state.job_service = JobService(database, job_storage, locks, event_hub, job_manager)
-    app.state.job_upload_service = JobUploadService(
-        database, upload_storage, job_storage, locks, event_hub
+    app.state.job_service = JobService(
+        database, job_storage, locks, event_hub, artifact_service, job_manager
     )
+    job_upload_service = JobUploadService(database, upload_storage, job_storage, locks, event_hub)
+    app.state.job_upload_service = job_upload_service
     blender_service = BlenderService(
         database,
         blender_storage,
@@ -149,6 +152,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 f"(current={revision or 'none'}, expected={EXPECTED_DATABASE_REVISION})"
             )
         sandbox_policy.ensure_startup_ready(scheduler_enabled=settings.render_scheduler_enabled)
+        await job_upload_service.recover_incomplete_uploads()
         await blender_service.initialize()
         await job_manager.start()
         await system_metrics_service.start()

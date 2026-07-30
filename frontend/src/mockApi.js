@@ -144,7 +144,75 @@ const storages = [
 
 const frameCount = 240;
 
+const initialJobs = [
+  {
+    id: "job-live",
+    shortId: "8F2A",
+    name: "Atrium lighting",
+    file: "atrium_final.blend",
+    status: "ready",
+    progress: 0,
+    frame: "1–240",
+    engine: "Cycles",
+    device: "OptiX",
+    version: "4.5.11",
+    created: "Just now",
+  },
+  {
+    id: "job-queued",
+    shortId: "B17C",
+    name: "Product turntable",
+    file: "headphones.blend",
+    status: "ready",
+    progress: 0,
+    frame: "1–72",
+    engine: "Cycles",
+    device: "CUDA",
+    version: "4.5.11",
+    created: "8 min ago",
+  },
+  {
+    id: "job-complete",
+    shortId: "41DE",
+    name: "Loft still",
+    file: "loft_camera_03.blend",
+    status: "completed",
+    progress: 100,
+    frame: "Frame 48",
+    engine: "Cycles",
+    device: "OptiX",
+    version: "4.2.22",
+    created: "Yesterday",
+  },
+  {
+    id: "job-failed",
+    shortId: "90AA",
+    name: "Forest study",
+    file: "forest_v12.blend",
+    status: "failed",
+    progress: 36,
+    frame: "1–240",
+    engine: "Cycles",
+    device: "OptiX",
+    version: "4.1.1",
+    created: "2 days ago",
+  },
+];
+
+const logLines = [
+  ["09:41:12", "Scene loaded in 2.8s"],
+  ["09:41:13", "Cycles: using NVIDIA RTX 4090 (OptiX)"],
+  ["09:41:14", "Synchronizing object | Atrium_Glass_04"],
+  ["09:41:16", "Loading render kernels (may take a few minutes)"],
+  ["09:41:18", "Fra: 001 | Mem: 4.21G | Time: 00:00.82"],
+  ["09:41:20", "Path Tracing Sample 48 / 512"],
+];
+
 export const mockApi = {
+  frameCount,
+  initialJobs,
+  logLines,
+
   async getVersions() {
     await wait(140);
     return versions.map((version) => ({ ...version }));

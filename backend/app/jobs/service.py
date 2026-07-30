@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from app.artifacts.repository import ArtifactRepository
+from app.artifacts.service import ArtifactService
 from app.blender.repository import BlenderRepository
 from app.events.hub import EventHub
 from app.jobs.exceptions import JobConflictError, JobNotFoundError
@@ -29,12 +30,14 @@ class JobService:
         storage: JobStorage,
         locks: JobLocks,
         event_hub: EventHub,
+        artifact_service: ArtifactService,
         manager: JobManager | None = None,
     ) -> None:
         self._database = database
         self._storage = storage
         self._locks = locks
         self._events = event_hub
+        self._artifacts = artifact_service
         self._manager = manager
 
     async def create(self, payload: JobCreate) -> Job:
@@ -84,6 +87,8 @@ class JobService:
                 await ArtifactRepository(session).delete_for_job(job_id)
                 await repository.delete(job)
             await self._storage.delete_job(job_id)
+        await self._locks.discard(job_id)
+        self._artifacts.forget_job(job_id)
         await self._events.publish("job.deleted", job_id=str(job_id))
 
     async def start(self, job_id: UUID) -> Job:
@@ -108,6 +113,21 @@ class JobService:
     async def retry(self, job_id: UUID) -> Job:
         lock = await self._locks.get(job_id)
         async with lock:
+            async with self._database.session_factory() as session:
+                job = await self._require(JobRepository(session), job_id)
+                transition_job(job.status, JobStatus.QUEUED)
+                active_runtime = await BlenderRepository(session).active_runtime()
+                if active_runtime is None or active_runtime.version != job.blender_version:
+                    raise JobConflictError(
+                        "job_blender_not_active",
+                        "The Blender version recorded for this job is not active",
+                    )
+                scene_path = job.scene_path
+            if not await self._storage.scene_exists(job_id, scene_path):
+                raise JobConflictError(
+                    "job_scene_unavailable", "The uploaded Blender scene is unavailable"
+                )
+            await self._storage.reset_runtime(job_id)
             async with self._database.session_factory() as session, session.begin():
                 job = await self._require(JobRepository(session), job_id)
                 active_runtime = await BlenderRepository(session).active_runtime()
@@ -116,6 +136,7 @@ class JobService:
                         "job_blender_not_active",
                         "The Blender version recorded for this job is not active",
                     )
+                await ArtifactRepository(session).delete_for_job(job_id)
                 job.status = transition_job(job.status, JobStatus.QUEUED)
                 job.current_frame = None
                 job.progress = 0.0
@@ -124,6 +145,7 @@ class JobService:
                 job.finished_at = None
                 job.exit_code = None
                 job.error = None
+            self._artifacts.forget_job(job_id)
             if self._manager is not None:
                 self._manager.notify_queued()
             await self._publish_status(job)
@@ -135,6 +157,7 @@ class JobService:
             async with self._database.session_factory() as session, session.begin():
                 repository = JobRepository(session)
                 job = await self._require(repository, job_id)
+                next_status = transition_job(job.status, target)
                 if target is JobStatus.QUEUED:
                     active_runtime = await BlenderRepository(session).active_runtime()
                     if active_runtime is None or active_runtime.version != job.blender_version:
@@ -142,7 +165,11 @@ class JobService:
                             "job_blender_not_active",
                             "The Blender version recorded for this job is not active",
                         )
-                job.status = transition_job(job.status, target)
+                    if not await self._storage.scene_exists(job_id, job.scene_path):
+                        raise JobConflictError(
+                            "job_scene_unavailable", "The uploaded Blender scene is unavailable"
+                        )
+                job.status = next_status
             return job
 
     @staticmethod

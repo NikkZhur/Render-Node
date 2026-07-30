@@ -227,8 +227,11 @@ async def test_official_operation_api_contract(job_app: FastAPI, job_settings: S
             max_extracted_bytes=job_settings.max_blender_extracted_bytes,
             max_files=job_settings.max_blender_archive_files,
         )
-        service = BlenderService(  # type: ignore[arg-type]
-            job_app.state.database, storage, catalog, job_app.state.event_hub
+        service = BlenderService(
+            job_app.state.database,
+            storage,
+            catalog,  # type: ignore[arg-type]
+            job_app.state.event_hub,
         )
         await storage.prepare()
         await service.initialize()
