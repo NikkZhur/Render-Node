@@ -10,23 +10,33 @@ one machine, while keeping the public API suitable for moving the worker to a
 separate node later.
 
 > [!IMPORTANT]
-> The repository currently contains an interactive frontend prototype backed by
-> mock data. It does not launch Blender or perform real renders yet. The backend,
-> persistent job queue, storage, and Blender runner are defined in the
-> architecture and will be implemented in the next stages.
+> The repository now contains the persistent Job API, safe scene uploads, the
+> Blender version manager, single-process render scheduler, realtime events,
+> persistent result artifacts/previews, and system metrics.
 
 ## What Works Today
 
 - responsive desktop and mobile interface;
 - job setup for scene, render engine, compute device, frames, and GPUs;
 - all available GPUs selected by default;
-- job list with the primary lifecycle states;
-- preview, live log, and simulated render progress;
-- artifacts and a paginated frame list with 150 items per page;
+- persistent Job list and explicit lifecycle state machine;
+- bounded `.blend`/ZIP uploads with contained server-generated paths;
+- backend-owned Blender commands with automatic Python disabled;
+- one active render process, FIFO queueing, persisted progress, timeout, restart
+  recovery, and process-group cancellation;
+- raw Blender logs stored and downloadable inside the job directory;
+- WebSocket job/progress/log/preview/operation/metrics events with REST resync;
+- persistent preview/original frame metadata, frame pages capped at 50, and
+  disk-built frame ZIP downloads;
+- real preview, log overlay, jobs, artifacts, CPU/GPU/storage metrics, and
+  low-space warning in normal frontend mode;
 - management of installed and available Blender versions;
 - separate metric rows for every CPU and GPU with internal scrolling;
 - light and dark themes, with dark used by default;
-- Playwright smoke tests for the main UI workflows.
+- Playwright smoke tests for the main UI workflows;
+- FastAPI application lifecycle and versioned API router;
+- async SQLite persistence with SQLAlchemy and Alembic migrations;
+- health/readiness endpoints, shared error responses, and development CORS.
 
 ## Target MVP
 
@@ -77,11 +87,36 @@ Open [http://localhost:5173](http://localhost:5173). Vite is configured to liste
 on `0.0.0.0:5173`, so the page is accessible from the host when the container port
 is forwarded.
 
+`npm run dev` uses the real Job API through Vite's `/api` proxy. Run
+`npm run dev:mock` only when the explicit legacy mock mode is needed. Set
+`RENDER_NODE_BACKEND_URL` when the backend is not available at
+`http://127.0.0.1:8000`.
+
+## Quick Start: Backend
+
+Python 3.13 and `uv` are required.
+
+```bash
+cd backend
+uv sync
+uv run alembic upgrade head
+uv run uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000
+```
+
+Local Blender execution is intentionally disabled by default. For an isolated
+development machine only, set `RENDER_NODE_ALLOW_UNSANDBOXED_RUNNER=true`.
+Production refuses to enable rendering until an OS-isolated worker sandbox is
+available; the development fallback is never accepted there.
+
+Open [http://localhost:8000/health](http://localhost:8000/health) for liveness,
+[http://localhost:8000/ready](http://localhost:8000/ready) for SQLite readiness,
+and [http://localhost:8000/docs](http://localhost:8000/docs) for Swagger UI.
+
 ### Dev Container
 
 The repository includes a VS Code Dev Container configuration with Python 3.13,
-`uv`, Node.js 22, and port `5173` forwarding. After opening the repository in the
-container, run the frontend commands shown above.
+`uv`, Node.js 22, and ports `5173` and `8000` forwarding. After opening the
+repository in the container, run the commands shown above.
 
 The current [`.devcontainer/Dockerfile`](.devcontainer/Dockerfile) is intended for
 development and is not the production Render Node image.
@@ -92,6 +127,8 @@ development and is not the production Render Node image.
 cd frontend
 npm run lint
 npm run build
+npm run dev:mock
+# In another terminal:
 npm run qa:smoke
 ```
 
@@ -101,17 +138,26 @@ If Playwright Chromium is not installed yet:
 npx playwright install chromium
 ```
 
-The smoke test covers desktop, ultrawide, compact desktop, and mobile layouts. It
-checks GPU selection, Blender version management, mock render start and cancel,
-the live log, artifacts, frame pagination, themes, and horizontal overflow.
+The mock smoke test covers desktop, ultrawide, compact desktop, and mobile
+layouts. With backend and real-mode Vite running, `npm run qa:api` additionally
+checks scene upload, `READY`, and persistence after reload. `npm run qa:runner`
+uses fake Blender to check WebSocket progress/logs, preview and full-frame
+delivery, frame/ZIP downloads, artifact recovery after reload, metrics, and
+process-group cancellation.
 
 ## Current Repository Structure
 
 ```text
 .
 ├── .devcontainer/                 # Development environment and port forwarding
+├── backend/                       # FastAPI, async SQLite, Alembic, and tests
+│   ├── app/                       # Application, API, config, and storage code
+│   ├── migrations/                # Alembic schema history
+│   └── tests/                     # Backend unit and integration tests
 ├── frontend/                      # Working React prototype
 │   ├── scripts/qa-smoke.mjs       # Playwright smoke test
+│   ├── src/api.js                 # REST API boundary
+│   ├── src/realtime.js            # WebSocket reconnect and REST resync
 │   ├── src/App.jsx                # Layout and UI workflows
 │   ├── src/mockApi.js             # Temporary mock data source
 │   ├── src/store.js               # Zustand UI state
@@ -132,7 +178,7 @@ Browser
 FastAPI
   ├── API and validation
   ├── Job Manager and state machine
-  ├── Scheduler and GPU locks
+  ├── Single-process scheduler and GPU validation
   ├── SQLite
   ├── GPU/System monitoring
   └── Blender subprocess group
@@ -152,16 +198,12 @@ client.
 - ZIP archives are checked for Zip Slip, file count, and total extracted size;
 - upload size, render duration, and result size are limited;
 - Blender runs in a separate process group without a shell;
-- GPU resources are released in `finally`, including cancellation and failures;
+- the single worker slot is released in `finally`, including cancellation and failures;
 - secrets, uploads, Blender binaries, and render results are never committed;
 - production processes must not run as root.
 
 ## Next Steps
 
-1. Create the FastAPI application skeleton, configuration, and health endpoint.
-2. Add SQLite models, migrations, and the job state machine.
-3. Implement safe upload and artifact storage.
-4. Add the scheduler, GPU reservation, and Blender runner.
-5. Connect the frontend to REST and WebSocket instead of `mockApi`.
-6. Cover critical logic with unit and integration tests using a fake Blender
-   executable.
+1. Complete the phase-6 security, limits, cleanup, and restart-recovery audit.
+2. Remove remaining mock-only dependencies from the production path.
+3. Add an OS-isolated production worker boundary and cloud GPU smoke tests.

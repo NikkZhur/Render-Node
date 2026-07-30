@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { artifactsApi, blenderApi, devicesApi, isMockMode, jobsApi, systemApi } from "./api";
 import { mockApi } from "./mockApi";
+import { useRenderEvents } from "./realtime";
 import { useUiStore } from "./store";
 
 const initialJobs = [
@@ -72,6 +74,24 @@ const FRAMES_PER_PAGE = 50;
 const COMPUTE_DEVICES = ["OptiX", "CUDA", "CPU"];
 const FRAME_MODES = ["single", "range", "all"];
 const RENDER_ENGINES = ["Cycles", "Eevee", "Workbench"];
+const ENGINE_API_VALUES = {
+  Cycles: "CYCLES",
+  Eevee: "BLENDER_EEVEE",
+  Workbench: "BLENDER_WORKBENCH",
+};
+const draftJob = {
+  id: "draft",
+  shortId: "NEW",
+  name: "New render",
+  file: "Choose a .blend or ZIP",
+  status: "created",
+  progress: 0,
+  frame: "1–240",
+  engine: "Cycles",
+  device: "OptiX",
+  version: "4.5.11",
+  created: "Not uploaded",
+};
 
 function getInitialTheme() {
   const storedTheme = window.localStorage.getItem("render-node-theme");
@@ -190,7 +210,7 @@ function StatusBadge({ status }) {
   );
 }
 
-function Header({ activeVersion, gpuCount, onThemeChange, onVersions, queuedCount, storageWarning, theme }) {
+function Header({ activeVersion, connectionState, gpuCount, onThemeChange, onVersions, queuedCount, storageWarning, theme }) {
   return (
     <header className="app-header">
       <div className="brand-block">
@@ -230,8 +250,8 @@ function Header({ activeVersion, gpuCount, onThemeChange, onVersions, queuedCoun
         <div className="header-actions">
           <div className="connection-pill">
             <span className="connection-dot" />
-            Node online
-            <span className="latency">12 ms</span>
+            {connectionState === "reconnecting" ? "Reconnecting" : connectionState === "connecting" ? "Connecting" : "Node online"}
+            <span className="latency">WS</span>
           </div>
           <button className="version-button" onClick={onVersions} type="button">
             <span className="version-icon">
@@ -394,15 +414,19 @@ function DropdownField({ label, onChange, options, value }) {
   );
 }
 
-function JobSetup({ activeVersion, devices, job, onStart, onCancel }) {
-  const [engine, setEngine] = useState("Cycles");
-  const [device, setDevice] = useState("OptiX");
-  const [frameMode, setFrameMode] = useState("range");
-  const [selectedGpus, setSelectedGpus] = useState(null);
+function JobSetup({ activeVersion, devices, job, onStart, onCancel, onSceneUpload, uploadError, uploading }) {
+  const [engine, setEngine] = useState(job.engine ?? "Cycles");
+  const [device, setDevice] = useState(job.device ?? "OptiX");
+  const [frameMode, setFrameMode] = useState(job.frame_mode?.toLowerCase() ?? "range");
+  const [selectedGpus, setSelectedGpus] = useState(job.gpu_ids ?? null);
   const [fileName, setFileName] = useState(job.file);
   const fileInput = useRef(null);
-  const isRendering = job.status === "rendering";
+  const frameStartInput = useRef(null);
+  const frameEndInput = useRef(null);
+  const isActive = job.status === "queued" || job.status === "rendering";
   const activeGpuIds = selectedGpus ?? devices.map((gpu) => gpu.id);
+  const computeDevices = devices.length > 0 ? COMPUTE_DEVICES : ["CPU"];
+  const effectiveDevice = devices.length > 0 ? device : "CPU";
 
   const toggleGpu = (gpuId) => {
     setSelectedGpus((current) => {
@@ -431,7 +455,20 @@ function JobSetup({ activeVersion, devices, job, onStart, onCancel }) {
           className="sr-only"
           onChange={(event) => {
             const nextFile = event.target.files?.[0];
-            if (nextFile) setFileName(nextFile.name);
+            if (!nextFile) return;
+            setFileName(nextFile.name);
+            const frameStart = Number.parseInt(frameStartInput.current?.value ?? "1", 10);
+            const frameEnd = Number.parseInt(frameEndInput.current?.value ?? "240", 10);
+            onSceneUpload(nextFile, {
+              name: nextFile.name.replace(/\.(blend|zip)$/i, ""),
+              blender_version: activeVersion,
+              engine: ENGINE_API_VALUES[engine],
+              device: effectiveDevice.toUpperCase(),
+              gpu_ids: effectiveDevice === "CPU" ? [] : activeGpuIds,
+              frame_mode: frameMode.toUpperCase(),
+              frame_start: frameMode === "all" ? null : frameStart,
+              frame_end: frameMode === "range" ? frameEnd : null,
+            });
           }}
         />
         <button
@@ -444,7 +481,7 @@ function JobSetup({ activeVersion, devices, job, onStart, onCancel }) {
           </span>
           <span className="file-copy">
             <strong>{fileName}</strong>
-            <small>182.4 MB · Ready to render</small>
+            <small>{uploading ? "Uploading…" : job.status === "ready" ? "Ready to render" : "Select a scene to upload"}</small>
           </span>
           <span className="replace-file">Replace</span>
         </button>
@@ -452,7 +489,7 @@ function JobSetup({ activeVersion, devices, job, onStart, onCancel }) {
 
       <div className="two-column-fields">
         <DropdownField label="Render engine" onChange={setEngine} options={RENDER_ENGINES} value={engine} />
-        <DropdownField label="Compute device" onChange={setDevice} options={COMPUTE_DEVICES} value={device} />
+        <DropdownField label="Compute device" onChange={setDevice} options={computeDevices} value={effectiveDevice} />
       </div>
 
       <div className="field-group">
@@ -482,12 +519,12 @@ function JobSetup({ activeVersion, devices, job, onStart, onCancel }) {
           <div className="frame-range">
             <label>
               <span>Start</span>
-              <input defaultValue="1" inputMode="numeric" />
+              <input defaultValue={job.frame_start ?? 1} inputMode="numeric" ref={frameStartInput} />
             </label>
             <span className="range-line" />
             <label>
               <span>End</span>
-              <input defaultValue="240" inputMode="numeric" />
+              <input defaultValue={job.frame_end ?? 240} inputMode="numeric" ref={frameEndInput} />
             </label>
           </div>
         )}
@@ -495,7 +532,7 @@ function JobSetup({ activeVersion, devices, job, onStart, onCancel }) {
           <div className="frame-range single-frame">
             <label>
               <span>Frame</span>
-              <input defaultValue="1" inputMode="numeric" />
+              <input defaultValue={job.frame_start ?? 1} inputMode="numeric" ref={frameStartInput} />
             </label>
           </div>
         )}
@@ -507,6 +544,7 @@ function JobSetup({ activeVersion, devices, job, onStart, onCancel }) {
           <span>{activeGpuIds.length} SELECTED</span>
         </div>
         <div className="gpu-list">
+          {devices.length === 0 && <span className="gpu-empty">No NVIDIA GPUs discovered · CPU mode</span>}
           {devices.map((gpu) => {
             const selected = activeGpuIds.includes(gpu.id);
             return (
@@ -537,13 +575,16 @@ function JobSetup({ activeVersion, devices, job, onStart, onCancel }) {
       </div>
 
       <button
-        className={`primary-action ${isRendering ? "danger-action" : ""}`}
-        onClick={isRendering ? onCancel : onStart}
+        aria-busy={uploading}
+        className={`primary-action ${isActive ? "danger-action" : ""}`}
+        disabled={uploading || (!isMockMode && job.status !== "ready" && !isActive)}
+        onClick={isActive ? onCancel : onStart}
         type="button"
       >
-        <Icon name={isRendering ? "stop" : "play"} size={18} />
-        {isRendering ? "Cancel render" : "Start render"}
+        <Icon name={isActive ? "stop" : "play"} size={18} />
+        {job.status === "rendering" ? "Cancel render" : job.status === "queued" ? "Cancel job" : "Start render"}
       </button>
+      {uploadError && <p className="manual-upload-error" role="alert">{uploadError}</p>}
     </section>
   );
 }
@@ -566,7 +607,7 @@ function RenderFrameVisual() {
   );
 }
 
-function FramePreviewModal({ frameNumber, onClose }) {
+function FramePreviewModal({ frameNumber, imageUrl, onClose }) {
   const closeButton = useRef(null);
   const dialogRef = useDialogBehavior(onClose, closeButton);
   const entered = useModalEntrance();
@@ -582,7 +623,7 @@ function FramePreviewModal({ frameNumber, onClose }) {
         role="dialog"
       >
         <h2 className="sr-only" id="frame-preview-title">Frame {frameNumber} full resolution</h2>
-        <RenderFrameVisual />
+        {imageUrl ? <img alt={`Frame ${frameNumber} full resolution`} src={imageUrl} /> : <RenderFrameVisual />}
         <span className="expanded-frame-number">FRAME {frameNumber}</span>
         <button
           aria-label="Close full resolution frame"
@@ -598,13 +639,47 @@ function FramePreviewModal({ frameNumber, onClose }) {
   );
 }
 
-function RenderPreview({ job }) {
+function RenderPreview({ job, liveLogs = [] }) {
   const [frameOpen, setFrameOpen] = useState(false);
   const isRendering = job.status === "rendering";
-  const hasOutput = job.status === "completed" || isRendering;
-  const frameReady = job.status === "completed";
+  const canLoadOutput = !isMockMode && job.id !== "draft";
+  const framesQuery = useQuery({
+    queryKey: ["frames", job.id, 1, FRAMES_PER_PAGE],
+    queryFn: ({ signal }) => artifactsApi.frames(job.id, { page: 1, pageSize: FRAMES_PER_PAGE, signal }),
+    enabled: canLoadOutput,
+  });
+  const logQuery = useQuery({
+    queryKey: ["log-tail", job.id],
+    queryFn: ({ signal }) => artifactsApi.logTail(job.id, { lines: 100, signal }),
+    enabled: canLoadOutput && ["rendering", "completed", "failed", "cancelled"].includes(job.status),
+    retry: false,
+  });
+  const availableFrames = framesQuery.data?.items ?? [];
+  const latestFrame = availableFrames.find((frame) => frame.frame === job.current_frame)
+    ?? availableFrames.at(-1);
+  const hasOutput = isMockMode
+    ? job.status === "completed" || isRendering
+    : Boolean(latestFrame?.preview_url);
+  const frameReady = isMockMode ? job.status === "completed" : Boolean(latestFrame?.original_url);
   const shownProgress = isRendering ? job.progress : job.status === "completed" ? 100 : 0;
-  const frameNumber = String(Math.max(1, Math.round(shownProgress * 2.4))).padStart(3, "0");
+  const currentFrame = latestFrame?.frame ?? job.current_frame ?? job.frame_start ?? 1;
+  const frameNumber = String(currentFrame).padStart(3, "0");
+  const displayedLogs = isMockMode
+    ? logLines.slice(-4)
+    : (liveLogs.length ? liveLogs : (logQuery.data?.lines ?? []))
+      .slice(-4)
+      .map((line) => ["", line]);
+  const currentTask = isRendering
+    ? `Rendering frame ${currentFrame}`
+    : job.status === "queued"
+      ? "Waiting for the render worker"
+      : job.status === "completed"
+        ? "Render completed"
+        : job.status === "failed"
+          ? "Render failed"
+          : job.status === "cancelled"
+            ? "Render cancelled"
+            : "Ready to start";
 
   return (
     <>
@@ -619,12 +694,14 @@ function RenderPreview({ job }) {
         </div>
 
         <div className={`render-viewport ${hasOutput ? "has-output" : ""}`}>
-          <RenderFrameVisual />
+          {latestFrame?.preview_url
+            ? <img alt={`Preview frame ${currentFrame}`} className="render-frame-image" src={latestFrame.preview_url} />
+            : <RenderFrameVisual />}
           {!hasOutput && (
             <div className="preview-empty">
               <span className="empty-icon"><Icon name="image" size={24} /></span>
               <strong>Preview will appear here</strong>
-              <small>Start the ready job to run the interactive mock render.</small>
+              <small>Start a ready job to run Blender on this node.</small>
             </div>
           )}
           {hasOutput && (
@@ -634,8 +711,8 @@ function RenderPreview({ job }) {
                 <span>1920 × 1080 · 100%</span>
               </div>
               <div aria-label="Blender live log" className="preview-log-overlay" role="log">
-                {logLines.slice(-4).map(([time, line], index, lines) => (
-                  <div className={index === lines.length - 1 ? "latest" : ""} key={`${time}-${line}`}>
+                {displayedLogs.map(([time, line], index, lines) => (
+                  <div className={index === lines.length - 1 ? "latest" : ""} key={`${index}-${time}-${line}`}>
                     <time>{time}</time>
                     <code>{line}</code>
                   </div>
@@ -647,9 +724,9 @@ function RenderPreview({ job }) {
                   <Icon name="expand" size={17} />
                 </button>
                 {frameReady && (
-                  <button aria-label={`Download frame ${frameNumber}`} type="button">
+                  <a aria-label={`Download frame ${frameNumber}`} download href={latestFrame?.original_url ?? "#"} role="button">
                     <Icon name="download" size={17} />
-                  </button>
+                  </a>
                 )}
               </div>
             </>
@@ -660,20 +737,27 @@ function RenderPreview({ job }) {
           <div className="render-progress-copy">
             <div>
               <span className="eyebrow">Current task</span>
-              <strong>{isRendering ? "Rendering frame 38 of 240" : job.status === "completed" ? "Render completed" : "Ready to start"}</strong>
+              <strong>{currentTask}</strong>
             </div>
             <div className="progress-stats">
-              <span><small>SAMPLES</small>{isRendering ? "384 / 512" : "—"}</span>
-              <span><small>ELAPSED</small>{isRendering ? "06:42" : "—"}</span>
+              <span><small>FRAME</small>{isRendering ? currentFrame : "—"}</span>
+              <span><small>STATE</small>{job.status}</span>
               <b>{shownProgress}%</b>
             </div>
           </div>
           <div className="progress-track" aria-label={`Render progress ${shownProgress}%`}>
             <span style={{ width: `${shownProgress}%` }} />
           </div>
+          {job.error && <p className="render-error" role="alert">{job.error}</p>}
         </div>
       </section>
-      {frameOpen && <FramePreviewModal frameNumber={frameNumber} onClose={() => setFrameOpen(false)} />}
+      {frameOpen && (
+        <FramePreviewModal
+          frameNumber={frameNumber}
+          imageUrl={latestFrame?.original_url}
+          onClose={() => setFrameOpen(false)}
+        />
+      )}
     </>
   );
 }
@@ -902,18 +986,20 @@ function useDialogBehavior(onClose, initialFocusRef) {
   return dialogRef;
 }
 
-function FrameSequencePanel({ onClose }) {
+function FrameSequencePanel({ jobId, onClose }) {
   const closeButton = useRef(null);
   const dialogRef = useDialogBehavior(onClose, closeButton);
   const entered = useModalEntrance();
   const [page, setPage] = useState(1);
   const framesQuery = useQuery({
-    queryKey: ["frames", page, FRAMES_PER_PAGE],
-    queryFn: () => mockApi.getFrames({ page, pageSize: FRAMES_PER_PAGE }),
+    queryKey: ["frames", jobId, page, FRAMES_PER_PAGE],
+    queryFn: ({ signal }) => isMockMode
+      ? mockApi.getFrames({ page, pageSize: FRAMES_PER_PAGE })
+      : artifactsApi.frames(jobId, { page, pageSize: FRAMES_PER_PAGE, signal }),
   });
   const frames = framesQuery.data?.items ?? [];
-  const totalFrames = framesQuery.data?.total ?? FRAME_COUNT;
-  const pageCount = Math.ceil(totalFrames / FRAMES_PER_PAGE);
+  const totalFrames = framesQuery.data?.total ?? (isMockMode ? FRAME_COUNT : 0);
+  const pageCount = Math.max(1, framesQuery.data?.pages ?? Math.ceil(totalFrames / FRAMES_PER_PAGE));
   const pageStart = (page - 1) * FRAMES_PER_PAGE;
   const pageEnd = Math.min(pageStart + FRAMES_PER_PAGE, totalFrames);
 
@@ -931,13 +1017,13 @@ function FrameSequencePanel({ onClose }) {
         <div className="frames-modal-header">
           <div>
             <span className="eyebrow">Render sequence</span>
-            <h2 id="frames-title">Frames 1–240</h2>
-            <p id="frames-description">{totalFrames} PNG files · {pageCount} pages</p>
+            <h2 id="frames-title">Frames {totalFrames ? `1–${totalFrames}` : "—"}</h2>
+            <p id="frames-description">{totalFrames} {isMockMode ? "PNG files" : "files"} · {pageCount} pages</p>
           </div>
           <div className="frames-modal-actions">
-            <button className="sequence-download" type="button" aria-label="Download all frames as ZIP">
+            <a className="sequence-download" download href={isMockMode ? "#" : artifactsApi.framesZipUrl(jobId)} aria-label="Download all frames as ZIP" role="button">
               <Icon name="download" size={16} /> Download ZIP
-            </button>
+            </a>
             <button ref={closeButton} className="icon-button" onClick={onClose} type="button" aria-label="Close frame sequence">
               <Icon name="close" />
             </button>
@@ -948,10 +1034,10 @@ function FrameSequencePanel({ onClose }) {
           {framesQuery.isPending && <li className="frame-list-loading">Loading frames…</li>}
           {frames.map((frame) => (
             <li className="frame-row" key={frame.frame}>
-              <strong>{frame.name}</strong>
-              <button type="button" aria-label={`Download ${frame.name}`}>
+              <strong>{frame.name ?? frame.filename}</strong>
+              <a download href={frame.original_url ?? "#"} aria-label={`Download ${frame.name ?? frame.filename}`} role="button">
                 <Icon name="download" size={16} />
-              </button>
+              </a>
             </li>
           ))}
         </ol>
@@ -969,33 +1055,50 @@ function FrameSequencePanel({ onClose }) {
   );
 }
 
-function Artifacts() {
+function Artifacts({ job }) {
   const [framesOpen, setFramesOpen] = useState(false);
+  const enabled = !isMockMode && job.id !== "draft";
+  const framesQuery = useQuery({
+    queryKey: ["frames", job.id, "summary"],
+    queryFn: ({ signal }) => artifactsApi.frames(job.id, { page: 1, pageSize: 1, signal }),
+    enabled,
+  });
+  const artifactsQuery = useQuery({
+    queryKey: ["artifacts", job.id],
+    queryFn: ({ signal }) => artifactsApi.list(job.id, { signal }),
+    enabled,
+  });
+  const frameCount = isMockMode ? FRAME_COUNT : (framesQuery.data?.total ?? 0);
+  const pageCount = Math.max(1, Math.ceil(frameCount / FRAMES_PER_PAGE));
+  const logArtifact = isMockMode
+    ? { filename: "blender.log", size_bytes: 284 * 1024 }
+    : artifactsQuery.data?.find((artifact) => artifact.kind === "blender_log");
 
   return (
     <>
       <section className="panel artifacts-panel">
         <SectionHeading eyebrow="Selected job" title="Artifacts" />
         <div className="artifact-list">
-          <button
+          {frameCount > 0 && <button
             aria-haspopup="dialog"
-            aria-label="Open frame sequence, 240 frames"
+            aria-label={`Open frame sequence, ${frameCount} frames`}
             className="artifact-row artifact-sequence-trigger"
             onClick={() => setFramesOpen(true)}
             type="button"
           >
             <span className="artifact-kind">SEQ</span>
-            <span><strong>frames_0001–0240</strong><small>{FRAME_COUNT} frames · {Math.ceil(FRAME_COUNT / FRAMES_PER_PAGE)} pages</small></span>
+            <span><strong>frames_0001–{String(frameCount).padStart(4, "0")}</strong><small>{frameCount} frames · {pageCount} pages</small></span>
             <span className="artifact-open-icon"><Icon name="chevron" size={16} /></span>
-          </button>
-          <div className="artifact-row">
+          </button>}
+          {logArtifact && <div className="artifact-row">
             <span className="artifact-kind">LOG</span>
-            <span><strong>blender.log</strong><small>284 KB</small></span>
-            <button type="button" aria-label="Download blender.log"><Icon name="download" size={16} /></button>
-          </div>
+            <span><strong>{logArtifact.filename}</strong><small>{Math.max(1, Math.round(logArtifact.size_bytes / 1024))} KB</small></span>
+            <a download href={isMockMode ? "#" : artifactsApi.logUrl(job.id)} aria-label="Download blender.log" role="button"><Icon name="download" size={16} /></a>
+          </div>}
+          {!frameCount && !logArtifact && <p className="artifacts-empty">No artifacts yet</p>}
         </div>
       </section>
-      {framesOpen && <FrameSequencePanel onClose={() => setFramesOpen(false)} />}
+      {framesOpen && <FrameSequencePanel jobId={job.id} onClose={() => setFramesOpen(false)} />}
     </>
   );
 }
@@ -1013,6 +1116,8 @@ function VersionPanel({
   uploadError,
   installingVersion,
   activating,
+  catalogQueryFn,
+  actionError,
 }) {
   const entered = useModalEntrance();
   const [catalogOpen, setCatalogOpen] = useState(false);
@@ -1021,7 +1126,7 @@ function VersionPanel({
   const installerInput = useRef(null);
   const catalogQuery = useQuery({
     queryKey: ["official-versions"],
-    queryFn: mockApi.getOfficialVersions,
+    queryFn: catalogQueryFn,
     enabled: catalogOpen,
     staleTime: 5 * 60 * 1000,
   });
@@ -1137,7 +1242,9 @@ function VersionPanel({
             </button>
           </div>
 
-          {uploadError && <p className="manual-upload-error">{uploadError}</p>}
+          {(uploadError || actionError) && (
+            <p className="manual-upload-error">{uploadError || actionError}</p>
+          )}
 
           {catalogOpen && (
             <div aria-label="Available Blender versions" className="version-catalog-content">
@@ -1161,14 +1268,18 @@ function VersionPanel({
                     </div>
                     <small>
                       {version.source === "manual"
-                        ? `${version.fileName} · ${version.size} · ready to install`
+                        ? `${version.fileName}${version.size ? ` · ${version.size}` : ""} · ready to install`
                         : version.downloaded
                           ? "Downloaded · ready to install"
                           : "Official release branch"}
                     </small>
                   </div>
                   <div className="version-flags">
-                    <span>Untested</span>
+                    {version.supported ? (
+                      <span className="supported"><Icon name="check" size={12} /> Supported</span>
+                    ) : (
+                      <span>Untested</span>
+                    )}
                   </div>
                   <div className="version-action">
                     {version.downloaded ? (
@@ -1210,44 +1321,108 @@ export default function App() {
   const setVersionPanelOpen = useUiStore((state) => state.setVersionPanelOpen);
   const selectedJobId = useUiStore((state) => state.selectedJobId);
   const setSelectedJobId = useUiStore((state) => state.setSelectedJobId);
-  const [jobs, setJobs] = useState(initialJobs);
+  const [mockJobs, setMockJobs] = useState(initialJobs);
   const [theme, setTheme] = useState(getInitialTheme);
+  const realtime = useRenderEvents(queryClient);
 
-  const versionsQuery = useQuery({ queryKey: ["versions"], queryFn: mockApi.getVersions });
-  const devicesQuery = useQuery({ queryKey: ["devices"], queryFn: mockApi.getDevices });
-  const processorsQuery = useQuery({ queryKey: ["processors"], queryFn: mockApi.getProcessors });
-  const storagesQuery = useQuery({ queryKey: ["storages"], queryFn: mockApi.getStorages });
+  const jobsQuery = useQuery({
+    queryKey: ["jobs"],
+    queryFn: jobsApi.list,
+    enabled: !isMockMode,
+  });
+  const versionApi = isMockMode ? mockApi : blenderApi;
+  const versionsQuery = useQuery({ queryKey: ["versions"], queryFn: versionApi.getVersions });
+  const devicesQuery = useQuery({
+    queryKey: ["devices"],
+    queryFn: isMockMode ? mockApi.getDevices : devicesApi.list,
+  });
+  const processorsQuery = useQuery({ queryKey: ["processors"], queryFn: mockApi.getProcessors, enabled: isMockMode });
+  const storagesQuery = useQuery({ queryKey: ["storages"], queryFn: mockApi.getStorages, enabled: isMockMode });
+  const metricsQuery = useQuery({
+    queryKey: ["metrics"],
+    queryFn: systemApi.metrics,
+    enabled: !isMockMode,
+  });
   const downloadMutation = useMutation({
-    mutationFn: mockApi.downloadVersion,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["official-versions"] }),
+    mutationFn: versionApi.downloadVersion,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["versions"] });
+      queryClient.invalidateQueries({ queryKey: ["official-versions"] });
+    },
   });
   const uploadMutation = useMutation({
-    mutationFn: mockApi.uploadVersion,
+    mutationFn: versionApi.uploadVersion,
     onSuccess: (uploadedVersion) => {
-      queryClient.setQueryData(["official-versions"], (current = []) => [
-        uploadedVersion,
-        ...current.filter((version) => version.version !== uploadedVersion.version),
-      ]);
+      if (isMockMode) {
+        queryClient.setQueryData(["official-versions"], (current = []) => [
+          uploadedVersion,
+          ...current.filter((version) => version.version !== uploadedVersion.version),
+        ]);
+      } else {
+        queryClient.invalidateQueries({ queryKey: ["official-versions"] });
+        queryClient.invalidateQueries({ queryKey: ["versions"] });
+      }
     },
   });
   const installMutation = useMutation({
-    mutationFn: mockApi.installVersion,
+    mutationFn: versionApi.installVersion,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["versions"] });
       queryClient.invalidateQueries({ queryKey: ["official-versions"] });
     },
   });
   const activateMutation = useMutation({
-    mutationFn: mockApi.activateVersion,
+    mutationFn: versionApi.activateVersion,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["versions"] }),
   });
 
   const activeVersion = versionsQuery.data?.find((version) => version.active)?.version ?? "4.5.11";
-  const liveJob = jobs.find((job) => job.id === "job-live") ?? jobs[0];
+  const jobs = isMockMode ? mockJobs : (jobsQuery.data ?? []);
+  const updateJobCache = (updatedJob) => {
+    queryClient.setQueryData(["jobs"], (current = []) => [
+      updatedJob,
+      ...current.filter((job) => job.id !== updatedJob.id),
+    ]);
+  };
+  const sceneUploadMutation = useMutation({
+    mutationFn: async ({ file, configuration }) => {
+      const createdJob = await jobsApi.create(configuration);
+      try {
+        return await jobsApi.upload(createdJob.id, file);
+      } catch (error) {
+        await jobsApi.delete(createdJob.id).catch(() => undefined);
+        throw error;
+      }
+    },
+    onSuccess: (uploadedJob) => {
+      updateJobCache(uploadedJob);
+      setSelectedJobId(uploadedJob.id);
+    },
+  });
+  const startJobMutation = useMutation({
+    mutationFn: jobsApi.start,
+    onSuccess: updateJobCache,
+  });
+  const cancelJobMutation = useMutation({
+    mutationFn: jobsApi.cancel,
+    onSuccess: updateJobCache,
+  });
+  const liveJob = isMockMode
+    ? (jobs.find((job) => job.id === "job-live") ?? jobs[0])
+    : (jobs.find((job) => job.status === "rendering" || job.status === "queued")
+      ?? jobs.find((job) => job.status === "ready")
+      ?? jobs[0]
+      ?? draftJob);
   const selectedJob = jobs.find((job) => job.id === selectedJobId) ?? liveJob;
   const isRendering = jobs.some((job) => job.status === "rendering");
-  const storageWarning = storagesQuery.data?.find(
-    (storage) => storage.freeGb < 50 || storage.freeGb / storage.totalGb < 0.1,
+  const hasActiveJob = jobs.some((job) => job.status === "queued" || job.status === "rendering");
+  const metricDevices = isMockMode ? (devicesQuery.data ?? []) : (metricsQuery.data?.devices ?? []);
+  const processors = isMockMode ? (processorsQuery.data ?? []) : (metricsQuery.data?.processors ?? []);
+  const storages = isMockMode ? (storagesQuery.data ?? []) : (metricsQuery.data?.storages ?? []);
+  const storageWarning = storages.find(
+    (storage) => storage.status === "low_space"
+      || storage.freeGb < 50
+      || storage.freeGb / storage.totalGb < 0.1,
   );
 
   useEffect(() => {
@@ -1256,9 +1431,9 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
-    if (!isRendering) return undefined;
+    if (!isMockMode || !isRendering) return undefined;
     const interval = window.setInterval(() => {
-      setJobs((currentJobs) =>
+      setMockJobs((currentJobs) =>
         currentJobs.map((job) => {
           if (job.status !== "rendering") return job;
           const nextProgress = Math.min(100, job.progress + 3);
@@ -1275,13 +1450,17 @@ export default function App() {
   }, [isRendering]);
 
   const displayJob = useMemo(() => {
-    if (selectedJob.id === "job-live") return liveJob;
+    if (isMockMode && selectedJob.id === "job-live") return liveJob;
     return selectedJob;
   }, [liveJob, selectedJob]);
 
   const startRender = () => {
+    if (!isMockMode) {
+      if (liveJob.status === "ready") startJobMutation.mutate(liveJob.id);
+      return;
+    }
     setSelectedJobId("job-live");
-    setJobs((currentJobs) =>
+    setMockJobs((currentJobs) =>
       currentJobs.map((job) =>
         job.id === "job-live"
           ? { ...job, status: "rendering", progress: 12, created: "Running now", version: activeVersion }
@@ -1293,7 +1472,13 @@ export default function App() {
   };
 
   const cancelRender = () => {
-    setJobs((currentJobs) =>
+    if (!isMockMode) {
+      if (liveJob.status === "queued" || liveJob.status === "rendering") {
+        cancelJobMutation.mutate(liveJob.id);
+      }
+      return;
+    }
+    setMockJobs((currentJobs) =>
       currentJobs.map((job) =>
         job.id === "job-live" && job.status === "rendering"
           ? { ...job, status: "cancelled", created: "Cancelled now" }
@@ -1308,6 +1493,7 @@ export default function App() {
     <div className="app-shell">
       <Header
         activeVersion={activeVersion}
+        connectionState={realtime.connectionState}
         gpuCount={(devicesQuery.data ?? []).filter((device) => device.available).length}
         onThemeChange={setTheme}
         onVersions={() => setVersionPanelOpen(true)}
@@ -1322,31 +1508,50 @@ export default function App() {
             activeVersion={activeVersion}
             devices={devicesQuery.data ?? []}
             job={liveJob}
+            key={liveJob.id}
             onCancel={cancelRender}
+            onSceneUpload={(file, configuration) => {
+              if (!isMockMode) sceneUploadMutation.mutate({ file, configuration });
+            }}
             onStart={startRender}
+            uploadError={
+              sceneUploadMutation.error?.message
+              ?? startJobMutation.error?.message
+              ?? cancelJobMutation.error?.message
+              ?? jobsQuery.error?.message
+              ?? ""
+            }
+            uploading={sceneUploadMutation.isPending}
           />
-          <RenderPreview job={displayJob} />
+          <RenderPreview job={displayJob} liveLogs={realtime.logsByJob[displayJob.id] ?? []} />
           <div className="right-rail">
             <JobQueue jobs={jobs} onSelect={setSelectedJobId} selectedJobId={selectedJobId} />
-            <Artifacts />
+            <Artifacts job={displayJob} />
           </div>
           <Metrics
-            devices={devicesQuery.data ?? []}
-            processors={processorsQuery.data ?? []}
-            storages={storagesQuery.data ?? []}
+            devices={metricDevices}
+            processors={processors}
+            storages={storages}
           />
         </div>
       </main>
 
       <footer className="app-footer">
-        <span>Render Node prototype · Mock data</span>
-        <span>API offline <i /> UI sandbox</span>
+        <span>Render Node · {isMockMode ? "Mock data" : "Persistent jobs"}</span>
+        <span>{isMockMode ? "API offline" : jobsQuery.isError ? "API unavailable" : `API ${realtime.connectionState}`} <i /> {isMockMode ? "UI sandbox" : "SQLite + WebSocket"}</span>
       </footer>
 
       {versionPanelOpen && (
         <VersionPanel
+          actionError={
+            downloadMutation.error?.message
+            ?? installMutation.error?.message
+            ?? activateMutation.error?.message
+            ?? ""
+          }
           activating={activateMutation.isPending}
-          blocked={isRendering || jobs.some((job) => job.status === "queued")}
+          blocked={hasActiveJob}
+          catalogQueryFn={versionApi.getOfficialVersions}
           downloadingVersion={downloadMutation.isPending ? downloadMutation.variables : null}
           installingVersion={installMutation.isPending ? installMutation.variables : null}
           onActivate={(version) => activateMutation.mutate(version)}
@@ -1356,7 +1561,7 @@ export default function App() {
           onInstall={(version) => installMutation.mutate(version)}
           uploadError={uploadMutation.error?.message ?? ""}
           uploadingFile={uploadMutation.isPending}
-          versions={versionsQuery.data ?? []}
+          versions={(versionsQuery.data ?? []).filter((version) => version.installed)}
         />
       )}
     </div>

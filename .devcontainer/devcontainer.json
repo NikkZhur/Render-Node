@@ -34,6 +34,6 @@
   // Установка пакетов из requirements.txt через uv (очень быстро)
   "postCreateCommand": "uv pip install --upgrade pip uv && uv pip install -r requirements.txt || echo 'requirements.txt не найден — ок'",
 
-  "forwardPorts": [5173, 8888],
+  "forwardPorts": [5173, 8000, 8888],
   "remoteUser": "vscode"
 }

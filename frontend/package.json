@@ -5,10 +5,14 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:mock": "VITE_RENDER_NODE_MOCK=true vite",
     "build": "vite build",
+    "build:mock": "VITE_RENDER_NODE_MOCK=true vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "qa:smoke": "node scripts/qa-smoke.mjs"
+    "qa:smoke": "node scripts/qa-smoke.mjs",
+    "qa:api": "node scripts/qa-api-smoke.mjs",
+    "qa:runner": "node scripts/qa-runner-smoke.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "5.101.2",

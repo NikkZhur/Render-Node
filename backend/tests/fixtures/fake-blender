@@ -1,0 +1,36 @@
+#!/bin/sh
+set -eu
+
+scene=""
+for argument in "$@"; do
+    case "$argument" in
+        */input/*.blend) scene="$argument" ;;
+    esac
+done
+
+printf '%s\n' "$@" > "$PWD/logs/arguments.txt"
+printf 'inherited-secret=%s\n' "${RENDER_NODE_TEST_SECRET-unset}"
+
+write_frame() {
+    printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=' \
+        | base64 -d > "$PWD/output/frame_0001.png"
+}
+
+if [ -n "$scene" ] && grep -q 'SLOW' "$scene"; then
+    sleep 60 &
+    child_pid="$!"
+    printf '%s' "$child_pid" > "$PWD/child.pid"
+    printf 'RENDER_NODE_PROGRESS 0.1 frame=1\n'
+    wait
+elif [ -n "$scene" ] && grep -q 'BROWSER' "$scene"; then
+    printf 'RENDER_NODE_PROGRESS 0.25 frame=1\n'
+    sleep 0.8
+    printf 'RENDER_NODE_PROGRESS 0.75 frame=1\n'
+    sleep 0.8
+    write_frame
+else
+    printf 'RENDER_NODE_PROGRESS 0.25 frame=1\n'
+    sleep 0.15
+    printf 'RENDER_NODE_PROGRESS 0.75 frame=1\n'
+    write_frame
+fi
