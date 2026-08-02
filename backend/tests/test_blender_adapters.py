@@ -92,3 +92,28 @@ def test_version_adapter_cpu_mode_does_not_initialize_gpu_backend(
     assert bpy.context.scene.cycles.device == "CPU"
     assert preferences.compute_device_type == "NONE"
     assert preferences.refreshed is False
+
+
+def test_blender_4_5_adapter_maps_stable_eevee_engine_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bpy, preferences = fake_bpy()
+    monkeypatch.setitem(sys.modules, "bpy", bpy)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "blender",
+            "--",
+            "--render-node-engine",
+            "BLENDER_EEVEE",
+            "--cycles-device",
+            "CPU",
+        ],
+    )
+
+    runpy.run_path(str(VERSION_SCRIPTS["4.5.11"]))
+
+    assert bpy.context.scene.render.engine == "BLENDER_EEVEE_NEXT"
+    assert preferences.compute_device_type == "NONE"
+    assert preferences.refreshed is False

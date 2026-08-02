@@ -7,7 +7,7 @@ import bpy
 arguments = sys.argv[sys.argv.index("--") + 1 :]
 engine = arguments[arguments.index("--render-node-engine") + 1]
 device = arguments[arguments.index("--cycles-device") + 1]
-bpy.context.scene.render.engine = engine
+bpy.context.scene.render.engine = "BLENDER_EEVEE_NEXT" if engine == "BLENDER_EEVEE" else engine
 if engine == "CYCLES":
     bpy.context.scene.cycles.device = "CPU" if device == "CPU" else "GPU"
     if device != "CPU":

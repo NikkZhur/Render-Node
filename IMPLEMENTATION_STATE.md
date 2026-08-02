@@ -15,6 +15,8 @@
 
 - Фазы 1–5: FastAPI/SQLite/Alembic, безопасные jobs/uploads, Blender registry,
   `SandboxRunner`, FIFO Job Manager, realtime, artifacts/previews и metrics.
+- Адаптер Blender 4.5 преобразует стабильное API-значение `BLENDER_EEVEE` в
+  фактический идентификатор Blender 4.5 `BLENDER_EEVEE_NEXT`.
 - Единая security boundary для REST и WebSocket: production требует Bearer
   token длиной 32+ символа и точные HTTPS origins; `/health` и `/ready` публичны.
   Origin проверяется до API handler, Swagger/OpenAPI в production отключены.
@@ -48,9 +50,13 @@
 ## Последняя проверка
 
 - Backend: Ruff format/lint — успешно; strict mypy `app tests` — успешно;
-  все 113 pytest tests пройдены двумя исчерпывающими группами (39 + 74).
+  все 114 pytest tests пройдены.
   Покрыты auth/CORS/headers, REST+WS boundary, body/WS limits, production sandbox
-  fail-closed, retry cleanup, missing scene и restart cleanup/recovery.
+  fail-closed, retry cleanup, missing scene, restart cleanup/recovery и адаптеры
+  Blender.
+- Реальный development CPU smoke: официальный Blender 4.5.11 LTS с проверенным
+  SHA-256 успешно отрендерил кадр 1 `Untitled.blend` в Eevee; original, preview
+  и raw log зарегистрированы, job завершён с exit code 0.
 - Alembic: upgrade пустой БД, `alembic check` и `current` — успешно, head
   `20260730_0004`.
 - Frontend: ESLint, production Vite build и explicit mock build — успешно.
@@ -64,9 +70,9 @@
 - Production worker image/namespace с network/filesystem/device isolation и
   non-root runtime ещё не реализован; поэтому production rendering намеренно не
   достигает readiness при включённом scheduler.
-- В контейнере нет production Blender image и GPU. Реальный Blender CPU,
-  CUDA/OptiX, GPU isolation и bundled binaries не проверялись; их работа не
-  заявляется.
+- В контейнере нет production Blender image и GPU. Development CPU/Eevee для
+  Blender 4.5.11 проверен через явный executable override; CUDA/OptiX, GPU
+  isolation и bundled binaries не проверялись, их работа не заявляется.
 - Browser deployment с Bearer требует приватного backend за HTTPS reverse proxy,
   который добавляет credential в HTTP и WebSocket upgrades. Токен нельзя
   помещать в `VITE_*` или JavaScript.
