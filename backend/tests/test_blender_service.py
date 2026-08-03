@@ -25,7 +25,10 @@ from app.storage.database import Database
 
 def fake_blender_archive(version: str) -> bytes:
     output = io.BytesIO()
-    script = f"#!/bin/sh\nprintf 'Blender {version}\\n'\n".encode()
+    script = (
+        f"#!/bin/sh\nprintf 'Blender {version}\\n'\n"
+        'printf "%s" "${BACKEND_SECRET-unset}" > "$PWD/validation-env.txt"\n'
+    ).encode()
     with tarfile.open(fileobj=output, mode="w:xz") as bundle:
         directory = tarfile.TarInfo(f"blender-{version}-linux-x64")
         directory.type = tarfile.DIRTYPE
@@ -101,8 +104,11 @@ def make_service(settings: Settings, catalog: FakeCatalog) -> tuple[BlenderServi
     return BlenderService(database, storage, catalog, EventHub()), database  # type: ignore[arg-type]
 
 
-async def test_official_download_install_and_explicit_activation(job_settings: Settings) -> None:
+async def test_official_download_install_and_explicit_activation(
+    job_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
     version = "4.6.1"
+    monkeypatch.setenv("BACKEND_SECRET", "must-not-leak")
     catalog = FakeCatalog(version, fake_blender_archive(version))
     service, database = make_service(job_settings, catalog)
     await service._storage.prepare()
@@ -121,6 +127,9 @@ async def test_official_download_install_and_explicit_activation(job_settings: S
         assert runtime.state is RuntimeState.INSTALLED
         assert runtime.active is False
         assert (job_settings.blender_versions_root / version / "blender").is_file()
+        assert (
+            job_settings.blender_versions_root / version / "validation-env.txt"
+        ).read_text() == "unset"
 
         activated = await service.activate(version)
         assert activated.active is True

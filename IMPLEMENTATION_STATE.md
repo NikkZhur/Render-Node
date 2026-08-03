@@ -5,7 +5,7 @@
 
 ## Текущее состояние
 
-- Обновлено: 2026-07-30.
+- Обновлено: 2026-08-02 после финального аудита и smoke-тестов.
 - Фазы 1–6 из `BACKEND_IMPLEMENTATION_MASTER_PROMPT.md` завершены.
 - Следующей фазы в master prompt нет; дальнейшая работа — отдельные deployment
   задачи, перечисленные ниже.
@@ -35,6 +35,16 @@
   Bearer injection для HTTP и WebSocket без передачи секрета в browser bundle.
 - README и env examples описывают auth/reverse proxy, limits, cleanup, backup и
   остаточные production-риски.
+- Финальный аудит усилил official catalog: HTML/manifest читаются потоково с
+  лимитом до буферизации, origin проверяется разбором URL, а download ограничен
+  также фактически свободным местом при неизвестном `Content-Length`.
+- Проверка устанавливаемого `blender --version` больше не наследует окружение и
+  секреты backend, запускается с минимальным env в отдельной process group и
+  убивает всю группу по timeout.
+- `RLIMIT_CPU` учитывает параллельные render threads и больше не может завершить
+  CPU-рендер раньше настроенного wall-time. Alembic создаёт отсутствующий
+  родительский каталог абсолютной SQLite path, поэтому migration bootstrap
+  работает на полностью новом workspace.
 
 ## Контракты и миграции
 
@@ -49,21 +59,28 @@
 
 ## Последняя проверка
 
-- Backend: Ruff format/lint — успешно; strict mypy `app tests` — успешно;
-  все 114 pytest tests пройдены.
+- Backend: Ruff format/lint — успешно; strict mypy `app` — успешно;
+  все 117 pytest tests пройдены (одно upstream Starlette warning).
   Покрыты auth/CORS/headers, REST+WS boundary, body/WS limits, production sandbox
-  fail-closed, retry cleanup, missing scene, restart cleanup/recovery и адаптеры
-  Blender.
+  fail-closed, retry cleanup, missing scene, restart cleanup/recovery, адаптеры
+  Blender, bounded streaming official catalog, clean install-validation env,
+  CPU-time limit и migration bootstrap нового workspace.
 - Реальный development CPU smoke: официальный Blender 4.5.11 LTS с проверенным
-  SHA-256 успешно отрендерил кадр 1 `Untitled.blend` в Eevee; original, preview
-  и raw log зарегистрированы, job завершён с exit code 0.
-- Alembic: upgrade пустой БД, `alembic check` и `current` — успешно, head
-  `20260730_0004`.
+  SHA-256 успешно отрендерил кадр 1 `Untitled.blend` в Eevee через публичный Job
+  API; job `COMPLETED`, progress `1.0`, exit code `0`. Original 600×900 PNG,
+  preview, однокадровый ZIP и raw log выданы API. SHA-256 сохранённой сцены
+  совпал с пользовательским файлом, исходный файл не изменялся.
+- Alembic: upgrade нового вложенного SQLite path, current/check, downgrade base и
+  повторный upgrade — успешно; head `20260730_0004`, schema diff отсутствует.
 - Frontend: ESLint, production Vite build и explicit mock build — успешно.
   Production bundle проверен на отсутствие mock chunk и fixture markers.
-- Playwright mock smoke: desktop/mobile fit, versions, render/cancel, live log и
-  dialogs — успешно. Playwright real API smoke: upload -> `READY` и reload —
-  успешно как без auth, так и через server-side Bearer proxy для REST+WebSocket.
+- Playwright mock smoke: desktop/compact/ultrawide/mobile fit, versions,
+  render/cancel, live log, dialogs и frame pagination — успешно; итоговые
+  скриншоты просмотрены, clipping/overlap/horizontal overflow не обнаружены.
+- Playwright real API smoke: versions, upload -> `READY` и persistence после
+  reload — успешно. Fake Blender runner smoke: WebSocket log/progress, HTTP
+  preview/original/ZIP, reload recovery, metrics и process-group cancellation —
+  успешно.
 
 ## Известные ограничения и дальнейшая работа
 

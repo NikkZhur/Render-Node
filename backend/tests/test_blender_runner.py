@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from app.blender.command import RenderCommand
-from app.blender.runner import RunnerLimits, SandboxRunner
+from app.blender.runner import RunnerLimits, SandboxRunner, _cpu_time_limit
 from app.blender.sandbox import SandboxPolicy
 from app.config import Environment
 
@@ -41,6 +41,11 @@ def runner(*, timeout_seconds: float = 5) -> SandboxRunner:
             pids=32,
         ),
     )
+
+
+def test_cpu_limit_accounts_for_parallel_render_threads() -> None:
+    assert _cpu_time_limit(30, logical_cpus=8) == 240
+    assert _cpu_time_limit(0.1, logical_cpus=0) == 1
 
 
 async def test_runner_preserves_log_and_does_not_inherit_secrets(

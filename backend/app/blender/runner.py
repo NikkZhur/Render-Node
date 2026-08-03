@@ -23,6 +23,11 @@ StartedCallback = Callable[[int], Awaitable[None]]
 OutputCallback = Callable[[Path], Awaitable[None]]
 
 
+def _cpu_time_limit(wall_timeout_seconds: float, logical_cpus: int | None = None) -> int:
+    cpu_count = logical_cpus if logical_cpus is not None else os.cpu_count()
+    return max(1, math.ceil(wall_timeout_seconds * max(cpu_count or 1, 1)))
+
+
 class RunnerError(RuntimeError):
     pass
 
@@ -129,7 +134,10 @@ class SandboxRunner:
         )
         file_limit = self._limits.max_output_bytes
         resource.setrlimit(resource.RLIMIT_FSIZE, (file_limit, file_limit))
-        cpu_limit = max(1, math.ceil(self._limits.timeout_seconds))
+        # RLIMIT_CPU counts aggregate CPU time across Blender's render threads.
+        # Scale it by available logical CPUs so it cannot expire before the
+        # configured wall-time deadline for a fully parallel CPU render.
+        cpu_limit = _cpu_time_limit(self._limits.timeout_seconds)
         resource.setrlimit(resource.RLIMIT_CPU, (cpu_limit, cpu_limit + 1))
         libc = ctypes.CDLL(None)
         if libc.prctl(38, 1, 0, 0, 0) != 0:

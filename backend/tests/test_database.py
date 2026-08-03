@@ -12,13 +12,14 @@ from app.main import create_app
 
 
 async def test_migrations_reach_current_head(tmp_path: Path) -> None:
-    database_path = tmp_path / "migration.sqlite3"
+    database_path = tmp_path / "new-workspace" / "database" / "migration.sqlite3"
     database_url = f"sqlite+aiosqlite:///{database_path}"
     config = Config("alembic.ini")
     config.attributes["database_url"] = database_url
 
     await asyncio.to_thread(command.upgrade, config, "head")
 
+    assert database_path.is_file()
     engine = create_async_engine(database_url)
     try:
         async with engine.connect() as connection:

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import os
 import shutil
+import signal
 import stat
 import tarfile
 from pathlib import Path, PurePosixPath
@@ -210,12 +212,23 @@ class BlenderStorage:
             "--version",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            cwd=binary.parent,
+            env={
+                "HOME": str(binary.parent),
+                "LANG": "C.UTF-8",
+                "LC_ALL": "C.UTF-8",
+                "PATH": "/usr/local/bin:/usr/bin:/bin",
+                "TMPDIR": str(binary.parent),
+            },
+            close_fds=True,
+            start_new_session=True,
         )
         try:
             output, _ = await asyncio.wait_for(process.communicate(), timeout=30)
         except TimeoutError:
-            process.kill()
-            await process.wait()
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            await process.communicate()
             raise BlenderRejectedError(
                 "invalid_blender_runtime", "Blender version check timed out"
             ) from None

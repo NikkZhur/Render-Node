@@ -192,7 +192,12 @@ class OfficialCatalog:
         max_bytes: int,
         on_progress: Callable[[int, int | None], Awaitable[None]],
     ) -> tuple[str, int]:
-        if not release.archive_url.startswith(f"{OFFICIAL_ORIGIN}/release/"):
+        parsed = urlparse(release.archive_url)
+        if (
+            parsed.scheme != "https"
+            or parsed.netloc != "download.blender.org"
+            or not parsed.path.startswith("/release/")
+        ):
             raise CatalogError("Refusing a non-official Blender archive URL")
         digest = hashlib.sha256()
         processed = 0
@@ -210,6 +215,8 @@ class OfficialCatalog:
                     processed += len(chunk)
                     if processed > max_bytes:
                         raise CatalogError("Blender archive exceeds its size limit")
+                    if processed > disk_usage.free:
+                        raise CatalogError("Not enough free space for the Blender archive")
                     digest.update(chunk)
                     await target.write(chunk)
                     await on_progress(processed, total)
@@ -245,13 +252,26 @@ class OfficialCatalog:
             self._expires_at = time.monotonic() + self._ttl_seconds
 
     async def _get(self, url: str, *, max_bytes: int) -> str:
-        if not url.startswith(f"{OFFICIAL_ORIGIN}/"):
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or parsed.netloc != "download.blender.org":
             raise CatalogError("Refusing a non-official Blender URL")
+        body = bytearray()
         try:
-            response = await self._client.get(url)
-            response.raise_for_status()
+            async with self._client.stream("GET", url) as response:
+                response.raise_for_status()
+                content_length = response.headers.get("content-length")
+                if (
+                    content_length is not None
+                    and content_length.isdigit()
+                    and int(content_length) > max_bytes
+                ):
+                    raise CatalogError("Official catalog response exceeds its size limit")
+                async for chunk in response.aiter_bytes(64 * 1024):
+                    if len(body) + len(chunk) > max_bytes:
+                        raise CatalogError("Official catalog response exceeds its size limit")
+                    body.extend(chunk)
+        except CatalogError:
+            raise
         except httpx.HTTPError as exc:
             raise CatalogError("Official Blender archive request failed") from exc
-        if len(response.content) > max_bytes:
-            raise CatalogError("Official catalog response exceeds its size limit")
-        return response.content.decode("utf-8", errors="strict")
+        return body.decode("utf-8", errors="strict")
