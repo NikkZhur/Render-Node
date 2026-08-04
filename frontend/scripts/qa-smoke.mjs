@@ -345,8 +345,8 @@ try {
     bounds: button.getBoundingClientRect().toJSON(),
     clipPath: getComputedStyle(button).clipPath,
     filter: getComputedStyle(button).filter,
-    surfaceAnimationName: getComputedStyle(button, "::after").animationName,
-    surfaceClipPath: getComputedStyle(button, "::after").clipPath,
+    surfaceAnimationName: getComputedStyle(button, "::before").animationName,
+    surfaceClipPath: getComputedStyle(button, "::before").clipPath,
   }));
   assert(
     tabHoverState.animationName === "none" && tabHoverState.filter === "none"
@@ -371,8 +371,10 @@ try {
   const tabBoxDuringOpen = await logToggle.boundingBox();
   const tabVisualDuringOpen = await logToggle.evaluate((button) => ({
     afterClipPath: getComputedStyle(button, "::after").clipPath,
+    afterFilter: getComputedStyle(button, "::after").filter,
     afterTransform: getComputedStyle(button, "::after").transform,
     beforeClipPath: getComputedStyle(button, "::before").clipPath,
+    beforeFilter: getComputedStyle(button, "::before").filter,
     beforeTransform: getComputedStyle(button, "::before").transform,
     outlineStyle: getComputedStyle(button).outlineStyle,
     userSelect: getComputedStyle(button).userSelect,
@@ -413,6 +415,8 @@ try {
       && tabVisualDuringOpen.userSelect === "none"
       && tabVisualDuringOpen.beforeClipPath.startsWith("polygon(")
       && tabVisualDuringOpen.afterClipPath.startsWith("polygon(")
+      && tabVisualDuringOpen.beforeFilter === "none"
+      && tabVisualDuringOpen.afterFilter === "none"
       && tabVisualDuringOpen.beforeTransform === "none"
       && tabVisualDuringOpen.afterTransform === "none",
     "Live log tab exposes a rectangular focus or selection surface during animation",
@@ -542,10 +546,14 @@ try {
       backdropFilter: surfaceStyle.backdropFilter,
       clipPath: style.clipPath,
       contourBackground: contourStyle.backgroundColor,
-      contourClipPath: contourStyle.clipPath,
+      contourFilter: contourStyle.filter,
       contourTransform: contourStyle.transform,
+      contourWillChange: contourStyle.willChange,
+      surfaceBackground: surfaceStyle.backgroundImage,
       surfaceClipPath: surfaceStyle.clipPath,
+      surfaceFilter: surfaceStyle.filter,
       surfaceTransform: surfaceStyle.transform,
+      surfaceWillChange: surfaceStyle.willChange,
     };
   });
   const wrappedLogLayout = await longLogLine.evaluate((line) => {
@@ -561,6 +569,7 @@ try {
   assert(
     logGlassLayout.borderRightWidth === "0px" && logGlassLayout.borderTopRightRadius === "0px"
       && logToggleGlass.backdropFilter.includes("blur")
+      && logToggleGlass.surfaceBackground.includes("linear-gradient")
       && logToggleGlass.contourBackground !== "rgba(0, 0, 0, 0)",
     "Live log and its trapezoid do not form a seamless glass surface",
   );
@@ -568,10 +577,13 @@ try {
   assert(logToggleGlass.arrowWidth >= 17, "Expanded live log arrow is too small");
   assert(
     logToggleGlass.clipPath === "none"
-      && logToggleGlass.contourClipPath.startsWith("polygon(")
       && logToggleGlass.surfaceClipPath.startsWith("polygon(")
+      && logToggleGlass.contourFilter === "none"
+      && logToggleGlass.surfaceFilter === "none"
       && logToggleGlass.contourTransform === "none"
-      && logToggleGlass.surfaceTransform === "none",
+      && logToggleGlass.surfaceTransform === "none"
+      && logToggleGlass.contourWillChange === "auto"
+      && logToggleGlass.surfaceWillChange === "auto",
     "Live log rail has lost its trapezoid surface or rectangular hit area",
   );
   assert(logGlassLayout.overflowY === "auto" && logGlassLayout.pointerEvents === "auto", "Live log is not an interactive scroll pane");
