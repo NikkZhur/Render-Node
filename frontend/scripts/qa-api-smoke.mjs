@@ -14,11 +14,11 @@ page.on("pageerror", (error) => browserErrors.push(`page: ${error.message}`));
 
 try {
   await page.goto(targetUrl, { waitUntil: "networkidle" });
-  await page.getByRole("button", { name: "Blender 4.5.11" }).click();
+  await page.getByRole("button", { name: "Blender 5.2.0" }).click();
   const versionDialog = page.getByRole("dialog", { name: "Blender versions" });
   await versionDialog.getByText("Blender 5.2.0", { exact: true }).waitFor();
-  if ((await versionDialog.locator(".version-row").count()) !== 5) {
-    throw new Error("Real version registry did not return all five bundled runtimes");
+  if ((await versionDialog.locator(".version-row").count()) !== 2) {
+    throw new Error("Real version registry did not return both bundled runtimes");
   }
   await versionDialog.getByRole("button", { name: "Close version manager" }).click();
 

@@ -27,7 +27,7 @@ const draftJob = {
   frame: "1–240",
   engine: "Cycles",
   device: "OptiX",
-  version: "4.5.11",
+  version: "5.2.0",
   created: "Not uploaded",
 };
 
@@ -148,6 +148,12 @@ function Icon({ name, size = 18 }) {
       </>
     ),
     close: <path d="m6 6 12 12M18 6 6 18" />,
+    trash: (
+      <>
+        <path d="M4 7h16M9 7V4h6v3m3 0-1 14H7L6 7" />
+        <path d="M10 11v6m4-6v6" />
+      </>
+    ),
     check: <path d="m5 12 4 4L19 6" />,
     expand: <path d="M8 3H3v5m13-5h5v5M8 21H3v-5m13 5h5v-5" />,
     cube: (
@@ -1210,11 +1216,13 @@ function VersionPanel({
   onUpload,
   onInstall,
   onActivate,
+  onDelete,
   downloadingVersion,
   uploadingFile,
   uploadError,
   installingVersion,
   activating,
+  deletingVersion,
   catalogQueryFn,
   actionError,
 }) {
@@ -1288,13 +1296,31 @@ function VersionPanel({
                 {version.active ? (
                   <span className="active-label"><span /> Active</span>
                 ) : version.installed ? (
-                  <button
-                    disabled={blocked || activating}
-                    onClick={() => onActivate(version.version)}
-                    type="button"
-                  >
-                    {activating ? "Switching…" : "Make active"}
-                  </button>
+                  <>
+                    <button
+                      disabled={blocked || activating || Boolean(deletingVersion)}
+                      onClick={() => onActivate(version.version)}
+                      type="button"
+                    >
+                      {activating ? "Switching…" : "Make active"}
+                    </button>
+                    {version.source !== "bundled" && (
+                      <button
+                        aria-label={`Delete Blender ${version.version}`}
+                        className="delete-version-button"
+                        disabled={blocked || Boolean(deletingVersion)}
+                        onClick={() => {
+                          if (window.confirm(`Delete Blender ${version.version} and its installer archive?`)) {
+                            onDelete(version.version);
+                          }
+                        }}
+                        title={`Delete Blender ${version.version}`}
+                        type="button"
+                      >
+                        <Icon name="trash" size={15} />
+                      </button>
+                    )}
+                  </>
                 ) : null}
               </div>
             </article>
@@ -1382,13 +1408,29 @@ function VersionPanel({
                   </div>
                   <div className="version-action">
                     {version.downloaded ? (
-                      <button
-                        disabled={Boolean(installingVersion)}
-                        onClick={() => onInstall(version.version)}
-                        type="button"
-                      >
-                        {installingVersion === version.version ? "Installing…" : "Install"}
-                      </button>
+                      <>
+                        <button
+                          disabled={Boolean(installingVersion) || Boolean(deletingVersion)}
+                          onClick={() => onInstall(version.version)}
+                          type="button"
+                        >
+                          {installingVersion === version.version ? "Installing…" : "Install"}
+                        </button>
+                        <button
+                          aria-label={`Delete Blender ${version.version} download`}
+                          className="delete-version-button"
+                          disabled={Boolean(installingVersion) || Boolean(deletingVersion)}
+                          onClick={() => {
+                            if (window.confirm(`Delete the Blender ${version.version} installer archive?`)) {
+                              onDelete(version.version);
+                            }
+                          }}
+                          title={`Delete Blender ${version.version} download`}
+                          type="button"
+                        >
+                          <Icon name="trash" size={15} />
+                        </button>
+                      </>
                     ) : (
                       <button
                         disabled={Boolean(downloadingVersion)}
@@ -1474,7 +1516,9 @@ export default function App({ mockApi = null }) {
   });
   const installMutation = useMutation({
     mutationFn: versionApi.installVersion,
-    onSuccess: () => {
+    onSuccess: (installedVersion) => {
+      queryClient.setQueryData(["official-versions"], (current = []) =>
+        current.filter((version) => version.version !== installedVersion.version));
       queryClient.invalidateQueries({ queryKey: ["versions"] });
       queryClient.invalidateQueries({ queryKey: ["official-versions"] });
     },
@@ -1483,8 +1527,15 @@ export default function App({ mockApi = null }) {
     mutationFn: versionApi.activateVersion,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["versions"] }),
   });
+  const deleteVersionMutation = useMutation({
+    mutationFn: versionApi.deleteVersion,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["versions"] });
+      queryClient.invalidateQueries({ queryKey: ["official-versions"] });
+    },
+  });
 
-  const activeVersion = versionsQuery.data?.find((version) => version.active)?.version ?? "4.5.11";
+  const activeVersion = versionsQuery.data?.find((version) => version.active)?.version ?? "5.2.0";
   const jobs = isMockMode ? mockJobs : (jobsQuery.data ?? []);
   const updateJobCache = (updatedJob) => {
     queryClient.setQueryData(["jobs"], (current = []) => [
@@ -1662,6 +1713,7 @@ export default function App({ mockApi = null }) {
             downloadMutation.error?.message
             ?? installMutation.error?.message
             ?? activateMutation.error?.message
+            ?? deleteVersionMutation.error?.message
             ?? ""
           }
           activating={activateMutation.isPending}
@@ -1669,9 +1721,11 @@ export default function App({ mockApi = null }) {
           catalogQueryFn={versionApi.getOfficialVersions}
           downloadingVersion={downloadMutation.isPending ? downloadMutation.variables : null}
           installingVersion={installMutation.isPending ? installMutation.variables : null}
+          deletingVersion={deleteVersionMutation.isPending ? deleteVersionMutation.variables : null}
           onActivate={(version) => activateMutation.mutate(version)}
           onClose={() => setVersionPanelOpen(false)}
           onDownload={(version) => downloadMutation.mutate(version)}
+          onDelete={(version) => deleteVersionMutation.mutate(version)}
           onUpload={(file) => uploadMutation.mutate(file)}
           onInstall={(version) => installMutation.mutate(version)}
           uploadError={uploadMutation.error?.message ?? ""}

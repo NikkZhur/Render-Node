@@ -254,4 +254,9 @@ export const blenderApi = {
       await request(`/blender/versions/${version}/activate`, { method: "POST" }),
     );
   },
+
+  async deleteVersion(version) {
+    await request(`/blender/versions/${version}`, { method: "DELETE" });
+    return { version };
+  },
 };

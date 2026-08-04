@@ -2480,7 +2480,7 @@ main {
 .version-row {
   min-width: 0;
   display: grid;
-  grid-template-columns: 42px minmax(180px, 1fr) minmax(100px, 0.55fr) 110px;
+  grid-template-columns: 42px minmax(180px, 1fr) minmax(100px, 0.55fr) 142px;
   align-items: center;
   gap: 12px;
   min-height: 64px;
@@ -2541,6 +2541,10 @@ main {
 }
 
 .version-action {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
   text-align: right;
 }
 
@@ -2559,6 +2563,18 @@ main {
 .version-action button:hover:not(:disabled) {
   border-color: var(--blue);
   color: var(--blue);
+}
+
+.version-action .delete-version-button {
+  width: 34px;
+  min-width: 34px;
+  padding: 0;
+  color: var(--muted);
+}
+
+.version-action .delete-version-button:hover:not(:disabled) {
+  border-color: var(--red);
+  color: var(--red);
 }
 
 .active-label {
@@ -2730,6 +2746,8 @@ main {
   .theme-switch { width: 64px; }
 
   .version-button .version-icon { display: none; }
+
+  .version-modal .channel-tag { display: none; }
 
   .version-catalog-actions {
     align-items: stretch;

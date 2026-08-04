@@ -10,44 +10,17 @@ let versions = [
     source: "bundled",
     installed: true,
     supported: true,
-    active: false,
+    active: true,
     size: "367 MB",
   },
   {
-    version: "4.5.11",
-    channel: "LTS",
-    source: "bundled",
-    installed: true,
-    supported: true,
-    active: true,
-    size: "360 MB",
-  },
-  {
-    version: "4.2.22",
-    channel: "LTS",
-    source: "bundled",
-    installed: true,
-    supported: true,
-    active: false,
-    size: "335 MB",
-  },
-  {
     version: "4.1.1",
-    channel: "Legacy",
+    channel: "Stable",
     source: "bundled",
     installed: true,
     supported: true,
     active: false,
     size: "284 MB",
-  },
-  {
-    version: "3.6.23",
-    channel: "LTS",
-    source: "bundled",
-    installed: true,
-    supported: true,
-    active: false,
-    size: "260 MB",
   },
 ];
 
@@ -76,7 +49,8 @@ const parseOfficialVersions = (html) => {
     .filter(Boolean);
 
   return [...new Set(branches)]
-    .filter((branch) => !versions.some((version) => version.version.startsWith(`${branch}.`)))
+    .filter((branch) => !versions.some((version) =>
+      version.version === branch || version.version.startsWith(`${branch}.`)))
     .sort(compareVersions)
     .map((version) => ({
       version,
@@ -312,6 +286,23 @@ export const mockApi = {
       ...version,
       active: version.version === versionNumber,
     }));
+    return { version: versionNumber };
+  },
+
+  async deleteVersion(versionNumber) {
+    const version = versions.find((candidate) => candidate.version === versionNumber)
+      ?? officialVersions.find((candidate) => candidate.version === versionNumber);
+    if (!version) throw new Error("Blender version is not installed or downloaded");
+    if (version.source === "bundled") throw new Error("Bundled versions cannot be deleted");
+    if (version.active) throw new Error("The active Blender version cannot be deleted");
+
+    await wait(300);
+    versions = versions.filter((candidate) => candidate.version !== versionNumber);
+    officialVersions = officialVersions.filter(
+      (candidate) => candidate.version !== versionNumber,
+    );
+    manualVersions = manualVersions.filter((candidate) => candidate.version !== versionNumber);
+    downloadedVersions.delete(versionNumber);
     return { version: versionNumber };
   },
 

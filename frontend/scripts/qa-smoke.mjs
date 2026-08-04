@@ -72,7 +72,7 @@ try {
       && logSeverityContract.warning === "warning",
     "Log severity styling does not distinguish errors from warnings",
   );
-  assert(await desktop.getByText("Blender 4.5.11", { exact: true }).first().isVisible(), "Active Blender version is not visible");
+  assert(await desktop.getByText("Blender 5.2.0", { exact: true }).first().isVisible(), "Active Blender version is not visible");
   const headerSummary = desktop.getByRole("navigation", { name: "Node summary" });
   assert(await headerSummary.isVisible(), "Desktop node summary is not visible in the header");
   assert(await headerSummary.getByText("0 queued", { exact: true }).isVisible(), "Queued job count is missing from the header");
@@ -255,7 +255,7 @@ try {
   assert(await desktop.locator("body").evaluate((body) => body.style.overflow === "hidden"), "Version manager did not lock background scrolling");
   await desktop.keyboard.press("Shift+Tab");
   assert(await versionDialog.evaluate((dialog) => dialog.contains(document.activeElement)), "Version manager focus escaped the dialog");
-  assert((await versionDialog.locator(".version-list .version-row").count()) === 5, "Installed version list has an unexpected number of rows");
+  assert((await versionDialog.locator(".version-list .version-row").count()) === 2, "Installed version list has an unexpected number of rows");
   assert(officialArchiveRequests === 0, "Official archive loaded before the user opened it");
   await desktop.waitForTimeout(180);
   const collapsedVersionBox = await versionDialog.boundingBox();
@@ -294,7 +294,12 @@ try {
   await blender44.getByRole("button", { name: "Install" }).waitFor();
   await blender44.getByRole("button", { name: "Install" }).click();
   await versionDialog.locator(".version-list .version-row").filter({ hasText: "Blender 4.4" }).waitFor();
-  assert((await versionDialog.locator(".version-list .version-row").count()) === 6, "Installed version did not move to the main list");
+  assert((await versionDialog.locator(".version-list .version-row").count()) === 3, "Installed version did not move to the main list");
+  desktop.once("dialog", (dialog) => dialog.accept());
+  await versionDialog.locator(".version-list .version-row").filter({ hasText: "Blender 4.4" })
+    .getByRole("button", { name: "Delete Blender 4.4", exact: true }).click();
+  await versionDialog.locator(".version-list .version-row").filter({ hasText: "Blender 4.4" }).waitFor({ state: "hidden" });
+  assert((await versionDialog.locator(".version-list .version-row").count()) === 2, "Deleted version remains in the installed list");
   await versionDialog.locator('input[type="file"]').setInputFiles({
     name: "blender-4.3.3-linux-x64.tar.xz",
     mimeType: "application/x-xz",
@@ -304,8 +309,11 @@ try {
   await manualVersion.getByText(/ready to install/).waitFor();
   assert(await manualVersion.getByText("Manual", { exact: true }).isVisible(), "Uploaded installer is not marked as manual");
   await manualVersion.getByRole("button", { name: "Install" }).click();
-  await versionDialog.locator(".version-list .version-row").filter({ hasText: "Blender 4.3.3" }).waitFor();
-  assert((await versionDialog.locator(".version-list .version-row").count()) === 7, "Manually uploaded version did not move to the main list");
+  const installedManualVersion = versionDialog.locator(".version-list .version-row").filter({ hasText: "Blender 4.3.3" });
+  await installedManualVersion.waitFor();
+  assert((await versionDialog.locator(".version-list .version-row").count()) === 3, "Manually uploaded version did not move to the main list");
+  await installedManualVersion.getByRole("button", { name: "Make active" }).click();
+  await installedManualVersion.getByText("Active", { exact: true }).waitFor();
   const blender52 = desktop.locator(".version-row").filter({ hasText: "Blender 5.2.0" });
   await blender52.getByRole("button", { name: "Make active" }).click();
   await blender52.getByText("Active", { exact: true }).waitFor();

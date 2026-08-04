@@ -199,13 +199,37 @@ async def test_bundled_registry_api_and_delete_guard(job_client: object) -> None
     response = await job_client.get("/api/v1/blender/versions")  # type: ignore[attr-defined]
     assert response.status_code == 200
     versions = response.json()
-    assert len(versions) == 5
-    assert [item["version"] for item in versions if item["active"]] == ["4.5.11"]
+    assert {item["version"] for item in versions} == {"5.2.0", "4.1.1"}
+    assert [item["version"] for item in versions if item["active"]] == ["5.2.0"]
     assert all(item["source"] == "bundled" for item in versions)
 
-    deleted = await job_client.delete("/api/v1/blender/versions/4.5.11")  # type: ignore[attr-defined]
+    deleted = await job_client.delete("/api/v1/blender/versions/5.2.0")  # type: ignore[attr-defined]
     assert deleted.status_code == 409
     assert deleted.json()["error"]["code"] == "bundled_blender_cannot_be_deleted"
+
+
+async def test_initialize_reconciles_removed_bundled_versions(job_settings: Settings) -> None:
+    catalog = FakeCatalog("4.6.0", fake_blender_archive("4.6.0"))
+    service, database = make_service(job_settings, catalog)
+    await service._storage.prepare()
+    async with database.session_factory() as session, session.begin():
+        await BlenderRepository(session).add_runtime(
+            BlenderRuntime(
+                version="4.5.11",
+                source=RuntimeSource.BUNDLED,
+                state=RuntimeState.INSTALLED,
+                supported=True,
+                active=True,
+            )
+        )
+    try:
+        await service.initialize()
+        runtimes = await service.list_runtimes()
+        assert {runtime.version for runtime in runtimes} == {"5.2.0", "4.1.1"}
+        assert [runtime.version for runtime in runtimes if runtime.active] == ["5.2.0"]
+    finally:
+        await service.shutdown()
+        await database.dispose()
 
 
 async def test_only_one_mutating_operation(job_settings: Settings) -> None:
@@ -261,6 +285,15 @@ async def test_official_operation_api_contract(job_app: FastAPI, job_settings: S
                 activated = await client.post(f"/api/v1/blender/versions/{version}/activate")
                 assert activated.status_code == 200
                 assert activated.json()["active"] is True
+
+                restored_default = await client.post("/api/v1/blender/versions/5.2.0/activate")
+                assert restored_default.status_code == 200
+                deleted = await client.delete(f"/api/v1/blender/versions/{version}")
+                assert deleted.status_code == 204
+                assert not (job_settings.blender_versions_root / version).exists()
+                assert list(job_settings.blender_downloads_root.iterdir()) == []
+                versions = await client.get("/api/v1/blender/versions")
+                assert version not in {item["version"] for item in versions.json()}
         finally:
             await service.shutdown()
 

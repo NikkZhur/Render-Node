@@ -63,6 +63,12 @@ class BlenderService:
                 operation.error = "Operation was interrupted by a service restart"
                 operation.finished_at = utc_now()
             for runtime in await repository.list_runtimes():
+                if (
+                    runtime.source is RuntimeSource.BUNDLED
+                    and runtime.version not in BUNDLED_VERSIONS
+                ):
+                    await repository.delete_runtime(runtime)
+                    continue
                 if runtime.archive_path:
                     referenced_archives.add(Path(runtime.archive_path))
                 if runtime.state in {RuntimeState.DOWNLOADING, RuntimeState.INSTALLING}:
@@ -78,7 +84,7 @@ class BlenderService:
                             source=RuntimeSource.BUNDLED,
                             state=RuntimeState.INSTALLED,
                             supported=True,
-                            active=version == DEFAULT_ACTIVE_VERSION,
+                            active=False,
                         )
                     )
             if await repository.active_runtime() is None:

@@ -5,7 +5,7 @@
 
 ## Текущее состояние
 
-- Обновлено: 2026-08-02 после финального аудита и smoke-тестов.
+- Обновлено: 2026-08-04 после обновления manifest и удаления версий Blender.
 - Фазы 1–6 из `BACKEND_IMPLEMENTATION_MASTER_PROMPT.md` завершены.
 - Следующей фазы в master prompt нет; дальнейшая работа — отдельные deployment
   задачи, перечисленные ниже.
@@ -15,6 +15,13 @@
 
 - Фазы 1–5: FastAPI/SQLite/Alembic, безопасные jobs/uploads, Blender registry,
   `SandboxRunner`, FIFO Job Manager, realtime, artifacts/previews и metrics.
+- Bundled manifest сокращён до Blender 5.2.0 и 4.1.1; 5.2.0 активен по
+  умолчанию. При обновлении registry удаляет устаревшие bundled-записи, которых
+  больше нет в образе. Адаптеры 4.5.11, 4.2.22 и 3.6.23 сохранены для явной
+  пользовательской установки этих версий.
+- Runtime manager позволяет после подтверждения удалить скачанную или
+  установленную дополнительную версию вместе с архивом. Bundled и активная
+  версии остаются защищены; frontend синхронно обновляет versions/catalog cache.
 - Адаптер Blender 4.5 преобразует стабильное API-значение `BLENDER_EEVEE` в
   фактический идентификатор Blender 4.5 `BLENDER_EEVEE_NEXT`.
 - Единая security boundary для REST и WebSocket: production требует Bearer
@@ -50,6 +57,8 @@
 
 - Alembic head остаётся `20260730_0004`; schema change в фазе 6 не требовался,
   `alembic check` не обнаруживает новых операций.
+- Blender API schema не изменилась: frontend теперь использует существующий
+  `DELETE /api/v1/blender/versions/{version}`.
 - Все `/api/v1/**` REST/WS routes используют один Bearer contract, если настроен
   `RENDER_NODE_AUTH_TOKEN`; production без token или HTTPS allowlist не стартует.
 - `WS /api/v1/events` закрывает unauthorized/forbidden handshake кодами 4401/4403
@@ -60,7 +69,7 @@
 ## Последняя проверка
 
 - Backend: Ruff format/lint — успешно; strict mypy `app` — успешно;
-  все 117 pytest tests пройдены (одно upstream Starlette warning).
+  все 118 pytest tests пройдены (одно upstream Starlette warning).
   Покрыты auth/CORS/headers, REST+WS boundary, body/WS limits, production sandbox
   fail-closed, retry cleanup, missing scene, restart cleanup/recovery, адаптеры
   Blender, bounded streaming official catalog, clean install-validation env,
@@ -74,6 +83,9 @@
   повторный upgrade — успешно; head `20260730_0004`, schema diff отсутствует.
 - Frontend: ESLint, production Vite build и explicit mock build — успешно.
   Production bundle проверен на отсутствие mock chunk и fixture markers.
+- Целевой Playwright `qa:versions`: две bundled-версии, install, отмена и
+  подтверждение delete, возврат версии в каталог, desktop/mobile viewport fit —
+  успешно; итоговые screenshots просмотрены, clipping и overflow не обнаружены.
 - Playwright mock smoke: desktop/compact/ultrawide/mobile fit, versions,
   render/cancel, live log, dialogs и frame pagination — успешно; итоговые
   скриншоты просмотрены, clipping/overlap/horizontal overflow не обнаружены.

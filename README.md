@@ -53,9 +53,11 @@ separate node later.
 - installation of additional versions only from the official Blender archive,
   with SHA-256 verification.
 
-The base image is planned to include Blender `5.2.0`, `4.5.11 LTS`, `4.2.22 LTS`,
-`4.1.1`, and `3.6.23 LTS`. Only one version can be active at a time, and it cannot
-be changed while a job is `QUEUED` or `RENDERING`.
+The base image is planned to include Blender `5.2.0` and `4.1.1`. Other supported
+versions can be installed explicitly. Only one version can be active at a time,
+and it cannot be changed while a job is `QUEUED` or `RENDERING`. Additional
+inactive versions can be deleted from the runtime manager; bundled versions are
+immutable.
 
 ## Technology Stack
 
