@@ -11,7 +11,7 @@ RUN rm -f /etc/apt/sources.list.d/yarn.list \
         libasound2 libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 \
         libcups2 libgbm1 libnss3 libxcomposite1 libxdamage1 \
         libxfixes3 libxkbcommon0 libxrandr2 \
-        fonts-liberation fonts-noto-color-emoji xvfb \
+        fonts-liberation fonts-noto-color-emoji xvfb scrot \
         graphviz ffmpeg \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 

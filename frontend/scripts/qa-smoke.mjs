@@ -7,6 +7,24 @@ const targetUrl = process.env.TARGET_URL ?? "http://127.0.0.1:5173";
 const outputDirectory = fileURLToPath(new URL("../test-results/", import.meta.url));
 const browser = await chromium.launch({ headless: true });
 const browserErrors = [];
+const officialArchiveHtml = `
+  <a href="Blender5.2/">Blender5.2/</a>
+  <a href="Blender5.1/">Blender5.1/</a>
+  <a href="Blender4.5/">Blender4.5/</a>
+  <a href="Blender4.4/">Blender4.4/</a>
+  <a href="Blender4.3/">Blender4.3/</a>
+  <a href="Blender4.2/">Blender4.2/</a>
+  <a href="Blender4.1/">Blender4.1/</a>
+  <a href="Blender4.0/">Blender4.0/</a>
+  <a href="Blender3.6/">Blender3.6/</a>
+  <a href="Blender3.5/">Blender3.5/</a>
+  <a href="Blender3.4/">Blender3.4/</a>
+  <a href="Blender3.3/">Blender3.3/</a>
+  <a href="Blender3.2/">Blender3.2/</a>
+  <a href="Blender3.1/">Blender3.1/</a>
+  <a href="Blender3.0/">Blender3.0/</a>
+  <a href="Blender2.93/">Blender2.93/</a>
+`;
 
 const assert = (condition, message) => {
   if (!condition) throw new Error(message);
@@ -32,15 +50,7 @@ try {
     officialArchiveRequests += 1;
     await route.fulfill({
       contentType: "text/html",
-      body: `
-        <a href="Blender5.2/">Blender5.2/</a>
-        <a href="Blender5.1/">Blender5.1/</a>
-        <a href="Blender4.5/">Blender4.5/</a>
-        <a href="Blender4.4/">Blender4.4/</a>
-        <a href="Blender4.2/">Blender4.2/</a>
-        <a href="Blender4.1/">Blender4.1/</a>
-        <a href="Blender3.6/">Blender3.6/</a>
-      `,
+      body: officialArchiveHtml,
       status: 200,
     });
   });
@@ -49,6 +59,19 @@ try {
   await desktop.reload({ waitUntil: "networkidle" });
 
   assert(await desktop.getByRole("heading", { name: "Job setup" }).isVisible(), "Desktop job setup is not visible");
+  const logSeverityContract = await desktop.evaluate(async () => {
+    const { getLogLevel } = await import("/src/logPresentation.js");
+    return {
+      completedFatal: getLogLevel("FATAL: Blender process crashed"),
+      completedError: getLogLevel("EGL Error (0x3009): non-fatal surface mismatch"),
+      warning: getLogLevel("Warning: scene uses a newer Blender version"),
+    };
+  });
+  assert(
+    logSeverityContract.completedFatal === "error" && logSeverityContract.completedError === "error"
+      && logSeverityContract.warning === "warning",
+    "Log severity styling does not distinguish errors from warnings",
+  );
   assert(await desktop.getByText("Blender 4.5.11", { exact: true }).first().isVisible(), "Active Blender version is not visible");
   const headerSummary = desktop.getByRole("navigation", { name: "Node summary" });
   assert(await headerSummary.isVisible(), "Desktop node summary is not visible in the header");
@@ -179,6 +202,10 @@ try {
   assert((await desktopFramesModal.locator("img").count()) === 0, "Frame popup unexpectedly loads previews");
   assert(await desktopFramesModal.getByRole("button", { name: "Download all frames as ZIP" }).isVisible(), "Sequence ZIP action is not visible");
   const desktopFrameList = desktopFramesModal.locator(".frame-list");
+  const desktopFrameRowHeight = await desktopFramesModal.locator(".frame-row").first().evaluate(
+    (row) => row.getBoundingClientRect().height,
+  );
+  assert(Math.abs(desktopFrameRowHeight - 54) <= 1, "Frame download rows do not keep their fixed height");
   const desktopFrameListFit = await desktopFrameList.evaluate((element) => ({
     clientHeight: element.clientHeight,
     scrollHeight: element.scrollHeight,
@@ -201,6 +228,20 @@ try {
   }
   assert(await desktopFramesModal.getByText("frame_0001.png", { exact: true }).isVisible(), "Returning to the first frame page failed");
   await desktop.screenshot({ path: path.join(outputDirectory, "desktop-frames.png"), scale: "css" });
+  const singleFrameLayout = await desktopFrameList.evaluate((list) => {
+    const rows = [...list.querySelectorAll(".frame-row")];
+    rows.slice(1).forEach((row) => row.remove());
+    const listBounds = list.getBoundingClientRect();
+    const rowBounds = rows[0].getBoundingClientRect();
+    return {
+      listBottom: listBounds.bottom,
+      rowBottom: rowBounds.bottom,
+      rowHeight: rowBounds.height,
+    };
+  });
+  assert(Math.abs(singleFrameLayout.rowHeight - 54) <= 1, "A single frame row stretches vertically");
+  assert(singleFrameLayout.listBottom - singleFrameLayout.rowBottom > 100, "A single frame row fills the frame list");
+  await desktop.screenshot({ path: path.join(outputDirectory, "desktop-frames-single.png"), scale: "css" });
   await desktop.keyboard.press("Escape");
   await desktopFramesModal.waitFor({ state: "hidden" });
 
@@ -209,17 +250,45 @@ try {
   const versionDialog = desktop.getByRole("dialog", { name: "Blender versions" });
   assert(await versionDialog.isVisible(), "Version manager did not open");
   const closeVersionButton = versionDialog.getByRole("button", { name: "Close version manager" });
+  await desktop.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "Close version manager");
   assert(await closeVersionButton.evaluate((button) => button === document.activeElement), "Version manager did not focus its close action");
   assert(await desktop.locator("body").evaluate((body) => body.style.overflow === "hidden"), "Version manager did not lock background scrolling");
   await desktop.keyboard.press("Shift+Tab");
   assert(await versionDialog.evaluate((dialog) => dialog.contains(document.activeElement)), "Version manager focus escaped the dialog");
   assert((await versionDialog.locator(".version-list .version-row").count()) === 5, "Installed version list has an unexpected number of rows");
   assert(officialArchiveRequests === 0, "Official archive loaded before the user opened it");
+  await desktop.waitForTimeout(180);
+  const collapsedVersionBox = await versionDialog.boundingBox();
   await versionDialog.getByRole("button", { name: /Choose other versions/ }).click();
   const officialVersions = versionDialog.getByLabel("Available Blender versions");
   assert(await officialVersions.isVisible(), "Official version catalog did not open");
   await officialVersions.getByText("Blender 4.4", { exact: true }).waitFor();
   assert(officialArchiveRequests === 1, "Official archive was not loaded exactly once");
+  const expandedVersionBox = await versionDialog.boundingBox();
+  assert(
+    collapsedVersionBox && expandedVersionBox && expandedVersionBox.height > collapsedVersionBox.height + 100,
+    "Opening the official catalog does not increase the popup height",
+  );
+  assert(
+    expandedVersionBox.y >= 0 && expandedVersionBox.y + expandedVersionBox.height <= 901,
+    "Expanded version manager extends beyond the desktop viewport",
+  );
+  const expandedVersionFit = await versionDialog.evaluate((dialog) => ({
+    clientHeight: dialog.clientHeight,
+    overflowY: getComputedStyle(dialog).overflowY,
+    scrollHeight: dialog.scrollHeight,
+  }));
+  assert(expandedVersionFit.overflowY === "hidden", "The whole version manager remains scrollable");
+  assert(expandedVersionFit.scrollHeight <= expandedVersionFit.clientHeight, "Version manager content overflows its shell");
+  const officialVersionScroll = await officialVersions.evaluate((catalog) => ({
+    clientHeight: catalog.clientHeight,
+    overflowY: getComputedStyle(catalog).overflowY,
+    scrollHeight: catalog.scrollHeight,
+  }));
+  assert(officialVersionScroll.overflowY === "auto", "Official version list is not the scroll container");
+  assert(officialVersionScroll.scrollHeight > officialVersionScroll.clientHeight, "Long official version list does not scroll internally");
+  await officialVersions.evaluate((catalog) => { catalog.scrollTop = catalog.scrollHeight; });
+  assert((await officialVersions.evaluate((catalog) => catalog.scrollTop)) > 0, "Official version list cannot be scrolled");
   const blender44 = officialVersions.locator(".catalog-version-row").filter({ hasText: "Blender 4.4" });
   await blender44.getByRole("button", { name: "Download" }).click();
   await blender44.getByRole("button", { name: "Install" }).waitFor();
@@ -252,7 +321,290 @@ try {
 
   assert((await desktop.getByRole("tab", { name: /Live log/ }).count()) === 0, "Live log tab was not removed");
   assert((await desktop.getByRole("button", { name: "More options" }).count()) === 0, "Preview overflow placeholder was not removed");
-  assert(await desktop.getByRole("log", { name: "Blender live log" }).isVisible(), "Live log overlay is not visible on the rendered frame");
+  const logToggle = desktop.locator(".preview-log-toggle");
+  const liveLog = desktop.locator(".preview-log-overlay");
+  assert(await logToggle.isVisible(), "Collapsed live log tab is not visible on the rendered frame");
+  assert(await logToggle.getAttribute("aria-label") === "Show Blender live log", "Collapsed live log tab has the wrong accessible label");
+  assert(await logToggle.getAttribute("aria-expanded") === "false", "Live log drawer is not collapsed initially");
+  assert(await liveLog.getAttribute("aria-hidden") === "true" && await liveLog.getAttribute("tabindex") === "-1", "Collapsed live log remains accessible to pointer or keyboard input");
+  const closedLogLayout = await liveLog.evaluate((overlay) => {
+    const drawer = overlay.closest(".preview-log-drawer");
+    const bounds = overlay.closest(".preview-log-shell").getBoundingClientRect();
+    const viewportBounds = overlay.closest(".render-viewport").getBoundingClientRect();
+    return {
+      outlineTranslateX: new DOMMatrixReadOnly(getComputedStyle(drawer, "::before").transform).m41,
+      overlayLeft: bounds.left,
+      shellTranslateX: new DOMMatrixReadOnly(getComputedStyle(overlay.closest(".preview-log-shell")).transform).m41,
+      viewportRight: viewportBounds.right,
+    };
+  });
+  assert(closedLogLayout.overlayLeft >= closedLogLayout.viewportRight, "Collapsed live log glass remains visible inside the preview");
+  const tabBoxBeforeHover = await logToggle.boundingBox();
+  await logToggle.hover();
+  await desktop.waitForTimeout(180);
+  const tabHoverState = await logToggle.evaluate((button) => ({
+    animationName: getComputedStyle(button).animationName,
+    bounds: button.getBoundingClientRect().toJSON(),
+    clipPath: getComputedStyle(button).clipPath,
+    filter: getComputedStyle(button).filter,
+    surfaceAnimationName: getComputedStyle(button, "::after").animationName,
+    surfaceClipPath: getComputedStyle(button, "::after").clipPath,
+  }));
+  assert(
+    tabHoverState.animationName === "none" && tabHoverState.filter === "none"
+      && tabHoverState.surfaceAnimationName === "none",
+    "Live log tab unexpectedly animates or filters on hover",
+  );
+  assert(
+    tabHoverState.clipPath === "none",
+    "Live log tab clips its hit area instead of keeping a rectangular click target",
+  );
+  assert(
+    tabHoverState.surfaceClipPath.startsWith("polygon(") && tabHoverState.surfaceClipPath.split(",").length === 4,
+    "Collapsed live log surface is not a four-sided trapezoid",
+  );
+  assert(
+    tabBoxBeforeHover && Math.abs(tabHoverState.bounds.width - tabBoxBeforeHover.width) <= 1
+      && Math.abs(tabHoverState.bounds.height - tabBoxBeforeHover.height) <= 1,
+    "Live log tab hover changes its layout geometry",
+  );
+  await logToggle.click();
+  await desktop.waitForTimeout(100);
+  const tabBoxDuringOpen = await logToggle.boundingBox();
+  const tabVisualDuringOpen = await logToggle.evaluate((button) => ({
+    afterClipPath: getComputedStyle(button, "::after").clipPath,
+    beforeClipPath: getComputedStyle(button, "::before").clipPath,
+    outlineStyle: getComputedStyle(button).outlineStyle,
+    userSelect: getComputedStyle(button).userSelect,
+  }));
+  const logMotionDuringOpen = await liveLog.evaluate((overlay) => {
+    const drawer = overlay.closest(".preview-log-drawer");
+    return {
+      outlineTranslateX: new DOMMatrixReadOnly(getComputedStyle(drawer, "::before").transform).m41,
+      shellTranslateX: new DOMMatrixReadOnly(getComputedStyle(overlay.closest(".preview-log-shell")).transform).m41,
+    };
+  });
+  await desktop.waitForTimeout(520);
+  const tabBoxAfterOpen = await logToggle.boundingBox();
+  assert(
+    tabBoxBeforeHover && tabBoxDuringOpen && tabBoxAfterOpen
+      && ["x", "width"].every(
+        (key) => Math.abs(tabBoxBeforeHover[key] - tabBoxDuringOpen[key]) <= 0.1
+          && Math.abs(tabBoxBeforeHover[key] - tabBoxAfterOpen[key]) <= 0.1,
+      ),
+    "Live log tab shifts horizontally or jitters while the drawer opens",
+  );
+  assert(
+    tabVisualDuringOpen.outlineStyle === "none"
+      && tabVisualDuringOpen.userSelect === "none"
+      && tabVisualDuringOpen.beforeClipPath.startsWith("polygon(")
+      && tabVisualDuringOpen.afterClipPath.startsWith("polygon("),
+    "Live log tab exposes a rectangular focus or selection surface during animation",
+  );
+  assert(
+    closedLogLayout.shellTranslateX > 0 && closedLogLayout.outlineTranslateX > 0
+      && logMotionDuringOpen.shellTranslateX > 0 && logMotionDuringOpen.outlineTranslateX > 0
+      && Math.abs(
+        logMotionDuringOpen.shellTranslateX / closedLogLayout.shellTranslateX
+          - logMotionDuringOpen.outlineTranslateX / closedLogLayout.outlineTranslateX,
+      ) <= 0.03,
+    "Live log outline moves ahead of the glass panel during animation",
+  );
+  assert(await logToggle.getAttribute("aria-expanded") === "true", "Live log drawer did not open from its tab");
+  assert(await liveLog.getAttribute("aria-hidden") === "false" && await liveLog.getAttribute("tabindex") === "0", "Open live log is not keyboard accessible");
+  const openedLogDrawer = await liveLog.evaluate((overlay) => {
+    const bounds = overlay.closest(".preview-log-shell").getBoundingClientRect();
+    const drawer = overlay.closest(".preview-log-drawer");
+    const viewportBounds = overlay.closest(".render-viewport").getBoundingClientRect();
+    const toggleBounds = overlay.closest(".render-viewport").querySelector(".preview-log-toggle").getBoundingClientRect();
+    return {
+      bottom: bounds.bottom,
+      height: bounds.height,
+      left: bounds.left,
+      outlineOpacity: getComputedStyle(drawer, "::before").opacity,
+      outlinePath: getComputedStyle(drawer, "::before").clipPath,
+      right: bounds.right,
+      railCut: Number.parseFloat(getComputedStyle(drawer).getPropertyValue("--log-rail-cut")),
+      toggleBottom: toggleBounds.bottom,
+      toggleHeight: toggleBounds.height,
+      toggleLeft: toggleBounds.left,
+      toggleRight: toggleBounds.right,
+      toggleTop: toggleBounds.top,
+      toggleWidth: toggleBounds.width,
+      top: bounds.top,
+      viewportBottom: viewportBounds.bottom,
+      viewportLeft: viewportBounds.left,
+      viewportRight: viewportBounds.right,
+    };
+  });
+  assert(
+    openedLogDrawer.left >= openedLogDrawer.viewportLeft && openedLogDrawer.toggleRight <= openedLogDrawer.viewportRight
+      && openedLogDrawer.bottom <= openedLogDrawer.viewportBottom,
+    "Open live log drawer extends beyond the preview",
+  );
+  assert(
+    Math.abs(openedLogDrawer.right - openedLogDrawer.toggleLeft) <= 2
+      && openedLogDrawer.toggleWidth >= 21 && openedLogDrawer.toggleWidth <= 23
+      && openedLogDrawer.outlineOpacity === "1" && openedLogDrawer.outlinePath.startsWith("polygon(")
+      && Math.abs(openedLogDrawer.top - openedLogDrawer.toggleTop - openedLogDrawer.railCut) <= 1
+      && Math.abs(openedLogDrawer.toggleBottom - openedLogDrawer.bottom - openedLogDrawer.railCut) <= 1
+      && Math.abs(openedLogDrawer.height - (openedLogDrawer.toggleHeight - 2 * openedLogDrawer.railCut)) <= 2,
+    "Live log panel does not align with the trapezoid's shorter inner edge",
+  );
+  assert((await liveLog.locator("code").count()) > 4, "Live log still truncates its history to four entries");
+  await desktop.evaluate(async () => {
+    const { mockApi } = await import("/src/mockApi.js");
+    for (let index = 0; index < 3; index += 1) {
+      mockApi.logLines.push([`09:41:${30 + index}`, "EGL Error: repeated surface mismatch"]);
+    }
+    mockApi.logLines.push(["09:41:33", "Warning: scene was written by a newer Blender version"]);
+    mockApi.logLines.push(["09:41:34", "Blender quit"]);
+    for (let index = 0; index < 24; index += 1) {
+      mockApi.logLines.push([
+        `09:42:${String(index).padStart(2, "0")}`,
+        index === 0
+          ? `Long unbroken diagnostic token: ${"render_node_layout_regression_".repeat(12)}`
+          : `Progress update ${index + 1} / 24 | keeping the render worker responsive`,
+      ]);
+    }
+  });
+  await desktop.getByRole("button", { name: "Light theme" }).click();
+  await desktop.getByRole("button", { name: "Dark theme" }).click();
+  await desktop.waitForFunction(() => document.querySelectorAll('.preview-log-overlay code').length >= 30);
+  const longLogLine = liveLog.locator("code").filter({ hasText: "Long unbroken diagnostic token" });
+  const repeatedError = liveLog.locator(".log-entry").filter({ hasText: "EGL Error: repeated surface mismatch" });
+  assert((await repeatedError.count()) === 1, "Consecutive duplicate log messages were not collapsed");
+  assert(await repeatedError.getByLabel("Repeated 3 times").isVisible(), "Collapsed log message does not expose its repeat count");
+  const logLevelColors = await liveLog.evaluate((overlay) => ({
+    error: getComputedStyle(overlay.querySelector(".log-level-error")).color,
+    info: getComputedStyle(overlay.querySelector(".log-level-info")).color,
+    system: getComputedStyle(overlay.querySelector(".log-level-system")).color,
+    warning: getComputedStyle(overlay.querySelector(".log-level-warning")).color,
+  }));
+  assert(new Set(Object.values(logLevelColors)).size === 4, "Log severity levels do not have distinct colors");
+  const logGlassLayout = await liveLog.evaluate((overlay) => {
+    const shell = overlay.closest(".preview-log-shell");
+    const bounds = shell.getBoundingClientRect();
+    const overlayBounds = overlay.getBoundingClientRect();
+    const firstVisibleEntry = [...overlay.children].find((entry) => entry.getBoundingClientRect().bottom > overlayBounds.top + 0.5);
+    const viewportBounds = overlay.closest(".render-viewport").getBoundingClientRect();
+    const actionBounds = overlay.closest(".render-viewport").querySelector(".preview-frame-actions").getBoundingClientRect();
+    const style = getComputedStyle(shell);
+    const scrollStyle = getComputedStyle(overlay);
+    return {
+      actionTop: actionBounds.top,
+      backdropFilter: style.backdropFilter,
+      borderRightWidth: style.borderRightWidth,
+      borderTopRightRadius: style.borderTopRightRadius,
+      bottom: bounds.bottom,
+      clientHeight: overlay.clientHeight,
+      firstVisibleTop: firstVisibleEntry?.getBoundingClientRect().top ?? overlayBounds.top,
+      maxScrollTop: overlay.scrollHeight - overlay.clientHeight,
+      maskImage: scrollStyle.maskImage,
+      overflowY: scrollStyle.overflowY,
+      paddingTop: Number.parseFloat(style.paddingTop),
+      pointerEvents: style.pointerEvents,
+      scrollHeight: overlay.scrollHeight,
+      scrollbarButtonDisplay: getComputedStyle(overlay, "::-webkit-scrollbar-button").display,
+      scrollTop: overlay.scrollTop,
+      textShadow: scrollStyle.textShadow,
+      top: bounds.top,
+      visibleAreaTop: overlayBounds.top,
+      viewportBottom: viewportBounds.bottom,
+      viewportTop: viewportBounds.top,
+    };
+  });
+  const logToggleGlass = await logToggle.evaluate((button) => {
+    const style = getComputedStyle(button);
+    const surfaceStyle = getComputedStyle(button, "::before");
+    const arrow = button.querySelector(".preview-log-toggle-arrow svg").getBoundingClientRect();
+    return {
+      arrowWidth: arrow.width,
+      backdropFilter: surfaceStyle.backdropFilter,
+      borderLeftWidth: surfaceStyle.borderLeftWidth,
+      clipPath: style.clipPath,
+      surfaceClipPath: surfaceStyle.clipPath,
+      surfaceTransform: surfaceStyle.transform,
+    };
+  });
+  const wrappedLogLayout = await longLogLine.evaluate((line) => {
+    const style = getComputedStyle(line);
+    return {
+      height: line.getBoundingClientRect().height,
+      lineHeight: Number.parseFloat(style.lineHeight),
+      overflowWrap: style.overflowWrap,
+      whiteSpace: style.whiteSpace,
+    };
+  });
+  assert(logGlassLayout.backdropFilter.includes("blur"), "Live log is missing its glass blur");
+  assert(
+    logGlassLayout.borderRightWidth === "0px" && logGlassLayout.borderTopRightRadius === "0px"
+      && logToggleGlass.borderLeftWidth === "0px" && logToggleGlass.backdropFilter.includes("blur"),
+    "Live log and its trapezoid do not form a seamless glass surface",
+  );
+  assert(logGlassLayout.paddingTop >= 15, "Live log content is pressed against its top edge");
+  assert(logToggleGlass.arrowWidth >= 17, "Expanded live log arrow is too small");
+  assert(
+    logToggleGlass.clipPath === "none" && logToggleGlass.surfaceClipPath.startsWith("polygon(")
+      && logToggleGlass.surfaceTransform !== "none",
+    "Live log rail has lost its trapezoid surface or rectangular hit area",
+  );
+  assert(logGlassLayout.overflowY === "auto" && logGlassLayout.pointerEvents === "auto", "Live log is not an interactive scroll pane");
+  assert(logGlassLayout.maskImage === "none", "Live log still clips its first row with a mask");
+  assert(logGlassLayout.scrollbarButtonDisplay === "none", "Live log scrollbar still exposes arrow buttons");
+  assert(logGlassLayout.textShadow.includes("3px"), "Live log text glow is stronger than intended");
+  assert(logGlassLayout.scrollHeight > logGlassLayout.clientHeight, "Long live log does not overflow internally");
+  assert(Math.abs(logGlassLayout.scrollTop - logGlassLayout.maxScrollTop) <= 2, "Live log does not initially follow its latest entry");
+  assert(logGlassLayout.firstVisibleTop >= logGlassLayout.visibleAreaTop - 1, "Live log tail starts with a clipped partial row");
+  assert(
+    logGlassLayout.top >= logGlassLayout.viewportTop && logGlassLayout.bottom <= logGlassLayout.viewportBottom
+      && logGlassLayout.bottom < logGlassLayout.actionTop,
+    "Live log glass panel overlaps preview controls or leaves the viewport",
+  );
+  assert(
+    wrappedLogLayout.whiteSpace === "pre-wrap" && wrappedLogLayout.overflowWrap === "anywhere"
+      && wrappedLogLayout.height > wrappedLogLayout.lineHeight * 2,
+    "Long live log entry is truncated instead of wrapping",
+  );
+  const followedScrollTop = logGlassLayout.scrollTop;
+  await liveLog.hover();
+  await desktop.mouse.wheel(0, -500);
+  await desktop.waitForTimeout(120);
+  const manualScrollTop = await liveLog.evaluate((overlay) => overlay.scrollTop);
+  assert(manualScrollTop < followedScrollTop, "Live log cannot be scrolled upward");
+  await desktop.evaluate(async () => {
+    const { mockApi } = await import("/src/mockApi.js");
+    mockApi.logLines.push(["09:43:00", "A new line must not steal the user's manual scroll position"]);
+  });
+  await desktop.getByRole("button", { name: "Light theme" }).click();
+  await liveLog.getByText("A new line must not steal the user's manual scroll position", { exact: true }).waitFor();
+  const preservedScrollTop = await liveLog.evaluate((overlay) => overlay.scrollTop);
+  assert(Math.abs(preservedScrollTop - manualScrollTop) <= 2, "A new log entry overrides the user's manual scroll position");
+  await liveLog.hover();
+  await desktop.mouse.wheel(0, 10_000);
+  await desktop.waitForTimeout(120);
+  await desktop.evaluate(async () => {
+    const { mockApi } = await import("/src/mockApi.js");
+    mockApi.logLines.push(["09:43:01", "Tail following resumed"]);
+  });
+  await desktop.getByRole("button", { name: "Dark theme" }).click();
+  await liveLog.getByText("Tail following resumed", { exact: true }).waitFor();
+  const resumedTail = await liveLog.evaluate((overlay) => ({
+    maxScrollTop: overlay.scrollHeight - overlay.clientHeight,
+    scrollTop: overlay.scrollTop,
+  }));
+  assert(Math.abs(resumedTail.scrollTop - resumedTail.maxScrollTop) <= 2, "Live log does not resume tail following at the bottom");
+  await desktop.screenshot({ path: path.join(outputDirectory, "desktop-log-glass.png"), scale: "css" });
+  await logToggle.click();
+  await desktop.waitForTimeout(620);
+  assert(await logToggle.getAttribute("aria-expanded") === "false", "Second live log tab click did not close the drawer");
+  await logToggle.click();
+  await desktop.waitForTimeout(620);
+  await liveLog.focus();
+  await desktop.keyboard.press("Escape");
+  await desktop.waitForTimeout(620);
+  assert(await logToggle.getAttribute("aria-expanded") === "false", "Escape did not close the live log drawer");
+  assert(await logToggle.evaluate((button) => button === document.activeElement), "Closing the live log with Escape did not restore focus to its tab");
   assert((await desktop.getByRole("button", { name: /Download frame/ }).count()) === 0, "Incomplete frame exposes a download action");
   const frameChipBox = await desktop.locator(".frame-chip").boundingBox();
   const frameActionsBox = await desktop.locator(".preview-frame-actions").boundingBox();
@@ -281,6 +633,77 @@ try {
   assert(desktopFit.scrollWidth <= desktopFit.width, "Desktop page has horizontal overflow");
   await desktop.getByRole("button", { name: /Cancel render/ }).click();
   await desktopContext.close();
+
+  const standardHdContext = await browser.newContext({
+    viewport: { width: 1920, height: 1080 },
+  });
+  const standardHd = await standardHdContext.newPage();
+  watchErrors(standardHd);
+  await standardHd.goto(targetUrl, { waitUntil: "networkidle" });
+  const readStandardHdLayout = () => standardHd.evaluate(() => {
+    const setup = document.querySelector(".setup-panel").getBoundingClientRect();
+    const preview = document.querySelector(".preview-panel").getBoundingClientRect();
+    const rightRail = document.querySelector(".right-rail").getBoundingClientRect();
+    const metrics = document.querySelector(".metrics-strip").getBoundingClientRect();
+    const footer = document.querySelector(".app-footer").getBoundingClientRect();
+    return {
+      clientHeight: document.documentElement.clientHeight,
+      scrollHeight: document.documentElement.scrollHeight,
+      setupBottom: setup.bottom,
+      previewBottom: preview.bottom,
+      rightRailBottom: rightRail.bottom,
+      metricsTop: metrics.top,
+      metricsBottom: metrics.bottom,
+      footerBottom: footer.bottom,
+    };
+  });
+  const assertStandardHdFit = (layout, state) => {
+    assert(layout.scrollHeight <= layout.clientHeight, `Standard HD page has vertical overflow while ${state}`);
+    assert(layout.metricsBottom <= layout.clientHeight + 1, `Standard HD metrics leave the viewport while ${state}`);
+    assert(layout.footerBottom <= layout.clientHeight + 1, `Standard HD footer leaves the viewport while ${state}`);
+    assert(Math.abs(layout.metricsTop - layout.setupBottom - 14) <= 1, `Job setup overlaps metrics while ${state}`);
+    assert(Math.abs(layout.metricsTop - layout.previewBottom - 14) <= 1, `Preview overlaps metrics while ${state}`);
+    assert(Math.abs(layout.metricsTop - layout.rightRailBottom - 14) <= 1, `Right rail overlaps metrics while ${state}`);
+  };
+
+  assertStandardHdFit(await readStandardHdLayout(), "ready");
+  await standardHd.screenshot({ path: path.join(outputDirectory, "desktop-standard-hd-ready.png"), scale: "css" });
+  await standardHd.locator(".render-viewport").evaluate(async (viewport) => {
+    const portrait = document.createElement("img");
+    portrait.alt = "Portrait preview layout regression";
+    portrait.className = "render-frame-image";
+    portrait.src = `data:image/svg+xml,${encodeURIComponent(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="600" height="900" viewBox="0 0 600 900"><rect width="600" height="900" fill="#111820"/></svg>',
+    )}`;
+    viewport.append(portrait);
+    await portrait.decode();
+  });
+  const portraitPreviewLayout = await standardHd.locator(".render-frame-image").evaluate((image) => {
+    const imageBounds = image.getBoundingClientRect();
+    const viewportBounds = image.closest(".render-viewport").getBoundingClientRect();
+    return {
+      imageHeight: imageBounds.height,
+      imagePosition: getComputedStyle(image).position,
+      imageWidth: imageBounds.width,
+      viewportHeight: viewportBounds.height,
+      viewportWidth: viewportBounds.width,
+    };
+  });
+  assertStandardHdFit(await readStandardHdLayout(), "portrait preview");
+  assert(portraitPreviewLayout.imagePosition === "absolute", "Portrait preview participates in layout sizing");
+  assert(
+    Math.abs(portraitPreviewLayout.imageWidth - portraitPreviewLayout.viewportWidth) <= 1
+      && Math.abs(portraitPreviewLayout.imageHeight - portraitPreviewLayout.viewportHeight) <= 1,
+    "Portrait preview does not stay inside the render viewport",
+  );
+  await standardHd.screenshot({ path: path.join(outputDirectory, "desktop-standard-hd-portrait.png"), scale: "css" });
+  await standardHd.locator(".render-frame-image").evaluate((image) => image.remove());
+  await standardHd.getByRole("button", { name: /Start render/ }).click();
+  await standardHd.getByRole("button", { name: /Cancel render/ }).waitFor();
+  assertStandardHdFit(await readStandardHdLayout(), "rendering");
+  await standardHd.screenshot({ path: path.join(outputDirectory, "desktop-standard-hd-rendering.png"), scale: "css" });
+  await standardHd.getByRole("button", { name: /Cancel render/ }).click();
+  await standardHdContext.close();
 
   const compactContext = await browser.newContext({
     viewport: { width: 1000, height: 800 },
@@ -420,6 +843,11 @@ try {
   });
   const mobile = await mobileContext.newPage();
   watchErrors(mobile);
+  await mobile.route("https://download.blender.org/release/", (route) => route.fulfill({
+    contentType: "text/html",
+    body: officialArchiveHtml,
+    status: 200,
+  }));
   await mobile.goto(targetUrl, { waitUntil: "networkidle" });
   assert(await mobile.getByRole("heading", { name: "Job setup" }).isVisible(), "Mobile job setup is not visible");
   assert(await mobile.locator("html[data-theme='dark']").count() === 1, "A fresh session does not default to dark theme");
@@ -435,6 +863,57 @@ try {
   assert(mobileStartBox && mobileStartBox.y + mobileStartBox.height <= 844, "Mobile primary render action is below the initial viewport");
 
   await mobile.getByRole("button", { name: /Start render/ }).tap();
+  const mobileLogToggle = mobile.locator(".preview-log-toggle");
+  const mobileLiveLog = mobile.locator(".preview-log-overlay");
+  await mobileLogToggle.scrollIntoViewIfNeeded();
+  const mobileClosedLogLayout = await mobileLiveLog.evaluate((overlay) => {
+    const bounds = overlay.closest(".preview-log-shell").getBoundingClientRect();
+    const viewportBounds = overlay.closest(".render-viewport").getBoundingClientRect();
+    return { overlayLeft: bounds.left, viewportRight: viewportBounds.right };
+  });
+  assert(mobileClosedLogLayout.overlayLeft >= mobileClosedLogLayout.viewportRight, "Collapsed mobile live log remains visible inside the preview");
+  await mobileLogToggle.tap();
+  await mobile.waitForTimeout(620);
+  const mobileOpenLogLayout = await mobileLiveLog.evaluate((overlay) => {
+    const bounds = overlay.closest(".preview-log-shell").getBoundingClientRect();
+    const drawer = overlay.closest(".preview-log-drawer");
+    const viewportBounds = overlay.closest(".render-viewport").getBoundingClientRect();
+    const toggleBounds = overlay.closest(".render-viewport").querySelector(".preview-log-toggle").getBoundingClientRect();
+    return {
+      bottom: bounds.bottom,
+      height: bounds.height,
+      left: bounds.left,
+      right: bounds.right,
+      railCut: Number.parseFloat(getComputedStyle(drawer).getPropertyValue("--log-rail-cut")),
+      toggleBottom: toggleBounds.bottom,
+      toggleHeight: toggleBounds.height,
+      toggleLeft: toggleBounds.left,
+      toggleRight: toggleBounds.right,
+      toggleTop: toggleBounds.top,
+      toggleWidth: toggleBounds.width,
+      top: bounds.top,
+      viewportBottom: viewportBounds.bottom,
+      viewportLeft: viewportBounds.left,
+      viewportRight: viewportBounds.right,
+      viewportTop: viewportBounds.top,
+    };
+  });
+  assert(
+    mobileOpenLogLayout.left >= mobileOpenLogLayout.viewportLeft && mobileOpenLogLayout.toggleRight <= mobileOpenLogLayout.viewportRight
+      && mobileOpenLogLayout.top >= mobileOpenLogLayout.viewportTop && mobileOpenLogLayout.bottom <= mobileOpenLogLayout.viewportBottom,
+    "Open mobile live log drawer extends beyond the preview",
+  );
+  assert(
+    Math.abs(mobileOpenLogLayout.right - mobileOpenLogLayout.toggleLeft) <= 2
+      && mobileOpenLogLayout.toggleWidth >= 18 && mobileOpenLogLayout.toggleWidth <= 20
+      && Math.abs(mobileOpenLogLayout.top - mobileOpenLogLayout.toggleTop - mobileOpenLogLayout.railCut) <= 1
+      && Math.abs(mobileOpenLogLayout.toggleBottom - mobileOpenLogLayout.bottom - mobileOpenLogLayout.railCut) <= 1
+      && Math.abs(mobileOpenLogLayout.height - (mobileOpenLogLayout.toggleHeight - 2 * mobileOpenLogLayout.railCut)) <= 2,
+    "Mobile live log panel does not align with the trapezoid's shorter inner edge",
+  );
+  await mobile.screenshot({ path: path.join(outputDirectory, "mobile-log-drawer.png"), scale: "css" });
+  await mobile.getByRole("button", { name: "Hide Blender live log" }).tap();
+  await mobile.waitForTimeout(620);
   await mobile.getByRole("button", { name: /Open frame .* in full resolution/ }).tap();
   const mobileFullFrameDialog = mobile.getByRole("dialog", { name: /Frame .* full resolution/ });
   assert(await mobileFullFrameDialog.isVisible(), "Full resolution frame dialog did not open on mobile");
@@ -478,6 +957,44 @@ try {
   await mobileFramesModal.getByRole("button", { name: "Close frame sequence" }).tap();
   await mobileFramesModal.waitFor({ state: "hidden" });
   await mobile.evaluate(() => window.scrollTo({ top: 0, behavior: "instant" }));
+
+  await mobile.locator(".version-button").tap();
+  const mobileVersionDialog = mobile.getByRole("dialog", { name: "Blender versions" });
+  await mobile.waitForTimeout(180);
+  const collapsedMobileVersionBox = await mobileVersionDialog.boundingBox();
+  await mobileVersionDialog.getByRole("button", { name: /Choose other versions/ }).tap();
+  const mobileOfficialVersions = mobileVersionDialog.getByLabel("Available Blender versions");
+  await mobileOfficialVersions.getByText("Blender 4.4", { exact: true }).waitFor();
+  const mobileVersionLayout = await mobileVersionDialog.evaluate((dialog) => {
+    const catalog = dialog.querySelector(".version-catalog-content");
+    const bounds = dialog.getBoundingClientRect();
+    return {
+      bottom: bounds.bottom,
+      catalogClientHeight: catalog.clientHeight,
+      catalogOverflowY: getComputedStyle(catalog).overflowY,
+      catalogScrollHeight: catalog.scrollHeight,
+      clientHeight: dialog.clientHeight,
+      height: bounds.height,
+      overflowY: getComputedStyle(dialog).overflowY,
+      scrollHeight: dialog.scrollHeight,
+      top: bounds.top,
+    };
+  });
+  assert(
+    collapsedMobileVersionBox && mobileVersionLayout.height > collapsedMobileVersionBox.height + 80,
+    "Opening the catalog does not expand the mobile version manager",
+  );
+  assert(mobileVersionLayout.top >= 0 && mobileVersionLayout.bottom <= 845, "Mobile version manager extends beyond the viewport");
+  assert(mobileVersionLayout.overflowY === "hidden", "The whole mobile version manager remains scrollable");
+  assert(mobileVersionLayout.scrollHeight <= mobileVersionLayout.clientHeight, "Mobile version manager content overflows its shell");
+  assert(mobileVersionLayout.catalogOverflowY === "auto", "Mobile official version list is not the scroll container");
+  assert(
+    mobileVersionLayout.catalogScrollHeight > mobileVersionLayout.catalogClientHeight,
+    "Long mobile official version list does not scroll internally",
+  );
+  await mobile.screenshot({ path: path.join(outputDirectory, "mobile-versions.png"), scale: "css" });
+  await mobileVersionDialog.getByRole("button", { name: "Close version manager" }).tap();
+  await mobileVersionDialog.waitFor({ state: "hidden" });
 
   const mobileFit = await mobile.evaluate(() => ({
     width: document.documentElement.clientWidth,

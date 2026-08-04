@@ -74,6 +74,22 @@ Redis, DragonflyDB, RabbitMQ, and PostgreSQL are intentionally excluded from the
 single-node MVP. They should be introduced only when horizontal scaling becomes
 a real requirement.
 
+## Quick Start: Full Development Stack
+
+After installing the backend and frontend dependencies once, start both services
+from the repository root with one command:
+
+```bash
+make dev
+```
+
+The command applies pending Alembic migrations, starts the backend on port `8000`
+and the frontend on port `5173`, and keeps their lifecycle coupled. `Ctrl+C` stops
+both processes; if either service exits unexpectedly, the other is stopped too.
+Environment variables such as `RENDER_NODE_WORKSPACE`,
+`RENDER_NODE_BACKEND_AUTH_TOKEN`, and the development runner settings are passed
+through unchanged.
+
 ## Quick Start: Frontend
 
 Node.js 22 and npm are required.
@@ -167,8 +183,9 @@ run `uv run alembic upgrade head` before startup.
 ### Dev Container
 
 The repository includes a VS Code Dev Container configuration with Python 3.13,
-`uv`, Node.js 22, and ports `5173` and `8000` forwarding. After opening the
-repository in the container, run the commands shown above.
+`uv`, Node.js 22, `make`, and ports `5173` and `8000` forwarding. After opening
+the repository in the container, use `make dev` to run the full development
+stack.
 
 The current [`.devcontainer/Dockerfile`](.devcontainer/Dockerfile) is intended for
 development and is not the production Render Node image.

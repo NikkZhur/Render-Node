@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { artifactsApi, blenderApi, devicesApi, jobsApi, systemApi } from "./api";
+import { getLogLevel } from "./logPresentation";
 import { useRenderEvents } from "./realtime";
 import { useUiStore } from "./store";
 
@@ -27,6 +28,36 @@ const draftJob = {
   version: "4.5.11",
   created: "Not uploaded",
 };
+
+function compactLogEntries(lines) {
+  return lines.reduce((entries, [time, line]) => {
+    const previous = entries.at(-1);
+    if (previous?.line === line) {
+      if (line.trim()) previous.count += 1;
+      previous.time = time || previous.time;
+      return entries;
+    }
+    entries.push({ count: 1, level: getLogLevel(line), line, time });
+    return entries;
+  }, []);
+}
+
+function scrollLogToTail(overlay) {
+  overlay.style.setProperty("--log-tail-padding", "0px");
+  overlay.scrollTop = overlay.scrollHeight;
+
+  const overlayTop = overlay.getBoundingClientRect().top;
+  const entries = [...overlay.children];
+  const firstVisibleIndex = entries.findIndex((entry) => entry.getBoundingClientRect().bottom > overlayTop + 0.5);
+  const firstVisible = entries[firstVisibleIndex];
+  const nextEntry = entries[firstVisibleIndex + 1];
+
+  if (!firstVisible || !nextEntry || firstVisible.getBoundingClientRect().top >= overlayTop - 0.5) return;
+
+  const tailPadding = Math.max(0, Math.ceil(nextEntry.getBoundingClientRect().top - overlayTop));
+  overlay.style.setProperty("--log-tail-padding", `${tailPadding}px`);
+  overlay.scrollTop = overlay.scrollHeight;
+}
 
 function getInitialTheme() {
   const storedTheme = window.localStorage.getItem("render-node-theme");
@@ -586,6 +617,10 @@ function FramePreviewModal({ frameNumber, imageUrl, onClose }) {
 
 function RenderPreview({ isMockMode, job, liveLogs = [], mockLogLines = [] }) {
   const [frameOpen, setFrameOpen] = useState(false);
+  const [logOpen, setLogOpen] = useState(false);
+  const logOverlayRef = useRef(null);
+  const logToggleRef = useRef(null);
+  const followLogTailRef = useRef(true);
   const isRendering = job.status === "rendering";
   const canLoadOutput = !isMockMode && job.id !== "draft";
   const framesQuery = useQuery({
@@ -609,11 +644,34 @@ function RenderPreview({ isMockMode, job, liveLogs = [], mockLogLines = [] }) {
   const shownProgress = isRendering ? job.progress : job.status === "completed" ? 100 : 0;
   const currentFrame = latestFrame?.frame ?? job.current_frame ?? job.frame_start ?? 1;
   const frameNumber = String(currentFrame).padStart(3, "0");
-  const displayedLogs = isMockMode
-    ? mockLogLines.slice(-4)
+  const rawDisplayedLogs = isMockMode
+    ? mockLogLines
     : (liveLogs.length ? liveLogs : (logQuery.data?.lines ?? []))
-      .slice(-4)
       .map((line) => ["", line]);
+  const displayedLogs = compactLogEntries(rawDisplayedLogs);
+  const latestDisplayedLog = `${rawDisplayedLogs.length}\u0000${rawDisplayedLogs.at(-1)?.join("\u0000") ?? ""}`;
+
+  useEffect(() => {
+    followLogTailRef.current = true;
+  }, [job.id]);
+
+  useEffect(() => {
+    const overlay = logOverlayRef.current;
+    if (!overlay || !followLogTailRef.current) return undefined;
+    const alignmentFrame = window.requestAnimationFrame(() => scrollLogToTail(overlay));
+    return () => window.cancelAnimationFrame(alignmentFrame);
+  }, [hasOutput, job.id, latestDisplayedLog]);
+
+  const handleLogScroll = (event) => {
+    const overlay = event.currentTarget;
+    followLogTailRef.current = overlay.scrollHeight - overlay.scrollTop - overlay.clientHeight <= 24;
+  };
+  const handleLogDrawerKeyDown = (event) => {
+    if (event.key !== "Escape" || !logOpen) return;
+    event.preventDefault();
+    setLogOpen(false);
+    window.requestAnimationFrame(() => logToggleRef.current?.focus());
+  };
   const currentTask = isRendering
     ? `Rendering frame ${currentFrame}`
     : job.status === "queued"
@@ -655,13 +713,46 @@ function RenderPreview({ isMockMode, job, liveLogs = [], mockLogLines = [] }) {
                 <span>CAMERA 01</span>
                 <span>1920 × 1080 · 100%</span>
               </div>
-              <div aria-label="Blender live log" className="preview-log-overlay" role="log">
-                {displayedLogs.map(([time, line], index, lines) => (
-                  <div className={index === lines.length - 1 ? "latest" : ""} key={`${index}-${time}-${line}`}>
-                    <time>{time}</time>
-                    <code>{line}</code>
+              <div
+                className={`preview-log-drawer ${logOpen ? "is-open" : ""}`}
+                onKeyDown={handleLogDrawerKeyDown}
+              >
+                <div className="preview-log-shell" inert={!logOpen}>
+                  <div
+                    aria-hidden={!logOpen}
+                    aria-label="Blender live log"
+                    className="preview-log-overlay"
+                    id="preview-live-log"
+                    onScroll={handleLogScroll}
+                    ref={logOverlayRef}
+                    role="log"
+                    tabIndex={logOpen ? 0 : -1}
+                  >
+                    {displayedLogs.map(({ count, level, line, time }, index, lines) => (
+                      <div
+                        className={`log-entry log-level-${level} ${time ? "has-time" : ""} ${count > 1 ? "is-repeated" : ""} ${index === lines.length - 1 ? "latest" : ""}`}
+                        key={`${index}-${time}-${line}`}
+                      >
+                        {time && <time>{time}</time>}
+                        <code>{line}</code>
+                        {count > 1 && <span aria-label={`Repeated ${count} times`} className="log-repeat-count">×{count}</span>}
+                      </div>
+                    ))}
                   </div>
-                ))}
+                </div>
+                <button
+                  aria-controls="preview-live-log"
+                  aria-expanded={logOpen}
+                  aria-label={logOpen ? "Hide Blender live log" : "Show Blender live log"}
+                  className={`preview-log-toggle ${logOpen ? "is-open" : ""}`}
+                  onClick={() => setLogOpen((open) => !open)}
+                  onKeyDown={handleLogDrawerKeyDown}
+                  ref={logToggleRef}
+                  type="button"
+                >
+                  <span aria-hidden="true" className="preview-log-toggle-label">Log</span>
+                  <span aria-hidden="true" className="preview-log-toggle-arrow"><Icon name="chevron" size={18} /></span>
+                </button>
               </div>
               <div className="frame-chip">FRAME {frameNumber}</div>
               <div className="preview-frame-actions">
@@ -1089,7 +1180,7 @@ function VersionPanel({
       <section
         aria-labelledby="versions-title"
         aria-modal="true"
-        className="version-modal"
+        className={`version-modal ${catalogOpen ? "catalog-open" : ""}`}
         onMouseDown={(event) => event.stopPropagation()}
         ref={dialogRef}
         role="dialog"
