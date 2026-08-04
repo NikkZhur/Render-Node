@@ -1224,7 +1224,7 @@ main {
   --log-rail-cut: 10px;
   --log-rail-opacity: 92%;
   --log-rail-width: 22px;
-  --log-slide-duration: 480ms;
+  --log-slide-duration: 240ms;
   --log-slide-easing: cubic-bezier(0.16, 1, 0.3, 1);
   position: absolute;
   z-index: 10;
@@ -1261,7 +1261,7 @@ main {
   transform: translate3d(calc(100% + var(--log-rail-width)), 0, 0);
   transform-origin: right center;
   transition:
-    opacity 240ms ease,
+    opacity 120ms ease,
     transform var(--log-slide-duration) var(--log-slide-easing);
   will-change: transform;
 }
@@ -1314,7 +1314,7 @@ main {
   cursor: pointer;
   pointer-events: auto;
   text-shadow: 0 0 8px rgb(90 211 162 / 42%);
-  transition: color 180ms ease, text-shadow 180ms ease;
+  transition: color 90ms ease, text-shadow 90ms ease;
   user-select: none;
   -webkit-user-select: none;
 }
@@ -1332,7 +1332,7 @@ main {
   );
   content: "";
   pointer-events: none;
-  transition: background-color 160ms ease, clip-path 260ms cubic-bezier(0.45, 0, 0.55, 1);
+  transition: background-color 80ms ease, clip-path 130ms cubic-bezier(0.45, 0, 0.55, 1);
 }
 
 .preview-log-toggle::after {
@@ -1352,7 +1352,7 @@ main {
   );
   content: "";
   pointer-events: none;
-  transition: clip-path 260ms cubic-bezier(0.45, 0, 0.55, 1);
+  transition: clip-path 130ms cubic-bezier(0.45, 0, 0.55, 1);
 }
 
 .preview-log-toggle:hover {
@@ -1400,7 +1400,7 @@ main {
   position: relative;
   z-index: 1;
   grid-area: 1 / 1;
-  transition: opacity 100ms ease, transform 160ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition: opacity 50ms ease, transform 80ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .preview-log-toggle-label {
@@ -1429,7 +1429,7 @@ main {
 .preview-log-toggle.is-open .preview-log-toggle-arrow {
   opacity: 1;
   transform: translate3d(0, 0, 0) scale(1);
-  transition-delay: 70ms;
+  transition-delay: 35ms;
 }
 
 .preview-log-toggle.is-open:hover .preview-log-toggle-arrow {

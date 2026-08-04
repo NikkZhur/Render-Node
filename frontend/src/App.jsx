@@ -6,8 +6,8 @@ import { useRenderEvents } from "./realtime";
 import { useUiStore } from "./store";
 
 const FRAMES_PER_PAGE = 50;
-const LOG_TAB_TRANSITION_FALLBACK_MS = 360;
-const LOG_PANEL_TRANSITION_FALLBACK_MS = 560;
+const LOG_TAB_TRANSITION_FALLBACK_MS = 180;
+const LOG_PANEL_TRANSITION_FALLBACK_MS = 280;
 const COMPUTE_DEVICES = ["OptiX", "CUDA", "CPU"];
 const FRAME_MODES = ["single", "range", "all"];
 const RENDER_ENGINES = ["Cycles", "Eevee", "Workbench"];
