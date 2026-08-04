@@ -6,6 +6,8 @@ import { useRenderEvents } from "./realtime";
 import { useUiStore } from "./store";
 
 const FRAMES_PER_PAGE = 50;
+const LOG_TAB_TRANSITION_FALLBACK_MS = 360;
+const LOG_PANEL_TRANSITION_FALLBACK_MS = 560;
 const COMPUTE_DEVICES = ["OptiX", "CUDA", "CPU"];
 const FRAME_MODES = ["single", "range", "all"];
 const RENDER_ENGINES = ["Cycles", "Eevee", "Workbench"];
@@ -618,7 +620,12 @@ function FramePreviewModal({ frameNumber, imageUrl, onClose }) {
 function RenderPreview({ isMockMode, job, liveLogs = [], mockLogLines = [] }) {
   const [frameOpen, setFrameOpen] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
+  const [logPanelOpen, setLogPanelOpen] = useState(false);
+  const [logTabOpen, setLogTabOpen] = useState(false);
   const logOverlayRef = useRef(null);
+  const logPanelOpenRef = useRef(false);
+  const logSequenceTimerRef = useRef(null);
+  const logTabOpenRef = useRef(false);
   const logToggleRef = useRef(null);
   const followLogTailRef = useRef(true);
   const isRendering = job.status === "rendering";
@@ -656,6 +663,39 @@ function RenderPreview({ isMockMode, job, liveLogs = [], mockLogLines = [] }) {
   }, [job.id]);
 
   useEffect(() => {
+    window.clearTimeout(logSequenceTimerRef.current);
+
+    if (logOpen) {
+      const tabWasOpen = logTabOpenRef.current;
+      if (!tabWasOpen) {
+        logTabOpenRef.current = true;
+        setLogTabOpen(true);
+      }
+
+      if (!logPanelOpenRef.current) {
+        const openPanel = () => {
+          logPanelOpenRef.current = true;
+          setLogPanelOpen(true);
+        };
+        if (tabWasOpen) openPanel();
+        else logSequenceTimerRef.current = window.setTimeout(openPanel, LOG_TAB_TRANSITION_FALLBACK_MS);
+      }
+    } else if (logPanelOpenRef.current) {
+      logPanelOpenRef.current = false;
+      setLogPanelOpen(false);
+      logSequenceTimerRef.current = window.setTimeout(() => {
+        logTabOpenRef.current = false;
+        setLogTabOpen(false);
+      }, LOG_PANEL_TRANSITION_FALLBACK_MS);
+    } else if (logTabOpenRef.current) {
+      logTabOpenRef.current = false;
+      setLogTabOpen(false);
+    }
+
+    return () => window.clearTimeout(logSequenceTimerRef.current);
+  }, [logOpen]);
+
+  useEffect(() => {
     const overlay = logOverlayRef.current;
     if (!overlay || !followLogTailRef.current) return undefined;
     const alignmentFrame = window.requestAnimationFrame(() => scrollLogToTail(overlay));
@@ -665,6 +705,20 @@ function RenderPreview({ isMockMode, job, liveLogs = [], mockLogLines = [] }) {
   const handleLogScroll = (event) => {
     const overlay = event.currentTarget;
     followLogTailRef.current = overlay.scrollHeight - overlay.scrollTop - overlay.clientHeight <= 24;
+  };
+  const handleLogPanelTransitionEnd = (event) => {
+    if (event.target !== event.currentTarget || event.propertyName !== "transform") return;
+    if (logOpen || logPanelOpenRef.current || !logTabOpenRef.current) return;
+    window.clearTimeout(logSequenceTimerRef.current);
+    logTabOpenRef.current = false;
+    setLogTabOpen(false);
+  };
+  const handleLogTabTransitionEnd = (event) => {
+    if (event.propertyName !== "clip-path" || event.nativeEvent.pseudoElement !== "::before") return;
+    if (!logOpen || !logTabOpenRef.current || logPanelOpenRef.current) return;
+    window.clearTimeout(logSequenceTimerRef.current);
+    logPanelOpenRef.current = true;
+    setLogPanelOpen(true);
   };
   const handleLogDrawerKeyDown = (event) => {
     if (event.key !== "Escape" || !logOpen) return;
@@ -714,19 +768,19 @@ function RenderPreview({ isMockMode, job, liveLogs = [], mockLogLines = [] }) {
                 <span>1920 × 1080 · 100%</span>
               </div>
               <div
-                className={`preview-log-drawer ${logOpen ? "is-open" : ""}`}
+                className={`preview-log-drawer ${logPanelOpen ? "is-panel-open" : ""}`}
                 onKeyDown={handleLogDrawerKeyDown}
               >
-                <div className="preview-log-shell" inert={!logOpen}>
+                <div className="preview-log-shell" inert={!logPanelOpen} onTransitionEnd={handleLogPanelTransitionEnd}>
                   <div
-                    aria-hidden={!logOpen}
+                    aria-hidden={!logPanelOpen}
                     aria-label="Blender live log"
                     className="preview-log-overlay"
                     id="preview-live-log"
                     onScroll={handleLogScroll}
                     ref={logOverlayRef}
                     role="log"
-                    tabIndex={logOpen ? 0 : -1}
+                    tabIndex={logPanelOpen ? 0 : -1}
                   >
                     {displayedLogs.map(({ count, level, line, time }, index, lines) => (
                       <div
@@ -744,9 +798,10 @@ function RenderPreview({ isMockMode, job, liveLogs = [], mockLogLines = [] }) {
                   aria-controls="preview-live-log"
                   aria-expanded={logOpen}
                   aria-label={logOpen ? "Hide Blender live log" : "Show Blender live log"}
-                  className={`preview-log-toggle ${logOpen ? "is-open" : ""}`}
+                  className={`preview-log-toggle ${logTabOpen ? "is-open" : ""}`}
                   onClick={() => setLogOpen((open) => !open)}
                   onKeyDown={handleLogDrawerKeyDown}
+                  onTransitionEnd={handleLogTabTransitionEnd}
                   ref={logToggleRef}
                   type="button"
                 >

@@ -328,11 +328,9 @@ try {
   assert(await logToggle.getAttribute("aria-expanded") === "false", "Live log drawer is not collapsed initially");
   assert(await liveLog.getAttribute("aria-hidden") === "true" && await liveLog.getAttribute("tabindex") === "-1", "Collapsed live log remains accessible to pointer or keyboard input");
   const closedLogLayout = await liveLog.evaluate((overlay) => {
-    const drawer = overlay.closest(".preview-log-drawer");
     const bounds = overlay.closest(".preview-log-shell").getBoundingClientRect();
     const viewportBounds = overlay.closest(".render-viewport").getBoundingClientRect();
     return {
-      outlineTranslateX: new DOMMatrixReadOnly(getComputedStyle(drawer, "::before").transform).m41,
       overlayLeft: bounds.left,
       shellTranslateX: new DOMMatrixReadOnly(getComputedStyle(overlay.closest(".preview-log-shell")).transform).m41,
       viewportRight: viewportBounds.right,
@@ -373,14 +371,30 @@ try {
   const tabBoxDuringOpen = await logToggle.boundingBox();
   const tabVisualDuringOpen = await logToggle.evaluate((button) => ({
     afterClipPath: getComputedStyle(button, "::after").clipPath,
+    afterTransform: getComputedStyle(button, "::after").transform,
     beforeClipPath: getComputedStyle(button, "::before").clipPath,
+    beforeTransform: getComputedStyle(button, "::before").transform,
     outlineStyle: getComputedStyle(button).outlineStyle,
     userSelect: getComputedStyle(button).userSelect,
   }));
-  const logMotionDuringOpen = await liveLog.evaluate((overlay) => {
+  const logMotionDuringTabPhase = await liveLog.evaluate((overlay) => {
     const drawer = overlay.closest(".preview-log-drawer");
     return {
-      outlineTranslateX: new DOMMatrixReadOnly(getComputedStyle(drawer, "::before").transform).m41,
+      panelOpen: drawer.classList.contains("is-panel-open"),
+      shellTranslateX: new DOMMatrixReadOnly(getComputedStyle(overlay.closest(".preview-log-shell")).transform).m41,
+    };
+  });
+  assert(await logToggle.getAttribute("aria-expanded") === "true", "Live log toggle does not expose its requested open state");
+  assert(
+    await liveLog.getAttribute("aria-hidden") === "true" && await liveLog.getAttribute("tabindex") === "-1",
+    "Live log panel starts before the tab expansion phase finishes",
+  );
+  await desktop.waitForFunction(() => document.querySelector(".preview-log-drawer")?.classList.contains("is-panel-open"));
+  await desktop.waitForTimeout(80);
+  const logMotionDuringPanelPhase = await liveLog.evaluate((overlay) => {
+    const drawer = overlay.closest(".preview-log-drawer");
+    return {
+      panelOpen: drawer.classList.contains("is-panel-open"),
       shellTranslateX: new DOMMatrixReadOnly(getComputedStyle(overlay.closest(".preview-log-shell")).transform).m41,
     };
   });
@@ -398,17 +412,19 @@ try {
     tabVisualDuringOpen.outlineStyle === "none"
       && tabVisualDuringOpen.userSelect === "none"
       && tabVisualDuringOpen.beforeClipPath.startsWith("polygon(")
-      && tabVisualDuringOpen.afterClipPath.startsWith("polygon("),
+      && tabVisualDuringOpen.afterClipPath.startsWith("polygon(")
+      && tabVisualDuringOpen.beforeTransform === "none"
+      && tabVisualDuringOpen.afterTransform === "none",
     "Live log tab exposes a rectangular focus or selection surface during animation",
   );
   assert(
-    closedLogLayout.shellTranslateX > 0 && closedLogLayout.outlineTranslateX > 0
-      && logMotionDuringOpen.shellTranslateX > 0 && logMotionDuringOpen.outlineTranslateX > 0
-      && Math.abs(
-        logMotionDuringOpen.shellTranslateX / closedLogLayout.shellTranslateX
-          - logMotionDuringOpen.outlineTranslateX / closedLogLayout.outlineTranslateX,
-      ) <= 0.03,
-    "Live log outline moves ahead of the glass panel during animation",
+    closedLogLayout.shellTranslateX > 0
+      && !logMotionDuringTabPhase.panelOpen
+      && Math.abs(logMotionDuringTabPhase.shellTranslateX - closedLogLayout.shellTranslateX) <= 1
+      && logMotionDuringPanelPhase.panelOpen
+      && logMotionDuringPanelPhase.shellTranslateX > 0
+      && logMotionDuringPanelPhase.shellTranslateX < closedLogLayout.shellTranslateX,
+    "Live log tab and panel phases overlap or run out of sequence",
   );
   assert(await logToggle.getAttribute("aria-expanded") === "true", "Live log drawer did not open from its tab");
   assert(await liveLog.getAttribute("aria-hidden") === "false" && await liveLog.getAttribute("tabindex") === "0", "Open live log is not keyboard accessible");
@@ -416,18 +432,19 @@ try {
     const bounds = overlay.closest(".preview-log-shell").getBoundingClientRect();
     const drawer = overlay.closest(".preview-log-drawer");
     const viewportBounds = overlay.closest(".render-viewport").getBoundingClientRect();
-    const toggleBounds = overlay.closest(".render-viewport").querySelector(".preview-log-toggle").getBoundingClientRect();
+    const toggle = overlay.closest(".render-viewport").querySelector(".preview-log-toggle");
+    const toggleBounds = toggle.getBoundingClientRect();
     return {
       bottom: bounds.bottom,
       height: bounds.height,
       left: bounds.left,
-      outlineOpacity: getComputedStyle(drawer, "::before").opacity,
-      outlinePath: getComputedStyle(drawer, "::before").clipPath,
       right: bounds.right,
       railCut: Number.parseFloat(getComputedStyle(drawer).getPropertyValue("--log-rail-cut")),
+      toggleInnerPath: getComputedStyle(toggle, "::after").clipPath,
       toggleBottom: toggleBounds.bottom,
       toggleHeight: toggleBounds.height,
       toggleLeft: toggleBounds.left,
+      toggleOuterPath: getComputedStyle(toggle, "::before").clipPath,
       toggleRight: toggleBounds.right,
       toggleTop: toggleBounds.top,
       toggleWidth: toggleBounds.width,
@@ -445,7 +462,8 @@ try {
   assert(
     Math.abs(openedLogDrawer.right - openedLogDrawer.toggleLeft) <= 2
       && openedLogDrawer.toggleWidth >= 21 && openedLogDrawer.toggleWidth <= 23
-      && openedLogDrawer.outlineOpacity === "1" && openedLogDrawer.outlinePath.startsWith("polygon(")
+      && openedLogDrawer.toggleOuterPath.startsWith("polygon(")
+      && openedLogDrawer.toggleInnerPath.startsWith("polygon(")
       && Math.abs(openedLogDrawer.top - openedLogDrawer.toggleTop - openedLogDrawer.railCut) <= 1
       && Math.abs(openedLogDrawer.toggleBottom - openedLogDrawer.bottom - openedLogDrawer.railCut) <= 1
       && Math.abs(openedLogDrawer.height - (openedLogDrawer.toggleHeight - 2 * openedLogDrawer.railCut)) <= 2,
@@ -516,13 +534,16 @@ try {
   });
   const logToggleGlass = await logToggle.evaluate((button) => {
     const style = getComputedStyle(button);
-    const surfaceStyle = getComputedStyle(button, "::before");
+    const contourStyle = getComputedStyle(button, "::before");
+    const surfaceStyle = getComputedStyle(button, "::after");
     const arrow = button.querySelector(".preview-log-toggle-arrow svg").getBoundingClientRect();
     return {
       arrowWidth: arrow.width,
       backdropFilter: surfaceStyle.backdropFilter,
-      borderLeftWidth: surfaceStyle.borderLeftWidth,
       clipPath: style.clipPath,
+      contourBackground: contourStyle.backgroundColor,
+      contourClipPath: contourStyle.clipPath,
+      contourTransform: contourStyle.transform,
       surfaceClipPath: surfaceStyle.clipPath,
       surfaceTransform: surfaceStyle.transform,
     };
@@ -539,14 +560,18 @@ try {
   assert(logGlassLayout.backdropFilter.includes("blur"), "Live log is missing its glass blur");
   assert(
     logGlassLayout.borderRightWidth === "0px" && logGlassLayout.borderTopRightRadius === "0px"
-      && logToggleGlass.borderLeftWidth === "0px" && logToggleGlass.backdropFilter.includes("blur"),
+      && logToggleGlass.backdropFilter.includes("blur")
+      && logToggleGlass.contourBackground !== "rgba(0, 0, 0, 0)",
     "Live log and its trapezoid do not form a seamless glass surface",
   );
   assert(logGlassLayout.paddingTop >= 15, "Live log content is pressed against its top edge");
   assert(logToggleGlass.arrowWidth >= 17, "Expanded live log arrow is too small");
   assert(
-    logToggleGlass.clipPath === "none" && logToggleGlass.surfaceClipPath.startsWith("polygon(")
-      && logToggleGlass.surfaceTransform !== "none",
+    logToggleGlass.clipPath === "none"
+      && logToggleGlass.contourClipPath.startsWith("polygon(")
+      && logToggleGlass.surfaceClipPath.startsWith("polygon(")
+      && logToggleGlass.contourTransform === "none"
+      && logToggleGlass.surfaceTransform === "none",
     "Live log rail has lost its trapezoid surface or rectangular hit area",
   );
   assert(logGlassLayout.overflowY === "auto" && logGlassLayout.pointerEvents === "auto", "Live log is not an interactive scroll pane");
@@ -596,15 +621,25 @@ try {
   assert(Math.abs(resumedTail.scrollTop - resumedTail.maxScrollTop) <= 2, "Live log does not resume tail following at the bottom");
   await desktop.screenshot({ path: path.join(outputDirectory, "desktop-log-glass.png"), scale: "css" });
   await logToggle.click();
-  await desktop.waitForTimeout(620);
+  await desktop.waitForTimeout(760);
   assert(await logToggle.getAttribute("aria-expanded") === "false", "Second live log tab click did not close the drawer");
   await logToggle.click();
-  await desktop.waitForTimeout(620);
+  await desktop.waitForTimeout(800);
   await liveLog.focus();
   await desktop.keyboard.press("Escape");
-  await desktop.waitForTimeout(620);
+  await desktop.waitForTimeout(760);
   assert(await logToggle.getAttribute("aria-expanded") === "false", "Escape did not close the live log drawer");
   assert(await logToggle.evaluate((button) => button === document.activeElement), "Closing the live log with Escape did not restore focus to its tab");
+  await logToggle.click();
+  await desktop.waitForTimeout(80);
+  await logToggle.click();
+  await desktop.waitForTimeout(300);
+  assert(
+    await logToggle.getAttribute("aria-expanded") === "false"
+      && !(await logToggle.getAttribute("class")).includes("is-open")
+      && !(await liveLog.locator("xpath=ancestor::*[contains(@class, 'preview-log-drawer')]").getAttribute("class")).includes("is-panel-open"),
+    "Rapid repeated click leaves the staged live log transition partially open",
+  );
   assert((await desktop.getByRole("button", { name: /Download frame/ }).count()) === 0, "Incomplete frame exposes a download action");
   const frameChipBox = await desktop.locator(".frame-chip").boundingBox();
   const frameActionsBox = await desktop.locator(".preview-frame-actions").boundingBox();
@@ -873,7 +908,7 @@ try {
   });
   assert(mobileClosedLogLayout.overlayLeft >= mobileClosedLogLayout.viewportRight, "Collapsed mobile live log remains visible inside the preview");
   await mobileLogToggle.tap();
-  await mobile.waitForTimeout(620);
+  await mobile.waitForTimeout(800);
   const mobileOpenLogLayout = await mobileLiveLog.evaluate((overlay) => {
     const bounds = overlay.closest(".preview-log-shell").getBoundingClientRect();
     const drawer = overlay.closest(".preview-log-drawer");
@@ -913,7 +948,7 @@ try {
   );
   await mobile.screenshot({ path: path.join(outputDirectory, "mobile-log-drawer.png"), scale: "css" });
   await mobile.getByRole("button", { name: "Hide Blender live log" }).tap();
-  await mobile.waitForTimeout(620);
+  await mobile.waitForTimeout(760);
   await mobile.getByRole("button", { name: /Open frame .* in full resolution/ }).tap();
   const mobileFullFrameDialog = mobile.getByRole("dialog", { name: /Frame .* full resolution/ });
   assert(await mobileFullFrameDialog.isVisible(), "Full resolution frame dialog did not open on mobile");
