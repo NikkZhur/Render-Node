@@ -170,16 +170,27 @@ async def test_unsafe_zip_is_rejected_without_escape(
     assert not (job_settings.workspace / "escape.blend").exists()
 
 
-async def test_second_upload_is_rejected(job_client: AsyncClient) -> None:
+async def test_second_upload_replaces_ready_scene(
+    job_client: AsyncClient, job_settings: Settings
+) -> None:
     job_id = await create_job(job_client)
-    upload = {"file": ("scene.blend", b"BLENDER-v300", "application/octet-stream")}
-    first_response = await job_client.post(f"/api/v1/jobs/{job_id}/uploads", files=upload)
+    first_response = await job_client.post(
+        f"/api/v1/jobs/{job_id}/uploads",
+        files={"file": ("scene.blend", b"BLENDER-v300", "application/octet-stream")},
+    )
     assert first_response.status_code == 200
 
-    response = await job_client.post(f"/api/v1/jobs/{job_id}/uploads", files=upload)
+    response = await job_client.post(
+        f"/api/v1/jobs/{job_id}/uploads",
+        files={"file": ("replacement.blend", b"BLENDER-v310", "application/octet-stream")},
+    )
 
-    assert response.status_code == 409
-    assert response.json()["error"]["code"] == "job_already_uploaded"
+    assert response.status_code == 200
+    assert response.json()["status"] == "ready"
+    assert response.json()["source_filename"] == "replacement.blend"
+    assert (job_settings.jobs_root / job_id / "input" / "scene.blend").read_bytes() == (
+        b"BLENDER-v310"
+    )
 
 
 async def test_request_body_limit_rejects_before_multipart_parsing(

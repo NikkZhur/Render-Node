@@ -11,9 +11,10 @@ uv run alembic upgrade head
 uv run uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000
 ```
 
-Set `RENDER_NODE_ALLOW_UNSANDBOXED_RUNNER=true` only for explicit local
-development. The production configuration fails closed while the deployment has
-no OS-isolated worker sandbox.
+Set `RENDER_NODE_RUNNER_MODE=local_trusted` only for explicit local development
+with trusted `.blend`/ZIP files. Settings load from the repository-root `.env`.
+The production configuration fails closed while the deployment has no
+OS-isolated worker sandbox.
 
 Production additionally requires a secret `RENDER_NODE_AUTH_TOKEN` with at least
 32 characters and exact HTTPS `RENDER_NODE_ALLOWED_ORIGINS`. `/health` and
@@ -40,6 +41,8 @@ Blender version API:
 
 Render lifecycle:
 
+- `GET /api/v1/jobs/page?page=1&page_size=10` returns one ordered history page;
+  `page_size` is capped at 10 and subsequent pages are fetched on demand;
 - `POST /api/v1/jobs/{id}/start` queues a ready job;
 - one scheduler task starts the oldest queued job;
 - `GET /api/v1/jobs/{id}` exposes persisted progress and process state;

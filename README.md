@@ -90,7 +90,12 @@ and the frontend on port `5173`, and keeps their lifecycle coupled. `Ctrl+C` sto
 both processes; if either service exits unexpectedly, the other is stopped too.
 Environment variables such as `RENDER_NODE_WORKSPACE`,
 `RENDER_NODE_BACKEND_AUTH_TOKEN`, and the development runner settings are passed
-through unchanged.
+through unchanged. Settings are also loaded from the repository-root `.env`, so
+copy `.env.example` to `.env` once and set
+`RENDER_NODE_RUNNER_MODE=local_trusted` for persistent direct-on-host rendering.
+This mode starts Blender as a subprocess of Render Node and must only receive
+trusted `.blend`/ZIP files. If it is disabled, the UI reports that the runner is
+unavailable and keeps a started job in `READY` instead of creating a failed job.
 
 ## Quick Start: Frontend
 
@@ -125,7 +130,8 @@ uv run uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000
 ```
 
 Local Blender execution is intentionally disabled by default. For an isolated
-development machine only, set `RENDER_NODE_ALLOW_UNSANDBOXED_RUNNER=true`.
+development machine that receives only trusted scenes, set
+`RENDER_NODE_RUNNER_MODE=local_trusted` in the repository-root `.env`.
 Production refuses to enable rendering until an OS-isolated worker sandbox is
 available; the development fallback is never accepted there.
 
@@ -169,6 +175,10 @@ Cleanup is conservative and explicit:
 
 - `DELETE /api/v1/jobs/{id}` removes the database row, artifacts, and the whole
   server-generated job directory when the job is not active;
+- job settings and the uploaded scene can be replaced while a job is `CREATED`
+  or `READY`; they become read-only after the first start;
+- rerender creates a separate editable `READY` job with copied settings and a
+  server-side copy of the original input, without copying artifacts;
 - retry removes old output, previews, logs, temporary files, and artifact rows,
   while preserving the uploaded scene;
 - startup clears per-job temporary directories and discards an input directory

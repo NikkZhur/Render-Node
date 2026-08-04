@@ -10,13 +10,18 @@ from alembic.config import Config
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from app.config import Environment, Settings
+from app.config import Environment, RunnerMode, Settings
+from app.jobs.manager import JobManager
 from app.main import create_app
 
 
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
-    configured = Settings(env=Environment.TEST, workspace=tmp_path)
+    configured = Settings(
+        env=Environment.TEST,
+        workspace=tmp_path,
+        runner_mode=RunnerMode.DISABLED,
+    )
     assert configured.database_path is not None
     configured.database_path.parent.mkdir(parents=True)
     alembic_config = Config("alembic.ini")
@@ -49,6 +54,7 @@ async def job_settings(tmp_path: Path) -> Settings:
         max_zip_files=2,
         max_zip_extracted_gb=0.000001,
         render_scheduler_enabled=False,
+        runner_mode=RunnerMode.DISABLED,
     )
     alembic_config = Config("alembic.ini")
     alembic_config.attributes["database_url"] = database_url
@@ -57,8 +63,12 @@ async def job_settings(tmp_path: Path) -> Settings:
 
 
 @pytest.fixture
-def job_app(job_settings: Settings) -> FastAPI:
-    return create_app(job_settings)
+def job_app(job_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> FastAPI:
+    async def start_without_scheduler(manager: JobManager) -> None:
+        await manager._recover_interrupted()
+
+    monkeypatch.setattr(JobManager, "start", start_without_scheduler)
+    return create_app(job_settings.model_copy(update={"render_scheduler_enabled": True}))
 
 
 @pytest.fixture

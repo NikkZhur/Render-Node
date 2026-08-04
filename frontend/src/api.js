@@ -57,6 +57,14 @@ export const jobsApi = {
     return jobs.map(presentJob);
   },
 
+  async page({ page = 1, pageSize = 10, signal } = {}) {
+    const result = await request(`/jobs/page?page=${page}&page_size=${pageSize}`, { signal });
+    return {
+      ...result,
+      items: result.items.map(presentJob),
+    };
+  },
+
   async create(payload) {
     return request("/jobs", {
       method: "POST",
@@ -71,6 +79,16 @@ export const jobsApi = {
     return presentJob(await request(`/jobs/${jobId}/uploads`, { method: "POST", body: form }));
   },
 
+  async update(jobId, payload) {
+    const configuration = { ...payload };
+    delete configuration.blender_version;
+    return presentJob(await request(`/jobs/${jobId}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(configuration),
+    }));
+  },
+
   async start(jobId) {
     return presentJob(await request(`/jobs/${jobId}/start`, { method: "POST" }));
   },
@@ -81,6 +99,10 @@ export const jobsApi = {
 
   async retry(jobId) {
     return presentJob(await request(`/jobs/${jobId}/retry`, { method: "POST" }));
+  },
+
+  async rerender(jobId) {
+    return presentJob(await request(`/jobs/${jobId}/rerender`, { method: "POST" }));
   },
 
   async delete(jobId) {
@@ -166,6 +188,10 @@ export const presentMetrics = (metrics) => ({
 export const systemApi = {
   async metrics({ signal } = {}) {
     return presentMetrics(await request("/system/metrics", { signal }));
+  },
+
+  capabilities({ signal } = {}) {
+    return request("/system/capabilities", { signal });
   },
 };
 

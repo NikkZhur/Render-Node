@@ -679,6 +679,8 @@ try {
 
   await desktop.locator(".job-row").filter({ hasText: "Loft still" }).click();
   assert(await desktop.getByRole("button", { name: /Download frame/ }).isVisible(), "Completed frame has no download action");
+  assert(await desktop.getByText("Read only", { exact: true }).isVisible(), "Completed job setup is not locked");
+  assert(await desktop.getByRole("button", { name: "Rerender as new job" }).isVisible(), "Completed job has no rerender action");
   await desktop.screenshot({ path: path.join(outputDirectory, "desktop-rendering.png"), scale: "css" });
 
   const desktopFit = await desktop.evaluate(() => ({
@@ -686,6 +688,7 @@ try {
     scrollWidth: document.documentElement.scrollWidth,
   }));
   assert(desktopFit.scrollWidth <= desktopFit.width, "Desktop page has horizontal overflow");
+  await desktop.locator(".job-row").filter({ hasText: "Atrium lighting" }).click();
   await desktop.getByRole("button", { name: /Cancel render/ }).click();
   await desktopContext.close();
 

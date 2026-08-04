@@ -5,7 +5,7 @@
 
 ## Текущее состояние
 
-- Обновлено: 2026-08-04 после обновления manifest и удаления версий Blender.
+- Обновлено: 2026-08-04 после добавления серверной пагинации списка jobs.
 - Фазы 1–6 из `BACKEND_IMPLEMENTATION_MASTER_PROMPT.md` завершены.
 - Следующей фазы в master prompt нет; дальнейшая работа — отдельные deployment
   задачи, перечисленные ниже.
@@ -22,6 +22,21 @@
 - Runtime manager позволяет после подтверждения удалить скачанную или
   установленную дополнительную версию вместе с архивом. Bundled и активная
   версии остаются защищены; frontend синхронно обновляет versions/catalog cache.
+- Повторный install безопасно восстанавливает registry для уже существующего
+  version directory только после проверки обычного каталога, non-symlink
+  executable и точного вывода `blender --version`. После failed install
+  проверенный архив остаётся доступным для retry без повторного download.
+- `Job setup` отображает конфигурацию выбранного job. `CREATED`/`READY` можно
+  менять и заменять их scene upload; после первого start настройки и сцена
+  блокируются. `New job` открывает пустой editable draft, а `Rerender` создаёт
+  отдельный `READY` job с копией настроек и server-side копией исходного input,
+  без наследования артефактов.
+- Нижний footer `Job setup` имеет отдельный message-slot над Runtime: runtime,
+  runner status и actions сохраняют положение, а operation error заполняет
+  зарезервированное место без увеличения desktop-панели или перекрытия GPU.
+- Панель Jobs имеет ограниченную высоту и внутреннюю прокрутку. Она показывает
+  не более 10 записей на серверную страницу; остальные страницы запрашиваются
+  только при переходе через компактную пагинацию.
 - Адаптер Blender 4.5 преобразует стабильное API-значение `BLENDER_EEVEE` в
   фактический идентификатор Blender 4.5 `BLENDER_EEVEE_NEXT`.
 - Единая security boundary для REST и WebSocket: production требует Bearer
@@ -33,6 +48,13 @@
   остаются отдельными.
 - Production scheduler fail-closed без OS sandbox. Development override не
   разрешается в production и не считается production-проверкой.
+- Для прямого локального запуска добавлен явный `runner_mode=local_trusted`.
+  Корневой `.env` загружается автоматически, старый boolean-флаг мигрирует в
+  новый режим, а production по-прежнему его запрещает. Локальный `.env` включает
+  режим для текущего узла и остаётся вне git.
+- Start/retry выполняют runner preflight до перехода в `QUEUED`; недоступный
+  scheduler/runner возвращает `runner_unavailable`, сохраняя исходный статус.
+  Frontend показывает capability runner и блокирует Start при недоступности.
 - Restart очищает per-job `temp` и input незавершённого `CREATED` upload.
   Start/retry проверяет наличие contained regular scene. Retry очищает старые
   output/preview/log/temp и artifact metadata, сохраняя input; delete освобождает
@@ -59,21 +81,31 @@
   `alembic check` не обнаруживает новых операций.
 - Blender API schema не изменилась: frontend теперь использует существующий
   `DELETE /api/v1/blender/versions/{version}`.
+- Jobs API дополнен полным `PUT /api/v1/jobs/{job_id}` для editable-конфигурации
+  и `POST /api/v1/jobs/{job_id}/rerender` (`201 Created`) для terminal jobs.
+  Upload принимает `CREATED` и `READY`; для остальных статусов возвращает
+  `job_upload_locked`. Миграция БД не требуется.
+- `GET /api/v1/jobs/page?page=&page_size=` возвращает `items`, `page`,
+  `page_size`, `total`, `pages`; сервер ограничивает страницу 10 записями.
+  Старый `GET /api/v1/jobs` сохранён для совместимости. Миграция БД не требуется.
 - Все `/api/v1/**` REST/WS routes используют один Bearer contract, если настроен
   `RENDER_NODE_AUTH_TOKEN`; production без token или HTTPS allowlist не стартует.
 - `WS /api/v1/events` закрывает unauthorized/forbidden handshake кодами 4401/4403
   и oversized client message кодом 1009.
+- `GET /api/v1/system/capabilities` возвращает `runner.available`, `mode` и
+  пользовательское `message`; изменения схемы БД не потребовалось.
 - Новые настройки: `RENDER_NODE_AUTH_TOKEN`, `RENDER_NODE_MAX_API_REQUEST_MB`,
-  `RENDER_NODE_WEBSOCKET_MESSAGE_MAX_KB`.
+  `RENDER_NODE_WEBSOCKET_MESSAGE_MAX_KB`, `RENDER_NODE_RUNNER_MODE`.
 
 ## Последняя проверка
 
 - Backend: Ruff format/lint — успешно; strict mypy `app` — успешно;
-  все 118 pytest tests пройдены (одно upstream Starlette warning).
+  все 126 pytest tests пройдены (одно upstream Starlette warning).
   Покрыты auth/CORS/headers, REST+WS boundary, body/WS limits, production sandbox
-  fail-closed, retry cleanup, missing scene, restart cleanup/recovery, адаптеры
-  Blender, bounded streaming official catalog, clean install-validation env,
-  CPU-time limit и migration bootstrap нового workspace.
+  fail-closed, editable/locked job settings, безопасная замена upload, rerender с
+  копией вложенного input, retry cleanup, missing scene, restart recovery,
+  адаптеры Blender, bounded streaming official catalog, clean
+  install-validation env, CPU-time limit и migration bootstrap нового workspace.
 - Реальный development CPU smoke: официальный Blender 4.5.11 LTS с проверенным
   SHA-256 успешно отрендерил кадр 1 `Untitled.blend` в Eevee через публичный Job
   API; job `COMPLETED`, progress `1.0`, exit code `0`. Original 600×900 PNG,
@@ -83,9 +115,28 @@
   повторный upgrade — успешно; head `20260730_0004`, schema diff отсутствует.
 - Frontend: ESLint, production Vite build и explicit mock build — успешно.
   Production bundle проверен на отсутствие mock chunk и fixture markers.
+- Целевой Playwright `qa:capabilities`: available/unavailable/API-error состояния,
+  блокировка Start и desktop/mobile viewport fit — успешно; screenshots
+  просмотрены. Появление job error отдельно проверено обычным кликом: высота
+  desktop-панели и положение Runtime/actions не меняются; clipping, overlap и
+  horizontal overflow не обнаружены.
+- После обычного перезапуска `make dev` реальные `/ready` и
+  `/api/v1/system/capabilities` вернули ready и `local_trusted/available=true`;
+  настройки процесса вручную через shell env больше не требуются.
 - Целевой Playwright `qa:versions`: две bundled-версии, install, отмена и
   подтверждение delete, возврат версии в каталог, desktop/mobile viewport fit —
   успешно; итоговые screenshots просмотрены, clipping и overflow не обнаружены.
+- Реальный recovery 4.5.11: существующий валидный runtime принят после проверки,
+  install operation завершена, версия показана в installed list без дубликата и
+  старой ошибки; 4.1.1 осталась активной. Screenshot и modal fit проверены.
+- Целевой Playwright `qa:jobs`: selected job settings, read-only после start,
+  editable rerender-копия, сохранение настроек, New job/upload и desktop/mobile
+  fit — успешно; screenshots просмотрены, overlap и horizontal overflow не
+  обнаружены.
+- Целевой Playwright `qa:jobs-pagination`: по 10/10/3 jobs на трёх страницах,
+  отсутствие предварительной загрузки страниц 2–3, стабильная высота панели,
+  внутренняя прокрутка и desktop/mobile fit — успешно; screenshots просмотрены,
+  overlap и horizontal overflow не обнаружены.
 - Playwright mock smoke: desktop/compact/ultrawide/mobile fit, versions,
   render/cancel, live log, dialogs и frame pagination — успешно; итоговые
   скриншоты просмотрены, clipping/overlap/horizontal overflow не обнаружены.
@@ -99,6 +150,8 @@
 - Production worker image/namespace с network/filesystem/device isolation и
   non-root runtime ещё не реализован; поэтому production rendering намеренно не
   достигает readiness при включённом scheduler.
+- `local_trusted` запускает Blender subprocess напрямую и предназначен только для
+  доверенных сцен; он не является sandbox и запрещён при `ENV=production`.
 - В контейнере нет production Blender image и GPU. Development CPU/Eevee для
   Blender 4.5.11 проверен через явный executable override; CUDA/OptiX, GPU
   isolation и bundled binaries не проверялись, их работа не заявляется.

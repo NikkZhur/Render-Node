@@ -32,6 +32,16 @@ class BlenderRuntime(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now)
 
+    @property
+    def archive_available(self) -> bool:
+        if self.state is RuntimeState.INSTALLED:
+            return True
+        return bool(
+            self.archive_path
+            and self.expected_sha256
+            and self.verified_sha256 == self.expected_sha256
+        )
+
 
 class BlenderOperation(Base):
     __tablename__ = "blender_operations"

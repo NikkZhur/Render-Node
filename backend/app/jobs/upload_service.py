@@ -40,7 +40,7 @@ class JobUploadService:
     async def upload(self, job_id: UUID, file: UploadFile) -> Job:
         lock = await self._locks.get(job_id)
         async with lock:
-            await self._require_created(job_id)
+            await self._require_editable(job_id)
             stored = await self._storage.store(job_id, file)
             try:
                 async with self._database.session_factory() as session, session.begin():
@@ -48,7 +48,8 @@ class JobUploadService:
                     job = await repository.get(job_id)
                     if job is None:
                         raise JobNotFoundError
-                    job.status = transition_job(job.status, JobStatus.READY)
+                    if job.status is JobStatus.CREATED:
+                        job.status = transition_job(job.status, JobStatus.READY)
                     job.source_filename = stored.source_filename
                     job.scene_path = stored.scene_path
                 await self._events.publish(
@@ -63,12 +64,12 @@ class JobUploadService:
                 await self._job_storage.delete_input(job_id)
                 raise
 
-    async def _require_created(self, job_id: UUID) -> None:
+    async def _require_editable(self, job_id: UUID) -> None:
         async with self._database.session_factory() as session:
             job = await JobRepository(session).get(job_id)
             if job is None:
                 raise JobNotFoundError
-            if job.status is not JobStatus.CREATED:
+            if job.status not in {JobStatus.CREATED, JobStatus.READY}:
                 raise JobConflictError(
-                    "job_already_uploaded", "Only created jobs can accept an upload"
+                    "job_upload_locked", "A scene cannot be replaced after rendering has started"
                 )

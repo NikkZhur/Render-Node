@@ -173,7 +173,9 @@ job и установки Blender во frontend не дублируются.
 System Metrics. На viewport до 820 px Job Setup располагается перед Preview,
 чтобы главное действие запуска было доступно в первом экране. System Metrics
 показывает не более двух строк одновременно и прокручивает остальные внутри
-панели.
+панели. Jobs также имеет ограниченную высоту и внутреннюю прокрутку. История
+показывается серверными страницами не более чем по 10 jobs; следующая страница
+запрашивается только после перехода пользователя.
 
 Все модальные окна используют общий lifecycle:
 
@@ -343,12 +345,25 @@ Official archives после download находятся в `blender/downloads` 
 ```text
 POST   /api/v1/jobs
 GET    /api/v1/jobs
+GET    /api/v1/jobs/page?page=1&page_size=10
 GET    /api/v1/jobs/{job_id}
+PUT    /api/v1/jobs/{job_id}
 DELETE /api/v1/jobs/{job_id}
 POST   /api/v1/jobs/{job_id}/start
 POST   /api/v1/jobs/{job_id}/cancel
 POST   /api/v1/jobs/{job_id}/retry
+POST   /api/v1/jobs/{job_id}/rerender
 ```
+
+`GET /jobs` сохранён для обратной совместимости. Frontend использует
+`GET /jobs/page`: ответ содержит `items`, `page`, `page_size`, `total` и
+`pages`, а `page_size` ограничен значением 10.
+
+`PUT` заменяет render-настройки целиком и разрешён только для `CREATED` и
+`READY`. После первого перехода в `QUEUED` конфигурация и входная сцена
+неизменяемы. `rerender` разрешён для `COMPLETED`, `FAILED` и `CANCELLED`: он
+создаёт отдельный `READY` job с копией настроек и безопасной серверной копией
+input исходного job. Артефакты и runtime-состояние при этом не копируются.
 
 ### Uploads
 
@@ -356,8 +371,10 @@ POST   /api/v1/jobs/{job_id}/retry
 POST   /api/v1/jobs/{job_id}/uploads
 ```
 
-Первая версия принимает один multipart-файл. Chunk upload добавляется, когда
-реальные размеры сцен или нестабильное соединение подтвердят эту необходимость.
+Первая версия принимает один multipart-файл. Для `CREATED` это первичная
+загрузка, для `READY` — атомарная замена сцены до запуска. Chunk upload
+добавляется, когда реальные размеры сцен или нестабильное соединение подтвердят
+эту необходимость.
 
 ### Artifacts
 
@@ -601,7 +618,11 @@ Frontend отдельно показывает предустановленны�
 архив во временную директорию и запускает `blender --version`. После проверки
 каталог атомарно переносится в `/workspace/blender/versions/{version}`. Версии из
 образа находятся в `/opt/render-node/blender/{version}` и не скрываются
-persistent volume.
+persistent volume. Если после потери registry-записи точный каталог версии уже
+существует, явный install может восстановить запись только после fail-closed
+проверки: каталог и executable не являются symlink, а `blender --version`
+сообщает ожидаемую patch-версию. Проверенный архив после неудачного install
+сохраняется доступным для повторной установки без нового download.
 
 Manual archive проходит тот же install pipeline, но до него загружается в
 quarantine под server-generated UUID. До распаковки backend вычисляет SHA-256 и

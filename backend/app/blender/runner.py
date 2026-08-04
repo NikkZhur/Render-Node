@@ -55,6 +55,18 @@ class SandboxRunner:
         self._policy = policy
         self._limits = limits
 
+    @property
+    def available(self) -> bool:
+        return self._policy.local_runner_allowed
+
+    @property
+    def mode(self) -> str:
+        return self._policy.runner_mode.value
+
+    @property
+    def unavailable_reason(self) -> str | None:
+        return self._policy.unavailable_reason
+
     async def run(
         self,
         command: RenderCommand,

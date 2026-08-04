@@ -56,6 +56,15 @@ class JobStorage:
         input_directory = self.job_directory(job_id) / "input"
         await asyncio.to_thread(self._remove_path, input_directory)
 
+    async def clone_input(self, source_job_id: UUID, target_job_id: UUID) -> None:
+        source = contained_path(
+            self.job_directory(source_job_id), self.job_directory(source_job_id) / "input"
+        )
+        target = contained_path(
+            self.job_directory(target_job_id), self.job_directory(target_job_id) / "input"
+        )
+        await asyncio.to_thread(self._clone_input_sync, source, target)
+
     async def reset_runtime(self, job_id: UUID) -> None:
         job_directory = self.job_directory(job_id)
         await asyncio.to_thread(self._reset_runtime_sync, job_directory)
@@ -88,6 +97,21 @@ class JobStorage:
         except (OSError, ValueError):
             return False
         return stat.S_ISREG(file_stat.st_mode) and not path.is_symlink()
+
+    @staticmethod
+    def _clone_input_sync(source: Path, target: Path) -> None:
+        source_stat = source.lstat()
+        if not stat.S_ISDIR(source_stat.st_mode) or stat.S_ISLNK(source_stat.st_mode):
+            raise ValueError("source input is not a regular directory")
+        if target.exists():
+            raise FileExistsError("target input already exists")
+        for item in source.rglob("*"):
+            item_stat = item.lstat()
+            if stat.S_ISLNK(item_stat.st_mode) or not (
+                stat.S_ISDIR(item_stat.st_mode) or stat.S_ISREG(item_stat.st_mode)
+            ):
+                raise ValueError("source input contains a link or special file")
+        shutil.copytree(source, target, copy_function=shutil.copy2)
 
     @staticmethod
     def _replace_directory(path: Path) -> None:

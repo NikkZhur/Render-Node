@@ -28,6 +28,13 @@ class JobRepository:
         result = await self._session.scalars(select(Job).order_by(Job.created_at.desc()))
         return list(result)
 
+    async def page(self, *, offset: int, limit: int) -> tuple[builtins.list[Job], int]:
+        total = int(await self._session.scalar(select(func.count()).select_from(Job)) or 0)
+        result = await self._session.scalars(
+            select(Job).order_by(Job.created_at.desc()).offset(offset).limit(limit)
+        )
+        return list(result), total
+
     async def oldest_queued(self) -> Job | None:
         job: Job | None = await self._session.scalar(
             select(Job)

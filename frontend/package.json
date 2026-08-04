@@ -11,9 +11,12 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "qa:smoke": "node scripts/qa-smoke.mjs",
+    "qa:jobs": "node scripts/qa-jobs.mjs",
     "qa:versions": "node scripts/qa-versions.mjs",
     "qa:api": "node scripts/qa-api-smoke.mjs",
-    "qa:runner": "node scripts/qa-runner-smoke.mjs"
+    "qa:runner": "node scripts/qa-runner-smoke.mjs",
+    "qa:capabilities": "node scripts/qa-runner-capabilities.mjs",
+    "qa:jobs-pagination": "node scripts/qa-jobs-pagination.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "5.101.2",

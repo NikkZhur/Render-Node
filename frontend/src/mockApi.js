@@ -127,9 +127,13 @@ const initialJobs = [
     status: "ready",
     progress: 0,
     frame: "1–240",
+    frame_mode: "RANGE",
+    frame_start: 1,
+    frame_end: 240,
+    gpu_ids: [0, 1],
     engine: "Cycles",
     device: "OptiX",
-    version: "4.5.11",
+    version: "5.2.0",
     created: "Just now",
   },
   {
@@ -140,6 +144,10 @@ const initialJobs = [
     status: "ready",
     progress: 0,
     frame: "1–72",
+    frame_mode: "RANGE",
+    frame_start: 1,
+    frame_end: 72,
+    gpu_ids: [0, 1],
     engine: "Cycles",
     device: "CUDA",
     version: "4.5.11",
@@ -153,6 +161,10 @@ const initialJobs = [
     status: "completed",
     progress: 100,
     frame: "Frame 48",
+    frame_mode: "SINGLE",
+    frame_start: 48,
+    frame_end: null,
+    gpu_ids: [0, 1],
     engine: "Cycles",
     device: "OptiX",
     version: "4.2.22",
@@ -166,6 +178,10 @@ const initialJobs = [
     status: "failed",
     progress: 36,
     frame: "1–240",
+    frame_mode: "RANGE",
+    frame_start: 1,
+    frame_end: 240,
+    gpu_ids: [0, 1],
     engine: "Cycles",
     device: "OptiX",
     version: "4.1.1",
@@ -319,6 +335,17 @@ export const mockApi = {
   async getStorages() {
     await wait(120);
     return storages.map((storage) => ({ ...storage }));
+  },
+
+  async getCapabilities() {
+    await wait(80);
+    return {
+      runner: {
+        available: true,
+        mode: "local_trusted",
+        message: "Ready to render trusted Blender scenes",
+      },
+    };
   },
 
   async getFrames({ page, pageSize }) {

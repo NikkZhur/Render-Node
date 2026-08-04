@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from app.jobs.schemas import JobCreate
+from app.jobs.schemas import JobCreate, JobUpdate
 from app.jobs.types import ComputeDevice, FrameMode, RenderEngine
 
 
@@ -23,6 +23,26 @@ def test_job_create_normalizes_name() -> None:
     payload["name"] = "  Studio scene  "
 
     assert JobCreate.model_validate(payload).name == "Studio scene"
+
+
+def test_job_update_uses_the_same_configuration_validation() -> None:
+    payload = valid_payload()
+    payload.pop("blender_version")
+    payload.update(
+        {
+            "device": "CPU",
+            "gpu_ids": [],
+            "frame_mode": "SINGLE",
+            "frame_start": 12,
+            "frame_end": None,
+        }
+    )
+
+    updated = JobUpdate.model_validate(payload)
+
+    assert updated.device is ComputeDevice.CPU
+    assert updated.frame_mode is FrameMode.SINGLE
+    assert updated.frame_start == 12
 
 
 @pytest.mark.parametrize(

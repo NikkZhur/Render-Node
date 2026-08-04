@@ -74,6 +74,25 @@ class JobManager:
     def notify_queued(self) -> None:
         self._wake.set()
 
+    @property
+    def runner_available(self) -> bool:
+        return self._enabled and self._runner.available
+
+    @property
+    def runner_mode(self) -> str:
+        return self._runner.mode
+
+    @property
+    def runner_unavailable_reason(self) -> str | None:
+        if not self._enabled:
+            return "Render scheduler is disabled"
+        return self._runner.unavailable_reason
+
+    def ensure_accepting_jobs(self) -> None:
+        reason = self.runner_unavailable_reason
+        if reason is not None:
+            raise JobConflictError("runner_unavailable", reason)
+
     async def cancel(self, job_id: UUID) -> Job:
         async with self._state_lock:
             is_active = self._active_job_id == job_id

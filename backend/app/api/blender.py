@@ -48,9 +48,7 @@ async def list_releases(request: Request) -> list[ReleaseResponse]:
                 filename=release.filename,
                 channel="stable",
                 supported=release.version in SUPPORTED_VERSIONS,
-                downloaded=runtime is not None
-                and runtime.state
-                in {RuntimeState.DOWNLOADED, RuntimeState.INSTALLING, RuntimeState.INSTALLED},
+                downloaded=runtime is not None and runtime.archive_available,
                 installed=runtime is not None and runtime.state is RuntimeState.INSTALLED,
                 active=runtime.active if runtime else False,
                 source=runtime.source if runtime else None,

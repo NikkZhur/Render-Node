@@ -16,6 +16,11 @@ const ENGINE_API_VALUES = {
   Eevee: "BLENDER_EEVEE",
   Workbench: "BLENDER_WORKBENCH",
 };
+const ENGINE_DISPLAY_VALUES = Object.fromEntries(
+  Object.entries(ENGINE_API_VALUES).map(([label, value]) => [value, label]),
+);
+const DEVICE_DISPLAY_VALUES = { CPU: "CPU", CUDA: "CUDA", OPTIX: "OptiX" };
+const JOBS_PER_PAGE = 10;
 const emptyListQuery = async () => [];
 const draftJob = {
   id: "draft",
@@ -25,11 +30,34 @@ const draftJob = {
   status: "created",
   progress: 0,
   frame: "1–240",
+  frame_mode: "RANGE",
+  frame_start: 1,
+  frame_end: 240,
+  gpu_ids: [],
   engine: "Cycles",
   device: "OptiX",
   version: "5.2.0",
   created: "Not uploaded",
 };
+
+function applyJobConfiguration(job, configuration) {
+  const frame = configuration.frame_mode === "SINGLE"
+    ? `Frame ${configuration.frame_start}`
+    : configuration.frame_mode === "RANGE"
+      ? `${configuration.frame_start}–${configuration.frame_end}`
+      : "All frames";
+  return {
+    ...job,
+    name: configuration.name,
+    engine: ENGINE_DISPLAY_VALUES[configuration.engine] ?? configuration.engine,
+    device: DEVICE_DISPLAY_VALUES[configuration.device] ?? configuration.device,
+    gpu_ids: configuration.gpu_ids,
+    frame,
+    frame_mode: configuration.frame_mode,
+    frame_start: configuration.frame_start,
+    frame_end: configuration.frame_end,
+  };
+}
 
 function compactLogEntries(lines) {
   return lines.reduce((entries, [time, line]) => {
@@ -148,6 +176,14 @@ function Icon({ name, size = 18 }) {
       </>
     ),
     close: <path d="m6 6 12 12M18 6 6 18" />,
+    lock: (
+      <>
+        <rect x="5" y="10" width="14" height="11" rx="2" />
+        <path d="M8 10V7a4 4 0 0 1 8 0v3" />
+      </>
+    ),
+    plus: <path d="M12 5v14M5 12h14" />,
+    repeat: <path d="M20 7h-9a5 5 0 0 0-5 5v1m-2 4h9a5 5 0 0 0 5-5v-1m2-7v3h-3M4 20v-3h3" />,
     trash: (
       <>
         <path d="M4 7h16M9 7V4h6v3m3 0-1 14H7L6 7" />
@@ -277,7 +313,7 @@ function SectionHeading({ eyebrow, title, action }) {
   );
 }
 
-function DropdownField({ label, onChange, options, value }) {
+function DropdownField({ disabled = false, label, onChange, options, value }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef(null);
   const triggerRef = useRef(null);
@@ -351,6 +387,7 @@ function DropdownField({ label, onChange, options, value }) {
           aria-haspopup="listbox"
           aria-label={`${label}: ${value}`}
           className="dropdown-trigger"
+          disabled={disabled}
           onClick={() => setOpen((current) => !current)}
           onKeyDown={openWithKeyboard}
           ref={triggerRef}
@@ -391,26 +428,52 @@ function DropdownField({ label, onChange, options, value }) {
 function JobSetup({
   activeVersion,
   devices,
-  isMockMode,
   job,
-  onStart,
   onCancel,
+  onRerender,
+  onSave,
   onSceneUpload,
-  uploadError,
-  uploading,
+  onStart,
+  operationError,
+  operationPending,
+  runner,
 }) {
   const [engine, setEngine] = useState(job.engine ?? "Cycles");
-  const [device, setDevice] = useState(job.device ?? "OptiX");
+  const [device, setDevice] = useState(
+    job.id === "draft" && devices.length === 0 ? "CPU" : (job.device ?? "OptiX"),
+  );
   const [frameMode, setFrameMode] = useState(job.frame_mode?.toLowerCase() ?? "range");
   const [selectedGpus, setSelectedGpus] = useState(job.gpu_ids ?? null);
   const [fileName, setFileName] = useState(job.file);
+  const [frameStart, setFrameStart] = useState(job.frame_start ?? 1);
+  const [frameEnd, setFrameEnd] = useState(job.frame_end ?? 240);
+  const [dirty, setDirty] = useState(false);
   const fileInput = useRef(null);
-  const frameStartInput = useRef(null);
-  const frameEndInput = useRef(null);
   const isActive = job.status === "queued" || job.status === "rendering";
+  const isDraft = job.id === "draft";
+  const editable = isDraft || job.status === "created" || job.status === "ready";
+  const rerenderable = ["completed", "failed", "cancelled"].includes(job.status);
+  const controlsDisabled = !editable || operationPending;
   const activeGpuIds = selectedGpus ?? devices.map((gpu) => gpu.id);
-  const computeDevices = devices.length > 0 ? COMPUTE_DEVICES : ["CPU"];
-  const effectiveDevice = devices.length > 0 ? device : "CPU";
+  const computeDevices = devices.length > 0 ? COMPUTE_DEVICES : [...new Set([device, "CPU"])];
+  const runtimeVersion = job.version ?? job.blender_version ?? activeVersion;
+  const runnerUnavailable = !runner.available;
+
+  const markChanged = (setter) => (value) => {
+    setter(value);
+    setDirty(true);
+  };
+
+  const configuration = () => ({
+    name: job.name,
+    blender_version: runtimeVersion,
+    engine: ENGINE_API_VALUES[engine],
+    device: device.toUpperCase(),
+    gpu_ids: device === "CPU" ? [] : activeGpuIds,
+    frame_mode: frameMode.toUpperCase(),
+    frame_start: frameMode === "all" ? null : Number(frameStart),
+    frame_end: frameMode === "range" ? Number(frameEnd) : null,
+  });
 
   const toggleGpu = (gpuId) => {
     setSelectedGpus((current) => {
@@ -421,11 +484,36 @@ function JobSetup({
           : [...currentSelection, gpuId]
       );
     });
+    setDirty(true);
+  };
+
+  const save = async () => {
+    try {
+      await onSave(job.id, configuration());
+      setDirty(false);
+    } catch {
+      // The mutation exposes its user-facing error below the action controls.
+    }
+  };
+
+  const start = async () => {
+    try {
+      await onStart(job.id, configuration());
+      setDirty(false);
+    } catch {
+      // The mutation exposes its user-facing error below the action controls.
+    }
   };
 
   return (
-    <section className="panel setup-panel">
-      <SectionHeading eyebrow="New render" title="Job setup" />
+    <section className={`panel setup-panel ${editable ? "is-editable" : "is-locked"}`}>
+      <SectionHeading
+        action={editable
+          ? <span className="setup-mode editable-mode">Editable</span>
+          : <span className="setup-mode"><Icon name="lock" size={12} /> Read only</span>}
+        eyebrow={isDraft ? "New render" : "Selected job"}
+        title="Job setup"
+      />
 
       <div className="field-group">
         <div className="field-label-row">
@@ -437,26 +525,27 @@ function JobSetup({
           type="file"
           accept=".blend,.zip"
           className="sr-only"
-          onChange={(event) => {
-            const nextFile = event.target.files?.[0];
+          disabled={!editable || operationPending}
+          onChange={async (event) => {
+            const input = event.currentTarget;
+            const nextFile = input.files?.[0];
             if (!nextFile) return;
-            setFileName(nextFile.name);
-            const frameStart = Number.parseInt(frameStartInput.current?.value ?? "1", 10);
-            const frameEnd = Number.parseInt(frameEndInput.current?.value ?? "240", 10);
-            onSceneUpload(nextFile, {
-              name: nextFile.name.replace(/\.(blend|zip)$/i, ""),
-              blender_version: activeVersion,
-              engine: ENGINE_API_VALUES[engine],
-              device: effectiveDevice.toUpperCase(),
-              gpu_ids: effectiveDevice === "CPU" ? [] : activeGpuIds,
-              frame_mode: frameMode.toUpperCase(),
-              frame_start: frameMode === "all" ? null : frameStart,
-              frame_end: frameMode === "range" ? frameEnd : null,
-            });
+            const nextConfiguration = configuration();
+            if (isDraft) nextConfiguration.name = nextFile.name.replace(/\.(blend|zip)$/i, "");
+            try {
+              await onSceneUpload(job, nextFile, nextConfiguration);
+              setFileName(nextFile.name);
+              setDirty(false);
+            } catch {
+              // The mutation exposes its user-facing error below the action controls.
+            } finally {
+              input.value = "";
+            }
           }}
         />
         <button
           className="file-drop"
+          disabled={!editable || operationPending}
           onClick={() => fileInput.current?.click()}
           type="button"
         >
@@ -465,15 +554,23 @@ function JobSetup({
           </span>
           <span className="file-copy">
             <strong>{fileName}</strong>
-            <small>{uploading ? "Uploading…" : job.status === "ready" ? "Ready to render" : "Select a scene to upload"}</small>
+            <small>
+              {operationPending
+                ? "Saving…"
+                : !editable
+                  ? "Source locked after first render start"
+                  : job.status === "ready"
+                    ? "Ready to render"
+                    : "Select a scene to upload"}
+            </small>
           </span>
-          <span className="replace-file">Replace</span>
+          <span className="replace-file">{editable ? (fileName === draftJob.file ? "Choose" : "Replace") : "Locked"}</span>
         </button>
       </div>
 
       <div className="two-column-fields">
-        <DropdownField label="Render engine" onChange={setEngine} options={RENDER_ENGINES} value={engine} />
-        <DropdownField label="Compute device" onChange={setDevice} options={computeDevices} value={effectiveDevice} />
+        <DropdownField disabled={controlsDisabled} label="Render engine" onChange={markChanged(setEngine)} options={RENDER_ENGINES} value={engine} />
+        <DropdownField disabled={controlsDisabled} label="Compute device" onChange={markChanged(setDevice)} options={computeDevices} value={device} />
       </div>
 
       <div className="field-group">
@@ -491,8 +588,9 @@ function JobSetup({
             <button
               aria-pressed={frameMode === mode}
               className={frameMode === mode ? "active" : ""}
+              disabled={controlsDisabled}
               key={mode}
-              onClick={() => setFrameMode(mode)}
+              onClick={() => markChanged(setFrameMode)(mode)}
               type="button"
             >
               {mode === "single" ? "Single" : mode === "range" ? "Range" : "All"}
@@ -503,12 +601,12 @@ function JobSetup({
           <div className="frame-range">
             <label>
               <span>Start</span>
-              <input defaultValue={job.frame_start ?? 1} inputMode="numeric" ref={frameStartInput} />
+              <input disabled={controlsDisabled} inputMode="numeric" onChange={(event) => markChanged(setFrameStart)(event.target.value)} value={frameStart} />
             </label>
             <span className="range-line" />
             <label>
               <span>End</span>
-              <input defaultValue={job.frame_end ?? 240} inputMode="numeric" ref={frameEndInput} />
+              <input disabled={controlsDisabled} inputMode="numeric" onChange={(event) => markChanged(setFrameEnd)(event.target.value)} value={frameEnd} />
             </label>
           </div>
         )}
@@ -516,7 +614,7 @@ function JobSetup({
           <div className="frame-range single-frame">
             <label>
               <span>Frame</span>
-              <input defaultValue={job.frame_start ?? 1} inputMode="numeric" ref={frameStartInput} />
+              <input disabled={controlsDisabled} inputMode="numeric" onChange={(event) => markChanged(setFrameStart)(event.target.value)} value={frameStart} />
             </label>
           </div>
         )}
@@ -534,6 +632,7 @@ function JobSetup({
             return (
               <button
                 className={`gpu-option ${selected ? "selected" : ""}`}
+                disabled={controlsDisabled}
                 key={gpu.id}
                 onClick={() => toggleGpu(gpu.id)}
                 type="button"
@@ -550,25 +649,51 @@ function JobSetup({
         </div>
       </div>
 
-      <div className="active-runtime">
-        <span>
-          <Icon name="cube" size={15} />
-          Runtime
-        </span>
-        <strong>Blender {activeVersion}</strong>
-      </div>
+      <div className="setup-footer">
+        <div className="setup-error-slot">
+          {operationError && <p className="setup-error" role="alert">{operationError}</p>}
+        </div>
 
-      <button
-        aria-busy={uploading}
-        className={`primary-action ${isActive ? "danger-action" : ""}`}
-        disabled={uploading || (!isMockMode && job.status !== "ready" && !isActive)}
-        onClick={isActive ? onCancel : onStart}
-        type="button"
-      >
-        <Icon name={isActive ? "stop" : "play"} size={18} />
-        {job.status === "rendering" ? "Cancel render" : job.status === "queued" ? "Cancel job" : "Start render"}
-      </button>
-      {uploadError && <p className="manual-upload-error" role="alert">{uploadError}</p>}
+        <div className="active-runtime">
+          <span>
+            <Icon name="cube" size={15} />
+            Runtime
+          </span>
+          <strong>Blender {runtimeVersion}</strong>
+        </div>
+
+        <div className={`runner-status ${runner.available ? "available" : "unavailable"}`} role="status">
+          <span className="runner-status-dot" />
+          <span>{runner.message}</span>
+        </div>
+
+        {job.status === "ready" && editable && (
+          <div className="setup-actions">
+            <button className="secondary-action" disabled={!dirty || operationPending} onClick={save} type="button">
+              Save changes
+            </button>
+            <button aria-busy={operationPending} className="primary-action" disabled={operationPending || runnerUnavailable} onClick={start} type="button">
+              <Icon name="play" size={18} /> Start render
+            </button>
+          </div>
+        )}
+        {(isDraft || job.status === "created") && (
+          <button className="primary-action" disabled type="button">
+            <Icon name="upload" size={18} /> Upload scene to continue
+          </button>
+        )}
+        {isActive && (
+          <button aria-busy={operationPending} className="primary-action danger-action" disabled={operationPending} onClick={() => void onCancel(job.id).catch(() => undefined)} type="button">
+            <Icon name="stop" size={18} />
+            {job.status === "rendering" ? "Cancel render" : "Cancel job"}
+          </button>
+        )}
+        {rerenderable && (
+          <button aria-busy={operationPending} className="primary-action" disabled={operationPending} onClick={() => void onRerender(job.id).catch(() => undefined)} type="button">
+            <Icon name="repeat" size={18} /> Rerender as new job
+          </button>
+        )}
+      </div>
     </section>
   );
 }
@@ -859,13 +984,23 @@ function RenderPreview({ isMockMode, job, liveLogs = [], mockLogLines = [] }) {
   );
 }
 
-function JobQueue({ jobs, selectedJobId, onSelect }) {
+function JobQueue({ jobs, loading, onNew, onPageChange, onSelect, page, pages, selectedJobId, total }) {
+  const firstShown = total === 0 ? 0 : ((page - 1) * JOBS_PER_PAGE) + 1;
+  const lastShown = Math.min(page * JOBS_PER_PAGE, total);
+
   return (
-    <section className="panel queue-panel">
+    <section aria-busy={loading} className="panel queue-panel">
       <SectionHeading
         eyebrow="Workspace"
         title="Jobs"
-        action={<span className="queue-count">{jobs.length}</span>}
+        action={(
+          <div className="queue-heading-actions">
+            <span className="queue-count">{total}</span>
+            <button className={`new-job-button ${selectedJobId === "new" ? "active" : ""}`} onClick={onNew} type="button">
+              <Icon name="plus" size={15} /> New job
+            </button>
+          </div>
+        )}
       />
       <div className="job-list">
         {jobs.map((job) => (
@@ -893,10 +1028,24 @@ function JobQueue({ jobs, selectedJobId, onSelect }) {
             <Icon name="chevron" size={15} />
           </button>
         ))}
+        {!loading && jobs.length === 0 && (
+          <div className="queue-empty">No jobs on this page</div>
+        )}
       </div>
-      <button className="text-action" type="button">
-        View complete history <Icon name="chevron" size={14} />
-      </button>
+      {pages > 1 && (
+        <nav aria-label="Jobs pages" className="queue-pagination">
+          <button aria-label="Previous jobs page" disabled={page <= 1 || loading} onClick={() => onPageChange(page - 1)} type="button">
+            <Icon name="chevron" size={14} />
+          </button>
+          <span>
+            <strong>{page} / {pages}</strong>
+            <small>{firstShown}–{lastShown} of {total}</small>
+          </span>
+          <button aria-label="Next jobs page" disabled={page >= pages || loading} onClick={() => onPageChange(page + 1)} type="button">
+            <Icon name="chevron" size={14} />
+          </button>
+        </nav>
+      )}
     </section>
   );
 }
@@ -1167,9 +1316,10 @@ function Artifacts({ job, mockApi }) {
     queryFn: ({ signal }) => artifactsApi.list(job.id, { signal }),
     enabled,
   });
-  const frameCount = mockApi?.frameCount ?? framesQuery.data?.total ?? 0;
+  const hasMockArtifacts = isMockMode && job.id !== "draft" && job.hasArtifacts !== false;
+  const frameCount = hasMockArtifacts ? mockApi.frameCount : (framesQuery.data?.total ?? 0);
   const pageCount = Math.max(1, Math.ceil(frameCount / FRAMES_PER_PAGE));
-  const logArtifact = isMockMode
+  const logArtifact = hasMockArtifacts
     ? { filename: "blender.log", size_bytes: 284 * 1024 }
     : artifactsQuery.data?.find((artifact) => artifact.kind === "blender_log");
 
@@ -1464,13 +1614,15 @@ export default function App({ mockApi = null }) {
   const selectedJobId = useUiStore((state) => state.selectedJobId);
   const setSelectedJobId = useUiStore((state) => state.setSelectedJobId);
   const [mockJobs, setMockJobs] = useState(() => mockApi?.initialJobs ?? []);
+  const [jobPage, setJobPage] = useState(1);
   const [theme, setTheme] = useState(getInitialTheme);
   const realtime = useRenderEvents(queryClient, !isMockMode);
 
   const jobsQuery = useQuery({
-    queryKey: ["jobs"],
-    queryFn: jobsApi.list,
+    queryKey: ["jobs", jobPage],
+    queryFn: ({ signal }) => jobsApi.page({ page: jobPage, pageSize: JOBS_PER_PAGE, signal }),
     enabled: !isMockMode,
+    placeholderData: (previousData) => previousData,
   });
   const versionApi = mockApi ?? blenderApi;
   const versionsQuery = useQuery({ queryKey: ["versions"], queryFn: versionApi.getVersions });
@@ -1492,6 +1644,10 @@ export default function App({ mockApi = null }) {
     queryKey: ["metrics"],
     queryFn: systemApi.metrics,
     enabled: !isMockMode,
+  });
+  const capabilitiesQuery = useQuery({
+    queryKey: ["capabilities"],
+    queryFn: isMockMode ? mockApi.getCapabilities : systemApi.capabilities,
   });
   const downloadMutation = useMutation({
     mutationFn: versionApi.downloadVersion,
@@ -1536,15 +1692,44 @@ export default function App({ mockApi = null }) {
   });
 
   const activeVersion = versionsQuery.data?.find((version) => version.active)?.version ?? "5.2.0";
-  const jobs = isMockMode ? mockJobs : (jobsQuery.data ?? []);
+  const mockPageCount = Math.max(1, Math.ceil(mockJobs.length / JOBS_PER_PAGE));
+  const jobs = isMockMode
+    ? mockJobs.slice((jobPage - 1) * JOBS_PER_PAGE, jobPage * JOBS_PER_PAGE)
+    : (jobsQuery.data?.items ?? []);
+  const jobTotal = isMockMode ? mockJobs.length : (jobsQuery.data?.total ?? 0);
+  const jobPages = isMockMode ? mockPageCount : Math.max(1, jobsQuery.data?.pages ?? 1);
   const updateJobCache = (updatedJob) => {
-    queryClient.setQueryData(["jobs"], (current = []) => [
-      updatedJob,
-      ...current.filter((job) => job.id !== updatedJob.id),
-    ]);
+    queryClient.setQueriesData({ queryKey: ["jobs"] }, (current) => {
+      if (!current?.items?.some((job) => job.id === updatedJob.id)) return current;
+      return {
+        ...current,
+        items: current.items.map((job) => job.id === updatedJob.id ? updatedJob : job),
+      };
+    });
+  };
+  const prependJobToFirstPage = (updatedJob) => {
+    setJobPage(1);
+    queryClient.setQueryData(["jobs", 1], (current) => {
+      if (!current) return current;
+      const alreadyPresent = current.items.some((job) => job.id === updatedJob.id);
+      const items = [updatedJob, ...current.items.filter((job) => job.id !== updatedJob.id)]
+        .slice(0, JOBS_PER_PAGE);
+      const total = current.total + (alreadyPresent ? 0 : 1);
+      return {
+        ...current,
+        items,
+        total,
+        pages: Math.ceil(total / JOBS_PER_PAGE),
+      };
+    });
+    queryClient.invalidateQueries({ queryKey: ["jobs"] });
   };
   const sceneUploadMutation = useMutation({
-    mutationFn: async ({ file, configuration }) => {
+    mutationFn: async ({ file, configuration, job }) => {
+      if (job.id !== "draft") {
+        await jobsApi.update(job.id, configuration);
+        return jobsApi.upload(job.id, file);
+      }
       const createdJob = await jobsApi.create(configuration);
       try {
         return await jobsApi.upload(createdJob.id, file);
@@ -1554,25 +1739,37 @@ export default function App({ mockApi = null }) {
       }
     },
     onSuccess: (uploadedJob) => {
-      updateJobCache(uploadedJob);
+      prependJobToFirstPage(uploadedJob);
       setSelectedJobId(uploadedJob.id);
     },
   });
+  const saveJobMutation = useMutation({
+    mutationFn: ({ configuration, jobId }) => jobsApi.update(jobId, configuration),
+    onSuccess: updateJobCache,
+  });
   const startJobMutation = useMutation({
-    mutationFn: jobsApi.start,
+    mutationFn: async ({ configuration, jobId }) => {
+      await jobsApi.update(jobId, configuration);
+      return jobsApi.start(jobId);
+    },
     onSuccess: updateJobCache,
   });
   const cancelJobMutation = useMutation({
     mutationFn: jobsApi.cancel,
     onSuccess: updateJobCache,
   });
-  const liveJob = isMockMode
-    ? (jobs[0] ?? draftJob)
-    : (jobs.find((job) => job.status === "rendering" || job.status === "queued")
-      ?? jobs.find((job) => job.status === "ready")
-      ?? jobs[0]
-      ?? draftJob);
-  const selectedJob = jobs.find((job) => job.id === selectedJobId) ?? liveJob;
+  const rerenderJobMutation = useMutation({
+    mutationFn: jobsApi.rerender,
+    onSuccess: (rerenderedJob) => {
+      prependJobToFirstPage(rerenderedJob);
+      setSelectedJobId(rerenderedJob.id);
+    },
+  });
+  const creatingNewJob = selectedJobId === "new";
+  const selectedJob = creatingNewJob
+    ? null
+    : (jobs.find((job) => job.id === selectedJobId) ?? jobs[0] ?? null);
+  const setupJob = selectedJob ?? { ...draftJob, version: activeVersion };
   const isRendering = jobs.some((job) => job.status === "rendering");
   const hasActiveJob = jobs.some((job) => job.status === "queued" || job.status === "rendering");
   const metricDevices = isMockMode ? (devicesQuery.data ?? []) : (metricsQuery.data?.devices ?? []);
@@ -1583,6 +1780,13 @@ export default function App({ mockApi = null }) {
       || storage.freeGb < 50
       || storage.freeGb / storage.totalGb < 0.1,
   );
+  const runner = capabilitiesQuery.data?.runner ?? {
+    available: false,
+    mode: "disabled",
+    message: capabilitiesQuery.isError
+      ? "Render runner status is unavailable"
+      : "Checking render runner…",
+  };
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -1608,45 +1812,82 @@ export default function App({ mockApi = null }) {
     return () => window.clearInterval(interval);
   }, [isMockMode, isRendering]);
 
-  const displayJob = selectedJob;
+  const displayJob = setupJob;
 
-  const startRender = () => {
-    if (!isMockMode) {
-      if (liveJob.status === "ready") startJobMutation.mutate(liveJob.id);
-      return;
-    }
-    setSelectedJobId(liveJob.id);
-    setMockJobs((currentJobs) => {
-      const nextReadyJob = currentJobs.find(
-        (job) => job.id !== liveJob.id && job.status === "ready",
-      );
-      return currentJobs.map((job) =>
-        job.id === liveJob.id
-          ? { ...job, status: "rendering", progress: 12, created: "Running now", version: activeVersion }
-          : job.id === nextReadyJob?.id
-            ? { ...job, status: "queued" }
-            : job,
-      );
-    });
+  const saveJob = async (jobId, configuration) => {
+    if (!isMockMode) return saveJobMutation.mutateAsync({ configuration, jobId });
+    const current = jobs.find((job) => job.id === jobId);
+    const updated = applyJobConfiguration(current, configuration);
+    setMockJobs((currentJobs) => currentJobs.map((job) => job.id === jobId ? updated : job));
+    return updated;
   };
 
-  const cancelRender = () => {
-    if (!isMockMode) {
-      if (liveJob.status === "queued" || liveJob.status === "rendering") {
-        cancelJobMutation.mutate(liveJob.id);
-      }
-      return;
-    }
-    setMockJobs((currentJobs) => {
-      const queuedJob = currentJobs.find((job) => job.status === "queued");
-      return currentJobs.map((job) =>
-        job.id === liveJob.id && job.status === "rendering"
-          ? { ...job, status: "cancelled", created: "Cancelled now" }
-          : job.id === queuedJob?.id
-            ? { ...job, status: "ready" }
-            : job,
+  const uploadScene = async (job, file, configuration) => {
+    if (!isMockMode) return sceneUploadMutation.mutateAsync({ file, configuration, job });
+    if (job.id === "draft") {
+      const id = `job-${Date.now()}`;
+      const created = applyJobConfiguration(
+        {
+          ...draftJob,
+          id,
+          shortId: id.slice(-4).toUpperCase(),
+          file: file.name,
+          status: "ready",
+          version: activeVersion,
+          created: "Just now",
+          hasArtifacts: false,
+        },
+        configuration,
       );
-    });
+      setMockJobs((currentJobs) => [created, ...currentJobs]);
+      setSelectedJobId(id);
+      return created;
+    }
+    const current = jobs.find((candidate) => candidate.id === job.id);
+    const updated = { ...applyJobConfiguration(current, configuration), file: file.name };
+    setMockJobs((currentJobs) => currentJobs.map((candidate) => candidate.id === job.id ? updated : candidate));
+    return updated;
+  };
+
+  const startRender = async (jobId, configuration) => {
+    if (!isMockMode) return startJobMutation.mutateAsync({ configuration, jobId });
+    const current = jobs.find((job) => job.id === jobId);
+    const updated = {
+      ...applyJobConfiguration(current, configuration),
+      status: "rendering",
+      progress: 12,
+      created: "Running now",
+    };
+    setMockJobs((currentJobs) => currentJobs.map((job) => job.id === jobId ? updated : job));
+    setSelectedJobId(jobId);
+    return updated;
+  };
+
+  const cancelRender = async (jobId) => {
+    if (!isMockMode) return cancelJobMutation.mutateAsync(jobId);
+    setMockJobs((currentJobs) => currentJobs.map((job) =>
+      job.id === jobId ? { ...job, status: "cancelled", created: "Cancelled now" } : job));
+    return undefined;
+  };
+
+  const rerenderJob = async (jobId) => {
+    if (!isMockMode) return rerenderJobMutation.mutateAsync(jobId);
+    const source = jobs.find((job) => job.id === jobId);
+    const id = `job-${Date.now()}`;
+    const rerendered = {
+      ...source,
+      id,
+      shortId: id.slice(-4).toUpperCase(),
+      name: `${source.name} rerender`,
+      status: "ready",
+      progress: 0,
+      current_frame: null,
+      created: "Just now",
+      hasArtifacts: false,
+    };
+    setMockJobs((currentJobs) => [rerendered, ...currentJobs]);
+    setSelectedJobId(id);
+    return rerendered;
   };
 
   return (
@@ -1667,22 +1908,30 @@ export default function App({ mockApi = null }) {
           <JobSetup
             activeVersion={activeVersion}
             devices={devicesQuery.data ?? []}
-            isMockMode={isMockMode}
-            job={liveJob}
-            key={liveJob.id}
+            job={setupJob}
+            key={setupJob.id}
             onCancel={cancelRender}
-            onSceneUpload={(file, configuration) => {
-              if (!isMockMode) sceneUploadMutation.mutate({ file, configuration });
-            }}
+            onRerender={rerenderJob}
+            onSave={saveJob}
+            onSceneUpload={uploadScene}
             onStart={startRender}
-            uploadError={
+            operationError={
               sceneUploadMutation.error?.message
+              ?? saveJobMutation.error?.message
               ?? startJobMutation.error?.message
               ?? cancelJobMutation.error?.message
+              ?? rerenderJobMutation.error?.message
               ?? jobsQuery.error?.message
               ?? ""
             }
-            uploading={sceneUploadMutation.isPending}
+            operationPending={
+              sceneUploadMutation.isPending
+              || saveJobMutation.isPending
+              || startJobMutation.isPending
+              || cancelJobMutation.isPending
+              || rerenderJobMutation.isPending
+            }
+            runner={runner}
           />
           <RenderPreview
             isMockMode={isMockMode}
@@ -1691,7 +1940,20 @@ export default function App({ mockApi = null }) {
             mockLogLines={mockApi?.logLines}
           />
           <div className="right-rail">
-            <JobQueue jobs={jobs} onSelect={setSelectedJobId} selectedJobId={selectedJobId} />
+            <JobQueue
+              jobs={jobs}
+              loading={jobsQuery.isFetching}
+              onNew={() => {
+                setJobPage(1);
+                setSelectedJobId("new");
+              }}
+              onPageChange={setJobPage}
+              onSelect={setSelectedJobId}
+              page={jobPage}
+              pages={jobPages}
+              selectedJobId={creatingNewJob ? "new" : selectedJob?.id}
+              total={jobTotal}
+            />
             <Artifacts job={displayJob} mockApi={mockApi} />
           </div>
           <Metrics

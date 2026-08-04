@@ -8,7 +8,7 @@ import pytest
 from app.blender.command import RenderCommand
 from app.blender.runner import RunnerLimits, SandboxRunner, _cpu_time_limit
 from app.blender.sandbox import SandboxPolicy
-from app.config import Environment
+from app.config import Environment, RunnerMode
 
 
 def executable(tmp_path: Path, body: str) -> Path:
@@ -31,7 +31,7 @@ def command(tmp_path: Path, binary: Path) -> RenderCommand:
 
 def runner(*, timeout_seconds: float = 5) -> SandboxRunner:
     return SandboxRunner(
-        SandboxPolicy(environment=Environment.TEST, allow_unsandboxed=False),
+        SandboxPolicy(environment=Environment.TEST, runner_mode=RunnerMode.DISABLED),
         RunnerLimits(
             timeout_seconds=timeout_seconds,
             terminate_grace_seconds=0.2,

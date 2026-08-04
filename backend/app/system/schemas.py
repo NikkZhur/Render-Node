@@ -49,3 +49,13 @@ class SystemMetricsResponse(BaseModel):
     gpus: list[GpuMetricResponse]
     storages: list[StorageMetricResponse]
     websocket_clients: int = Field(ge=0)
+
+
+class RunnerCapabilityResponse(BaseModel):
+    available: bool
+    mode: str
+    message: str
+
+
+class SystemCapabilitiesResponse(BaseModel):
+    runner: RunnerCapabilityResponse

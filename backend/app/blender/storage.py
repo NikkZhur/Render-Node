@@ -114,9 +114,14 @@ class BlenderStorage:
         temporary = self.versions_root / f".install-{uuid4()}"
         destination = self.versions_root / version
         if destination.exists():
-            raise BlenderRejectedError(
-                "blender_already_installed", "Version directory already exists"
-            )
+            is_directory = await asyncio.to_thread(self._is_regular_directory, destination)
+            if not is_directory:
+                raise BlenderRejectedError(
+                    "invalid_blender_runtime",
+                    "Existing version path is not a regular runtime directory",
+                )
+            await self._validate_binary(destination / "blender", version)
+            return destination
         try:
             await asyncio.to_thread(temporary.mkdir, parents=False, exist_ok=False)
             runtime_root = await asyncio.to_thread(self._extract, archive, temporary)
@@ -245,7 +250,20 @@ class BlenderStorage:
     @staticmethod
     def _is_executable(binary: Path) -> bool:
         try:
-            return binary.is_file() and bool(binary.stat().st_mode & stat.S_IXUSR)
+            binary_stat = binary.lstat()
+            return (
+                stat.S_ISREG(binary_stat.st_mode)
+                and not binary.is_symlink()
+                and bool(binary_stat.st_mode & stat.S_IXUSR)
+            )
+        except OSError:
+            return False
+
+    @staticmethod
+    def _is_regular_directory(path: Path) -> bool:
+        try:
+            path_stat = path.lstat()
+            return stat.S_ISDIR(path_stat.st_mode) and not path.is_symlink()
         except OSError:
             return False
 

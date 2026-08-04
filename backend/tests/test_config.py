@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from app.config import Environment, Settings
+from app.config import Environment, RunnerMode, Settings
 
 
 def test_database_url_follows_workspace(tmp_path: Path) -> None:
@@ -37,5 +37,26 @@ def test_environment_uses_documented_variable(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setenv("RENDER_NODE_ENV", "production")
     monkeypatch.setenv("RENDER_NODE_AUTH_TOKEN", "a" * 32)
     monkeypatch.setenv("RENDER_NODE_ALLOWED_ORIGINS", "https://render.example.com")
+    monkeypatch.setenv("RENDER_NODE_RUNNER_MODE", "disabled")
 
     assert Settings().env is Environment.PRODUCTION
+
+
+def test_legacy_unsandboxed_flag_maps_to_explicit_local_trusted_mode() -> None:
+    settings = Settings(
+        env=Environment.DEVELOPMENT,
+        runner_mode=RunnerMode.DISABLED,
+        allow_unsandboxed_runner=True,
+    )
+
+    assert settings.runner_mode is RunnerMode.LOCAL_TRUSTED
+
+
+def test_local_trusted_runner_is_forbidden_in_production() -> None:
+    with pytest.raises(ValidationError, match="local_trusted"):
+        Settings(
+            env=Environment.PRODUCTION,
+            runner_mode=RunnerMode.LOCAL_TRUSTED,
+            auth_token="x" * 32,
+            allowed_origins=["https://render.example.com"],
+        )

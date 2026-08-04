@@ -82,7 +82,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.artifact_service = artifact_service
     sandbox_policy = SandboxPolicy(
         environment=settings.env,
-        allow_unsandboxed=settings.allow_unsandboxed_runner,
+        runner_mode=settings.runner_mode,
     )
     runner = SandboxRunner(
         sandbox_policy,

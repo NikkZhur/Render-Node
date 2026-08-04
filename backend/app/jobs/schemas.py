@@ -11,9 +11,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.jobs.types import ComputeDevice, FrameMode, JobStatus, RenderEngine
 
 
-class JobCreate(BaseModel):
+class JobConfiguration(BaseModel):
     name: str = Field(min_length=1, max_length=120)
-    blender_version: str = Field(pattern=r"^\d+\.\d+\.\d+$")
     engine: RenderEngine
     device: ComputeDevice
     gpu_ids: list[int] = Field(default_factory=list, max_length=16)
@@ -58,6 +57,14 @@ class JobCreate(BaseModel):
         return self
 
 
+class JobCreate(JobConfiguration):
+    blender_version: str = Field(pattern=r"^\d+\.\d+\.\d+$")
+
+
+class JobUpdate(JobConfiguration):
+    pass
+
+
 class JobResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -80,3 +87,11 @@ class JobResponse(BaseModel):
     finished_at: datetime | None
     exit_code: int | None
     error: str | None
+
+
+class JobPageResponse(BaseModel):
+    items: list[JobResponse]
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1, le=10)
+    total: int = Field(ge=0)
+    pages: int = Field(ge=0)

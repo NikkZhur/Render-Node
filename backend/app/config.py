@@ -18,10 +18,17 @@ class Environment(StrEnum):
     PRODUCTION = "production"
 
 
+class RunnerMode(StrEnum):
+    DISABLED = "disabled"
+    LOCAL_TRUSTED = "local_trusted"
+
+
 class Settings(BaseSettings):
     """Validated settings loaded from ``RENDER_NODE_*`` environment variables."""
 
     model_config = SettingsConfigDict(
+        env_file=(Path(__file__).resolve().parents[2] / ".env", ".env"),
+        env_file_encoding="utf-8",
         env_prefix="RENDER_NODE_",
         case_sensitive=False,
         extra="ignore",
@@ -46,6 +53,8 @@ class Settings(BaseSettings):
     blender_catalog_ttl_seconds: int = Field(default=3600, ge=60, le=86_400)
     blender_download_timeout_seconds: int = Field(default=3600, ge=30, le=86_400)
     render_scheduler_enabled: bool = True
+    runner_mode: RunnerMode = RunnerMode.DISABLED
+    # Kept as a fail-closed migration path for existing local installations.
     allow_unsandboxed_runner: bool = False
     blender_executable_override: Path | None = None
     render_timeout_seconds: int = Field(default=21_600, ge=1, le=604_800)
@@ -128,8 +137,10 @@ class Settings(BaseSettings):
             )
             if self.env is Environment.PRODUCTION:
                 raise ValueError("blender_executable_override is forbidden in production")
-        if self.env is Environment.PRODUCTION and self.allow_unsandboxed_runner:
-            raise ValueError("allow_unsandboxed_runner is forbidden in production")
+        if self.allow_unsandboxed_runner and self.runner_mode is RunnerMode.DISABLED:
+            self.runner_mode = RunnerMode.LOCAL_TRUSTED
+        if self.env is Environment.PRODUCTION and self.runner_mode is RunnerMode.LOCAL_TRUSTED:
+            raise ValueError("local_trusted runner_mode is forbidden in production")
         return self
 
     @property

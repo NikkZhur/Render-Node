@@ -155,12 +155,10 @@ class UploadStorage:
         temp_path = contained_path(job_directory, job_directory / "temp" / f"upload-{uuid4()}.part")
         staging = contained_path(job_directory, job_directory / "temp" / f"input-{uuid4()}")
         input_directory = contained_path(job_directory, job_directory / "input")
+        backup = contained_path(job_directory, job_directory / "temp" / f"backup-{uuid4()}")
 
         try:
             await self._stream(upload, temp_path)
-            if await asyncio.to_thread(input_directory.exists):
-                raise JobConflictError("job_already_uploaded", "Job already has an uploaded scene")
-
             if suffix == ".blend":
                 await self._validate_blend(temp_path)
 
@@ -179,7 +177,7 @@ class UploadStorage:
                     max_bytes=self._max_zip_extracted_bytes,
                 )
 
-            await asyncio.to_thread(staging.replace, input_directory)
+            await asyncio.to_thread(self._commit_input, staging, input_directory, backup)
             return StoredUpload(
                 source_filename=source_filename,
                 scene_path=f"input/{scene_relative.as_posix()}",
@@ -193,6 +191,20 @@ class UploadStorage:
             await asyncio.to_thread(temp_path.unlink, missing_ok=True)
             if await asyncio.to_thread(staging.exists):
                 await asyncio.to_thread(shutil.rmtree, staging)
+
+    @staticmethod
+    def _commit_input(staging: Path, destination: Path, backup: Path) -> None:
+        replaced = destination.exists()
+        if replaced:
+            destination.replace(backup)
+        try:
+            staging.replace(destination)
+        except Exception:
+            if replaced and backup.exists():
+                backup.replace(destination)
+            raise
+        if replaced:
+            shutil.rmtree(backup, ignore_errors=True)
 
     async def _stream(self, upload: UploadFile, destination: Path) -> None:
         size = 0

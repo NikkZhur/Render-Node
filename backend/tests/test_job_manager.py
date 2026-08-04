@@ -224,8 +224,13 @@ async def test_frame_pagination_is_persistent_and_bounded(render_settings: Setti
 
 async def test_retry_clears_previous_runtime_files_and_artifacts(
     render_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app = create_app(render_settings.model_copy(update={"render_scheduler_enabled": False}))
+    async def start_without_scheduler(manager: JobManager) -> None:
+        await manager._recover_interrupted()
+
+    monkeypatch.setattr(JobManager, "start", start_without_scheduler)
+    app = create_app(render_settings)
     async with app.router.lifespan_context(app):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:

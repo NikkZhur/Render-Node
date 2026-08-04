@@ -139,6 +139,52 @@ async def test_official_download_install_and_explicit_activation(
         await database.dispose()
 
 
+async def test_install_adopts_valid_runtime_left_outside_registry(
+    job_settings: Settings,
+) -> None:
+    version = "4.6.7"
+    catalog = FakeCatalog(version, fake_blender_archive(version))
+    service, database = make_service(job_settings, catalog)
+    await service._storage.prepare()
+    await service.initialize()
+    try:
+        download = await service.start_download(version)
+        await service.wait(download.id)
+        runtime = next(item for item in await service.list_runtimes() if item.version == version)
+        assert runtime.archive_path is not None
+
+        existing = await service._storage.install(Path(runtime.archive_path), version)
+        assert (existing / "blender").is_file()
+
+        install = await service.start_install(version)
+        await service.wait(install.id)
+
+        operation = await service.get_operation(install.id)
+        runtime = next(item for item in await service.list_runtimes() if item.version == version)
+        assert operation.state is OperationState.COMPLETED
+        assert runtime.state is RuntimeState.INSTALLED
+    finally:
+        await service.shutdown()
+        await database.dispose()
+
+
+def test_failed_install_keeps_verified_archive_available() -> None:
+    runtime = BlenderRuntime(
+        version="4.6.8",
+        source=RuntimeSource.OFFICIAL,
+        state=RuntimeState.FAILED,
+        supported=False,
+        active=False,
+        archive_path="/workspace/blender/downloads/archive",
+        expected_sha256="a" * 64,
+        verified_sha256="a" * 64,
+    )
+
+    assert runtime.archive_available is True
+    runtime.verified_sha256 = "b" * 64
+    assert runtime.archive_available is False
+
+
 async def test_manual_exact_archive_installs_and_modified_archive_is_rejected(
     job_settings: Settings,
 ) -> None:
@@ -193,6 +239,32 @@ async def test_safe_extract_rejects_parent_path(job_settings: Settings) -> None:
     with pytest.raises(BlenderRejectedError, match="unsafe path"):
         await storage.install(archive_path, "4.6.3")
     assert not (job_settings.workspace / "escape").exists()
+
+
+async def test_install_does_not_adopt_symlinked_runtime_directory(
+    job_settings: Settings,
+) -> None:
+    version = "4.6.9"
+    storage = BlenderStorage(
+        job_settings.blender_versions_root,
+        job_settings.blender_downloads_root,
+        job_settings.blender_quarantine_root,
+        max_archive_bytes=1024 * 1024,
+        max_extracted_bytes=1024 * 1024,
+        max_files=10,
+    )
+    await storage.prepare()
+    archive = job_settings.blender_downloads_root / "verified.archive"
+    archive.write_bytes(b"verified elsewhere")
+    outside = job_settings.workspace / "outside-runtime"
+    outside.mkdir()
+    (job_settings.blender_versions_root / version).symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(BlenderRejectedError) as rejected:
+        await storage.install(archive, version)
+
+    assert rejected.value.code == "invalid_blender_runtime"
+    assert (job_settings.blender_versions_root / version).is_symlink()
 
 
 async def test_bundled_registry_api_and_delete_guard(job_client: object) -> None:

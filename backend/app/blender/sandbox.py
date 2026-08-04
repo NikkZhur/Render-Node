@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from app.config import Environment
+from app.config import Environment, RunnerMode
 from app.jobs.types import ComputeDevice
 from app.storage.jobs import contained_path
 
@@ -15,15 +15,28 @@ class SandboxUnavailableError(RuntimeError):
 
 
 class SandboxPolicy:
-    def __init__(self, *, environment: Environment, allow_unsandboxed: bool) -> None:
+    def __init__(self, *, environment: Environment, runner_mode: RunnerMode) -> None:
         self._environment = environment
-        self._allow_unsandboxed = allow_unsandboxed
+        self._runner_mode = runner_mode
+
+    @property
+    def runner_mode(self) -> RunnerMode:
+        return self._runner_mode
 
     @property
     def local_runner_allowed(self) -> bool:
         return self._environment is Environment.TEST or (
-            self._environment is Environment.DEVELOPMENT and self._allow_unsandboxed
+            self._environment is Environment.DEVELOPMENT
+            and self._runner_mode is RunnerMode.LOCAL_TRUSTED
         )
+
+    @property
+    def unavailable_reason(self) -> str | None:
+        if self.local_runner_allowed:
+            return None
+        if self._environment is Environment.PRODUCTION:
+            return "Production render sandbox is unavailable on this node"
+        return "Local trusted runner is disabled in configuration"
 
     def ensure_startup_ready(self, *, scheduler_enabled: bool) -> None:
         if scheduler_enabled and self._environment is Environment.PRODUCTION:
@@ -32,10 +45,9 @@ class SandboxPolicy:
             )
 
     def ensure_local_runner_allowed(self) -> None:
-        if not self.local_runner_allowed:
-            raise SandboxUnavailableError(
-                "Local runner is disabled; explicitly enable it only for development"
-            )
+        reason = self.unavailable_reason
+        if reason is not None:
+            raise SandboxUnavailableError(reason)
 
 
 async def build_worker_environment(

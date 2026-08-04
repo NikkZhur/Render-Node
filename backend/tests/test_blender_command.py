@@ -12,7 +12,7 @@ from app.blender.sandbox import (
     SandboxUnavailableError,
     build_worker_environment,
 )
-from app.config import Environment
+from app.config import Environment, RunnerMode
 from app.jobs.models import Job
 from app.jobs.types import ComputeDevice, FrameMode, JobStatus, RenderEngine
 
@@ -90,11 +90,14 @@ async def test_worker_environment_is_allowlisted_and_gpu_scoped(tmp_path: Path) 
 
 
 def test_production_sandbox_is_fail_closed() -> None:
-    policy = SandboxPolicy(environment=Environment.PRODUCTION, allow_unsandboxed=False)
+    policy = SandboxPolicy(environment=Environment.PRODUCTION, runner_mode=RunnerMode.DISABLED)
     with pytest.raises(SandboxUnavailableError, match="Production render sandbox"):
         policy.ensure_startup_ready(scheduler_enabled=True)
-    with pytest.raises(SandboxUnavailableError, match="Local runner is disabled"):
+    with pytest.raises(SandboxUnavailableError, match="sandbox is unavailable"):
         policy.ensure_local_runner_allowed()
 
-    development = SandboxPolicy(environment=Environment.DEVELOPMENT, allow_unsandboxed=True)
+    development = SandboxPolicy(
+        environment=Environment.DEVELOPMENT,
+        runner_mode=RunnerMode.LOCAL_TRUSTED,
+    )
     development.ensure_local_runner_allowed()
