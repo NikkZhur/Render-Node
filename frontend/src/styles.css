@@ -1221,8 +1221,11 @@ main {
 
 .preview-log-drawer {
   --log-panel-opacity: 88%;
+  --log-rail-border: rgb(48 54 58);
+  --log-rail-border-focus: rgb(50 92 72);
+  --log-rail-border-hover: rgb(61 66 69);
   --log-rail-cut: 10px;
-  --log-rail-opacity: 92%;
+  --log-rail-opacity: 100%;
   --log-rail-width: 22px;
   --log-slide-duration: 240ms;
   --log-slide-easing: cubic-bezier(0.16, 1, 0.3, 1);
@@ -1323,7 +1326,7 @@ main {
   position: absolute;
   z-index: 0;
   inset: 0;
-  background: rgb(255 255 255 / 14%);
+  background: var(--log-rail-border);
   clip-path: polygon(
     0 calc(50% - 33px),
     100% calc(50% - 58px),
@@ -1360,7 +1363,7 @@ main {
 }
 
 .preview-log-toggle:hover::before {
-  background: rgb(255 255 255 / 20%);
+  background: var(--log-rail-border-hover);
 }
 
 .preview-log-toggle:focus-visible {
@@ -1370,7 +1373,7 @@ main {
 }
 
 .preview-log-toggle:focus-visible::before {
-  background: rgb(123 242 192 / 34%);
+  background: var(--log-rail-border-focus);
 }
 
 .preview-log-toggle.is-open {
