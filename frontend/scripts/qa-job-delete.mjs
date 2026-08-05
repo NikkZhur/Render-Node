@@ -122,6 +122,12 @@ try {
   await desktop.goto(targetUrl, { waitUntil: "networkidle" });
 
   const ready = rowFor(desktop, "Ready clean");
+  const completedBeforeDelete = rowFor(desktop, "Complete with files");
+  await completedBeforeDelete.hover();
+  const hoverBackground = await completedBeforeDelete.locator(".job-row").evaluate((element) => getComputedStyle(element).backgroundColor);
+  const hoverAlpha = hoverBackground.match(/^rgba\(.+,\s*([\d.]+)\)$/)?.[1] ?? "1";
+  assert(Number(hoverAlpha) === 1, `Closed hover background is transparent: ${hoverBackground}`);
+  await desktop.screenshot({ path: path.join(outputDirectory, "job-delete-desktop-closed-hover.png"), scale: "css" });
   await ready.getByRole("button", { name: "Reveal delete action for Ready clean" }).click();
   await desktop.waitForTimeout(80);
   await desktop.screenshot({ path: path.join(outputDirectory, "job-delete-desktop-transition.png"), scale: "css" });

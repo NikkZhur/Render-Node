@@ -1909,7 +1909,7 @@ main {
 }
 
 .job-row:hover {
-  background: rgb(255 255 255 / 2.2%);
+  background: var(--surface-soft);
 }
 
 .job-row.selected {

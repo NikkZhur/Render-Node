@@ -5,7 +5,7 @@
 
 ## Текущее состояние
 
-- Обновлено: 2026-08-04 после добавления удаления jobs во frontend.
+- Обновлено: 2026-08-05 после исправления hover-состояния удаления jobs.
 - Фазы 1–6 из `BACKEND_IMPLEMENTATION_MASTER_PROMPT.md` завершены.
 - Следующей фазы в master prompt нет; дальнейшая работа — отдельные deployment
   задачи, перечисленные ниже.
@@ -41,7 +41,8 @@
   строка сдвигается и показывает красное действие с урной. `QUEUED`/`RENDERING`
   заблокированы, подтверждение появляется только при наличии артефактов. Job,
   сцена и результаты удаляются полностью; для удалённой выбранной записи
-  выбирается следующий доступный job.
+  выбирается следующий доступный job. Закрытая строка сохраняет непрозрачный
+  фон при hover, поэтому скрытое действие удаления не просвечивает.
 - Адаптер Blender 4.5 преобразует стабильное API-значение `BLENDER_EEVEE` в
   фактический идентификатор Blender 4.5 `BLENDER_EEVEE_NEXT`.
 - Единая security boundary для REST и WebSocket: production требует Bearer
@@ -148,7 +149,8 @@
 - Целевой Playwright `qa:job-delete`: desktop reveal/close, touch swipe в обе
   стороны, блокировка active job, удаление без диалога, подтверждение и отмена
   при артефактах, выбор следующей записи и desktop/mobile fit — успешно;
-  transition/revealed/confirmation screenshots просмотрены, clipping, overlap и
+  закрытый hover дополнительно проверен на непрозрачность. Hover, transition,
+  revealed и confirmation screenshots просмотрены, clipping, overlap и
   horizontal overflow не обнаружены.
 - Playwright mock smoke: desktop/compact/ultrawide/mobile fit, versions,
   render/cancel, live log, dialogs и frame pagination — успешно; итоговые
