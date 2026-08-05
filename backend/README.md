@@ -43,6 +43,8 @@ Render lifecycle:
 
 - `GET /api/v1/jobs/page?page=1&page_size=10` returns one ordered history page;
   `page_size` is capped at 10 and subsequent pages are fetched on demand;
+- `DELETE /api/v1/jobs/{id}` removes the job directory and artifact metadata;
+  queued and rendering jobs return `409` until cancelled;
 - `POST /api/v1/jobs/{id}/start` queues a ready job;
 - one scheduler task starts the oldest queued job;
 - `GET /api/v1/jobs/{id}` exposes persisted progress and process state;

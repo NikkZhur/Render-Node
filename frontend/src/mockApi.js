@@ -135,6 +135,7 @@ const initialJobs = [
     device: "OptiX",
     version: "5.2.0",
     created: "Just now",
+    hasArtifacts: false,
   },
   {
     id: "job-queued",
@@ -152,6 +153,7 @@ const initialJobs = [
     device: "CUDA",
     version: "4.5.11",
     created: "8 min ago",
+    hasArtifacts: false,
   },
   {
     id: "job-complete",
@@ -169,6 +171,7 @@ const initialJobs = [
     device: "OptiX",
     version: "4.2.22",
     created: "Yesterday",
+    hasArtifacts: true,
   },
   {
     id: "job-failed",
@@ -186,6 +189,7 @@ const initialJobs = [
     device: "OptiX",
     version: "4.1.1",
     created: "2 days ago",
+    hasArtifacts: true,
   },
 ];
 

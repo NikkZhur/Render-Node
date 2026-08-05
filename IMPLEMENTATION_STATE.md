@@ -5,7 +5,7 @@
 
 ## Текущее состояние
 
-- Обновлено: 2026-08-04 после добавления серверной пагинации списка jobs.
+- Обновлено: 2026-08-04 после добавления удаления jobs во frontend.
 - Фазы 1–6 из `BACKEND_IMPLEMENTATION_MASTER_PROMPT.md` завершены.
 - Следующей фазы в master prompt нет; дальнейшая работа — отдельные deployment
   задачи, перечисленные ниже.
@@ -37,6 +37,11 @@
 - Панель Jobs имеет ограниченную высоту и внутреннюю прокрутку. Она показывает
   не более 10 записей на серверную страницу; остальные страницы запрашиваются
   только при переходе через компактную пагинацию.
+- Удаление job открывается desktop-стрелкой или горизонтальным touch-свайпом:
+  строка сдвигается и показывает красное действие с урной. `QUEUED`/`RENDERING`
+  заблокированы, подтверждение появляется только при наличии артефактов. Job,
+  сцена и результаты удаляются полностью; для удалённой выбранной записи
+  выбирается следующий доступный job.
 - Адаптер Blender 4.5 преобразует стабильное API-значение `BLENDER_EEVEE` в
   фактический идентификатор Blender 4.5 `BLENDER_EEVEE_NEXT`.
 - Единая security boundary для REST и WebSocket: production требует Bearer
@@ -88,6 +93,9 @@
 - `GET /api/v1/jobs/page?page=&page_size=` возвращает `items`, `page`,
   `page_size`, `total`, `pages`; сервер ограничивает страницу 10 записями.
   Старый `GET /api/v1/jobs` сохранён для совместимости. Миграция БД не требуется.
+- Существующий `DELETE /api/v1/jobs/{job_id}` используется frontend: он удаляет
+  job directory и artifact metadata, но возвращает
+  `409 active_job_cannot_be_deleted` для `QUEUED`/`RENDERING`.
 - Все `/api/v1/**` REST/WS routes используют один Bearer contract, если настроен
   `RENDER_NODE_AUTH_TOKEN`; production без token или HTTPS allowlist не стартует.
 - `WS /api/v1/events` закрывает unauthorized/forbidden handshake кодами 4401/4403
@@ -137,6 +145,11 @@
   отсутствие предварительной загрузки страниц 2–3, стабильная высота панели,
   внутренняя прокрутка и desktop/mobile fit — успешно; screenshots просмотрены,
   overlap и horizontal overflow не обнаружены.
+- Целевой Playwright `qa:job-delete`: desktop reveal/close, touch swipe в обе
+  стороны, блокировка active job, удаление без диалога, подтверждение и отмена
+  при артефактах, выбор следующей записи и desktop/mobile fit — успешно;
+  transition/revealed/confirmation screenshots просмотрены, clipping, overlap и
+  horizontal overflow не обнаружены.
 - Playwright mock smoke: desktop/compact/ultrawide/mobile fit, versions,
   render/cancel, live log, dialogs и frame pagination — успешно; итоговые
   скриншоты просмотрены, clipping/overlap/horizontal overflow не обнаружены.

@@ -16,6 +16,7 @@
     "qa:api": "node scripts/qa-api-smoke.mjs",
     "qa:runner": "node scripts/qa-runner-smoke.mjs",
     "qa:capabilities": "node scripts/qa-runner-capabilities.mjs",
+    "qa:job-delete": "node scripts/qa-job-delete.mjs",
     "qa:jobs-pagination": "node scripts/qa-jobs-pagination.mjs"
   },
   "dependencies": {

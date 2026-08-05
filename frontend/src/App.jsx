@@ -984,9 +984,61 @@ function RenderPreview({ isMockMode, job, liveLogs = [], mockLogLines = [] }) {
   );
 }
 
-function JobQueue({ jobs, loading, onNew, onPageChange, onSelect, page, pages, selectedJobId, total }) {
+function JobQueue({
+  actionError,
+  deletingJobId,
+  jobs,
+  loading,
+  onDelete,
+  onNew,
+  onPageChange,
+  onSelect,
+  page,
+  pages,
+  selectedJobId,
+  total,
+}) {
+  const [revealedJobId, setRevealedJobId] = useState(null);
+  const pointerStart = useRef(null);
+  const suppressSelection = useRef(false);
+  const suppressSelectionTimer = useRef(null);
   const firstShown = total === 0 ? 0 : ((page - 1) * JOBS_PER_PAGE) + 1;
   const lastShown = Math.min(page * JOBS_PER_PAGE, total);
+
+  const beginSwipe = (jobId, x, y) => {
+    pointerStart.current = { jobId, x, y };
+    suppressSelection.current = false;
+  };
+
+  const finishSwipe = (jobId, x, y) => {
+    const start = pointerStart.current;
+    pointerStart.current = null;
+    if (!start || start.jobId !== jobId) return false;
+    const deltaX = x - start.x;
+    const deltaY = y - start.y;
+    if (Math.abs(deltaX) < 42 || Math.abs(deltaX) <= Math.abs(deltaY)) return false;
+    suppressSelection.current = true;
+    window.clearTimeout(suppressSelectionTimer.current);
+    suppressSelectionTimer.current = window.setTimeout(() => {
+      suppressSelection.current = false;
+    }, 120);
+    setRevealedJobId(deltaX < 0 ? jobId : null);
+    return true;
+  };
+
+  const selectJob = (jobId) => {
+    if (suppressSelection.current) {
+      suppressSelection.current = false;
+      return;
+    }
+    setRevealedJobId(null);
+    onSelect(jobId);
+  };
+
+  const requestDelete = (job) => {
+    setRevealedJobId(null);
+    onDelete(job);
+  };
 
   return (
     <section aria-busy={loading} className="panel queue-panel">
@@ -1003,50 +1055,142 @@ function JobQueue({ jobs, loading, onNew, onPageChange, onSelect, page, pages, s
         )}
       />
       <div className="job-list">
-        {jobs.map((job) => (
-          <button
-            className={`job-row ${selectedJobId === job.id ? "selected" : ""}`}
-            key={job.id}
-            onClick={() => onSelect(job.id)}
-            type="button"
-          >
-            <span className="job-status-rail" data-status={job.status} />
-            <span className="job-main">
-              <span className="job-title-line">
-                <strong>{job.name}</strong>
-                <small>#{job.shortId}</small>
-              </span>
-              <span className="job-detail">{job.engine} · {job.device} · {job.frame}</span>
-              <span className="job-bottom-line">
-                <StatusBadge status={job.status} />
-                <small>{job.created}</small>
-              </span>
-              {job.status === "rendering" && (
-                <span className="job-mini-progress"><i style={{ width: `${job.progress}%` }} /></span>
-              )}
-            </span>
-            <Icon name="chevron" size={15} />
-          </button>
-        ))}
+        {jobs.map((job) => {
+          const active = job.status === "queued" || job.status === "rendering";
+          const revealed = revealedJobId === job.id;
+          return (
+            <div className={`job-row-shell ${revealed ? "delete-revealed" : ""}`} key={job.id}>
+              <button
+                aria-label={active ? `Cannot delete active job ${job.name}` : `Delete job ${job.name}`}
+                className="job-delete-action"
+                disabled={active || deletingJobId === job.id}
+                onClick={() => requestDelete(job)}
+                onTouchEnd={(event) => {
+                  event.preventDefault();
+                  requestDelete(job);
+                }}
+                title={active ? "Cancel this job before deleting it" : `Delete ${job.name}`}
+                type="button"
+              >
+                <Icon name="trash" size={18} />
+              </button>
+              <div
+                className={`job-row ${selectedJobId === job.id ? "selected" : ""}`}
+                onPointerDown={(event) => {
+                  if (event.pointerType !== "touch") beginSwipe(job.id, event.clientX, event.clientY);
+                }}
+                onPointerUp={(event) => {
+                  if (event.pointerType !== "touch") finishSwipe(job.id, event.clientX, event.clientY);
+                }}
+                onTouchEnd={(event) => {
+                  const touch = event.changedTouches[0];
+                  if (!touch) return;
+                  const swiped = finishSwipe(job.id, touch.clientX, touch.clientY);
+                  if (!swiped && event.target.closest?.(".job-select-button")) {
+                    event.preventDefault();
+                    selectJob(job.id);
+                  }
+                }}
+                onTouchStart={(event) => {
+                  const touch = event.touches[0];
+                  if (touch) beginSwipe(job.id, touch.clientX, touch.clientY);
+                }}
+              >
+                <button className="job-select-button" onClick={() => selectJob(job.id)} type="button">
+                  <span className="job-status-rail" data-status={job.status} />
+                  <span className="job-main">
+                    <span className="job-title-line">
+                      <strong>{job.name}</strong>
+                      <small>#{job.shortId}</small>
+                    </span>
+                    <span className="job-detail">{job.engine} · {job.device} · {job.frame}</span>
+                    <span className="job-bottom-line">
+                      <StatusBadge status={job.status} />
+                      <small>{job.created}</small>
+                    </span>
+                    {job.status === "rendering" && (
+                      <span className="job-mini-progress"><i style={{ width: `${job.progress}%` }} /></span>
+                    )}
+                  </span>
+                </button>
+                <button
+                  aria-expanded={revealed}
+                  aria-label={`${revealed ? "Hide" : "Reveal"} delete action for ${job.name}`}
+                  className="job-reveal-button"
+                  onClick={() => setRevealedJobId((current) => current === job.id ? null : job.id)}
+                  type="button"
+                >
+                  <Icon name="chevron" size={15} />
+                </button>
+              </div>
+            </div>
+          );
+        })}
         {!loading && jobs.length === 0 && (
           <div className="queue-empty">No jobs on this page</div>
         )}
       </div>
+      {actionError && <p className="queue-action-error" role="alert">{actionError}</p>}
       {pages > 1 && (
         <nav aria-label="Jobs pages" className="queue-pagination">
-          <button aria-label="Previous jobs page" disabled={page <= 1 || loading} onClick={() => onPageChange(page - 1)} type="button">
+          <button aria-label="Previous jobs page" disabled={page <= 1 || loading} onClick={() => {
+            setRevealedJobId(null);
+            onPageChange(page - 1);
+          }} type="button">
             <Icon name="chevron" size={14} />
           </button>
           <span>
             <strong>{page} / {pages}</strong>
             <small>{firstShown}–{lastShown} of {total}</small>
           </span>
-          <button aria-label="Next jobs page" disabled={page >= pages || loading} onClick={() => onPageChange(page + 1)} type="button">
+          <button aria-label="Next jobs page" disabled={page >= pages || loading} onClick={() => {
+            setRevealedJobId(null);
+            onPageChange(page + 1);
+          }} type="button">
             <Icon name="chevron" size={14} />
           </button>
         </nav>
       )}
     </section>
+  );
+}
+
+function DeleteJobDialog({ error, job, onClose, onConfirm, pending }) {
+  const entered = useModalEntrance();
+  const cancelButton = useRef(null);
+  const dialogRef = useDialogBehavior(onClose, cancelButton);
+
+  return (
+    <div className={`modal-backdrop ${entered ? "is-entered" : ""}`} role="presentation" onMouseDown={pending ? undefined : onClose}>
+      <section
+        aria-describedby="delete-job-description"
+        aria-labelledby="delete-job-title"
+        aria-modal="true"
+        className="delete-job-modal"
+        onMouseDown={(event) => event.stopPropagation()}
+        ref={dialogRef}
+        role="dialog"
+      >
+        <span className="delete-job-icon"><Icon name="trash" size={22} /></span>
+        <div>
+          <span className="eyebrow">Permanent deletion</span>
+          <h2 id="delete-job-title">Delete “{job.name}”?</h2>
+          <p id="delete-job-description">This job has artifacts. Its scene, rendered files, previews and logs will be deleted permanently.</p>
+        </div>
+        {error && <p className="delete-job-error" role="alert">{error}</p>}
+        <div className="delete-job-actions">
+          <button disabled={pending} onClick={onClose} ref={cancelButton} type="button">Cancel</button>
+          <button
+            className="confirm-delete-job"
+            disabled={pending}
+            onClick={() => void onConfirm().catch(() => undefined)}
+            type="button"
+          >
+            <Icon name="trash" size={16} /> {pending ? "Deleting…" : "Delete job"}
+          </button>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -1615,6 +1759,9 @@ export default function App({ mockApi = null }) {
   const setSelectedJobId = useUiStore((state) => state.setSelectedJobId);
   const [mockJobs, setMockJobs] = useState(() => mockApi?.initialJobs ?? []);
   const [jobPage, setJobPage] = useState(1);
+  const [deleteConfirmationJob, setDeleteConfirmationJob] = useState(null);
+  const [deleteInspectionId, setDeleteInspectionId] = useState(null);
+  const [deleteInspectionError, setDeleteInspectionError] = useState("");
   const [theme, setTheme] = useState(getInitialTheme);
   const realtime = useRenderEvents(queryClient, !isMockMode);
 
@@ -1765,6 +1912,7 @@ export default function App({ mockApi = null }) {
       setSelectedJobId(rerenderedJob.id);
     },
   });
+  const deleteJobMutation = useMutation({ mutationFn: jobsApi.delete });
   const creatingNewJob = selectedJobId === "new";
   const selectedJob = creatingNewJob
     ? null
@@ -1890,6 +2038,60 @@ export default function App({ mockApi = null }) {
     return rerendered;
   };
 
+  const deleteJob = async (job) => {
+    const jobIndex = jobs.findIndex((candidate) => candidate.id === job.id);
+    const remainingJobs = jobs.filter((candidate) => candidate.id !== job.id);
+    const replacementJob = remainingJobs[Math.min(jobIndex, remainingJobs.length - 1)] ?? null;
+    const nextTotal = Math.max(0, jobTotal - 1);
+    const nextPage = Math.min(jobPage, Math.max(1, Math.ceil(nextTotal / JOBS_PER_PAGE)));
+
+    if (isMockMode) {
+      setMockJobs((currentJobs) => currentJobs.filter((candidate) => candidate.id !== job.id));
+    } else {
+      await deleteJobMutation.mutateAsync(job.id);
+      queryClient.setQueriesData({ queryKey: ["jobs"] }, (current) => {
+        if (!current?.items) return current;
+        return {
+          ...current,
+          items: current.items.filter((candidate) => candidate.id !== job.id),
+          total: Math.max(0, current.total - 1),
+          pages: Math.ceil(Math.max(0, current.total - 1) / JOBS_PER_PAGE),
+        };
+      });
+      queryClient.removeQueries({ queryKey: ["artifacts", job.id] });
+      queryClient.removeQueries({ queryKey: ["frames", job.id] });
+      queryClient.removeQueries({ queryKey: ["log-tail", job.id] });
+      queryClient.invalidateQueries({ queryKey: ["jobs"] });
+    }
+
+    setJobPage(nextPage);
+    if (selectedJobId === job.id) setSelectedJobId(replacementJob?.id ?? null);
+  };
+
+  const requestJobDeletion = async (job) => {
+    if (job.status === "queued" || job.status === "rendering") return;
+    setDeleteInspectionError("");
+    deleteJobMutation.reset();
+    setDeleteInspectionId(job.id);
+    try {
+      const hasArtifacts = isMockMode
+        ? Boolean(job.hasArtifacts)
+        : (await queryClient.fetchQuery({
+            queryKey: ["artifacts", job.id],
+            queryFn: ({ signal }) => artifactsApi.list(job.id, { signal }),
+          })).length > 0;
+      if (hasArtifacts) {
+        setDeleteConfirmationJob(job);
+      } else {
+        await deleteJob(job);
+      }
+    } catch (error) {
+      setDeleteInspectionError(error instanceof Error ? error.message : "Could not delete job");
+    } finally {
+      setDeleteInspectionId(null);
+    }
+  };
+
   return (
     <div className="app-shell">
       <Header
@@ -1941,8 +2143,11 @@ export default function App({ mockApi = null }) {
           />
           <div className="right-rail">
             <JobQueue
+              actionError={deleteInspectionError || deleteJobMutation.error?.message || ""}
+              deletingJobId={deleteInspectionId ?? (deleteJobMutation.isPending ? deleteJobMutation.variables : null)}
               jobs={jobs}
               loading={jobsQuery.isFetching}
+              onDelete={(job) => void requestJobDeletion(job)}
               onNew={() => {
                 setJobPage(1);
                 setSelectedJobId("new");
@@ -1993,6 +2198,22 @@ export default function App({ mockApi = null }) {
           uploadError={uploadMutation.error?.message ?? ""}
           uploadingFile={uploadMutation.isPending}
           versions={(versionsQuery.data ?? []).filter((version) => version.installed)}
+        />
+      )}
+      {deleteConfirmationJob && (
+        <DeleteJobDialog
+          error={deleteJobMutation.error?.message ?? ""}
+          job={deleteConfirmationJob}
+          onClose={() => {
+            if (deleteJobMutation.isPending) return;
+            deleteJobMutation.reset();
+            setDeleteConfirmationJob(null);
+          }}
+          onConfirm={async () => {
+            await deleteJob(deleteConfirmationJob);
+            setDeleteConfirmationJob(null);
+          }}
+          pending={deleteJobMutation.isPending}
         />
       )}
     </div>

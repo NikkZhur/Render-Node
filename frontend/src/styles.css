@@ -1851,20 +1851,61 @@ main {
   font-size: var(--font-micro);
 }
 
+.job-row-shell {
+  position: relative;
+  width: 100%;
+  min-height: 81px;
+  overflow: hidden;
+  border-radius: 9px;
+  background: rgb(255 92 105 / 12%);
+}
+
+.job-delete-action {
+  position: absolute;
+  z-index: 0;
+  top: 0;
+  right: 0;
+  width: 58px;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  border-radius: 0 9px 9px 0;
+  color: #fff;
+  background: linear-gradient(180deg, #f05f6c, #d94452);
+  box-shadow: inset 1px 0 rgb(255 255 255 / 12%);
+  touch-action: manipulation;
+}
+
+.job-delete-action:hover:not(:disabled) {
+  background: linear-gradient(180deg, #ff6c78, #e34856);
+}
+
+.job-delete-action:disabled {
+  color: rgb(255 255 255 / 42%);
+  background: #63343a;
+  cursor: not-allowed;
+}
+
 .job-row {
   position: relative;
+  z-index: 1;
   width: 100%;
   min-height: 81px;
   display: flex;
   align-items: center;
-  gap: 9px;
-  overflow: hidden;
-  padding: 9px 9px 9px 12px;
   border: 1px solid transparent;
   border-radius: 9px;
   color: var(--text-soft);
-  background: transparent;
+  background: var(--surface);
   text-align: left;
+  touch-action: pan-y;
+  transform: translate3d(0, 0, 0);
+  transition: transform 190ms cubic-bezier(0.16, 1, 0.3, 1), border-color 140ms linear, background 140ms linear;
+  will-change: transform;
+}
+
+.job-row-shell.delete-revealed .job-row {
+  transform: translate3d(-58px, 0, 0);
 }
 
 .job-row:hover {
@@ -1874,6 +1915,40 @@ main {
 .job-row.selected {
   border-color: var(--border);
   background: var(--surface-raised);
+}
+
+.job-select-button {
+  min-width: 0;
+  min-height: 79px;
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 9px;
+  overflow: hidden;
+  padding: 9px 4px 9px 12px;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+}
+
+.job-reveal-button {
+  width: 39px;
+  min-height: 79px;
+  display: grid;
+  flex: 0 0 39px;
+  place-items: center;
+  color: var(--text-soft);
+  background: transparent;
+  transition: color 140ms linear, transform 190ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.job-reveal-button:hover,
+.job-reveal-button[aria-expanded="true"] {
+  color: var(--blue);
+}
+
+.job-reveal-button[aria-expanded="true"] svg {
+  transform: rotate(180deg);
 }
 
 .job-status-rail {
@@ -1936,6 +2011,13 @@ main {
   height: 100%;
   display: block;
   background: var(--blue);
+}
+
+.queue-action-error {
+  margin: 7px 2px 0;
+  color: var(--red);
+  font-size: var(--font-micro);
+  line-height: 1.3;
 }
 
 .text-action {
@@ -2328,6 +2410,88 @@ main {
   will-change: opacity, transform;
 }
 
+.delete-job-modal {
+  position: relative;
+  z-index: 1;
+  width: min(440px, 100%);
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr);
+  gap: 16px;
+  padding: 24px;
+  overflow: hidden;
+  border: 1px solid rgb(255 92 105 / 28%);
+  border-radius: 14px;
+  background: #11151b;
+  box-shadow: var(--shadow);
+  opacity: 0;
+  transform: translate3d(0, 6px, 0);
+  transition: opacity 140ms linear, transform 160ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: opacity, transform;
+}
+
+.delete-job-icon {
+  width: 46px;
+  height: 46px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgb(255 92 105 / 24%);
+  border-radius: 12px;
+  color: var(--red);
+  background: rgb(255 92 105 / 8%);
+}
+
+.delete-job-modal h2 {
+  margin: 4px 0 8px;
+  color: var(--text);
+  font-size: var(--font-title);
+  line-height: 1.2;
+}
+
+.delete-job-modal p {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--font-caption);
+  line-height: 1.55;
+}
+
+.delete-job-error {
+  grid-column: 1 / -1;
+  color: var(--red) !important;
+}
+
+.delete-job-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+  margin-top: 4px;
+}
+
+.delete-job-actions button {
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 15px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  color: var(--text-soft);
+  background: var(--surface-raised);
+  font-size: var(--font-caption);
+  font-weight: 700;
+}
+
+.delete-job-actions .confirm-delete-job {
+  border-color: rgb(255 92 105 / 36%);
+  color: #fff;
+  background: #d94452;
+}
+
+.delete-job-actions .confirm-delete-job:hover:not(:disabled) {
+  background: #e94e5c;
+}
+
 .frame-preview-modal .scene-platform {
   transform: translate(-50%, -43%) scale(1.25);
 }
@@ -2513,7 +2677,8 @@ main {
 
 .modal-backdrop.is-entered > .version-modal,
 .modal-backdrop.is-entered > .frames-modal,
-.modal-backdrop.is-entered > .frame-preview-modal {
+.modal-backdrop.is-entered > .frame-preview-modal,
+.modal-backdrop.is-entered > .delete-job-modal {
   opacity: 1;
   transform: translate3d(0, 0, 0);
 }
