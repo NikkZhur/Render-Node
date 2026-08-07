@@ -5,7 +5,7 @@
 
 ## Текущее состояние
 
-- Обновлено: 2026-08-05 после исправления hover-состояния удаления jobs.
+- Обновлено: 2026-08-07 после упорядочивания development-запуска сервисов.
 - Фазы 1–6 из `BACKEND_IMPLEMENTATION_MASTER_PROMPT.md` завершены.
 - Следующей фазы в master prompt нет; дальнейшая работа — отдельные deployment
   задачи, перечисленные ниже.
@@ -58,6 +58,9 @@
   Корневой `.env` загружается автоматически, старый boolean-флаг мигрирует в
   новый режим, а production по-прежнему его запрещает. Локальный `.env` включает
   режим для текущего узла и остаётся вне git.
+- Корневой development launcher после миграций запускает backend, ожидает его
+  публичный `/ready` до 60 секунд и только затем запускает frontend. При раннем
+  завершении или неготовности backend frontend не запускается.
 - Start/retry выполняют runner preflight до перехода в `QUEUED`; недоступный
   scheduler/runner возвращает `runner_unavailable`, сохраняя исходный статус.
   Frontend показывает capability runner и блокирует Start при недоступности.
@@ -109,7 +112,7 @@
 ## Последняя проверка
 
 - Backend: Ruff format/lint — успешно; strict mypy `app` — успешно;
-  все 126 pytest tests пройдены (одно upstream Starlette warning).
+  все 129 pytest tests пройдены (одно upstream Starlette warning).
   Покрыты auth/CORS/headers, REST+WS boundary, body/WS limits, production sandbox
   fail-closed, editable/locked job settings, безопасная замена upload, rerender с
   копией вложенного input, retry cleanup, missing scene, restart recovery,
@@ -131,7 +134,9 @@
   horizontal overflow не обнаружены.
 - После обычного перезапуска `make dev` реальные `/ready` и
   `/api/v1/system/capabilities` вернули ready и `local_trusted/available=true`;
-  настройки процесса вручную через shell env больше не требуются.
+  настройки процесса вручную через shell env больше не требуются. Порядок
+  запуска проверен по реальным логам: frontend стартовал только после успешного
+  backend startup и ответа `200` от `/ready`; добавлены unit-тесты readiness-gate.
 - Целевой Playwright `qa:versions`: две bundled-версии, install, отмена и
   подтверждение delete, возврат версии в каталог, desktop/mobile viewport fit —
   успешно; итоговые screenshots просмотрены, clipping и overflow не обнаружены.

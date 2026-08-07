@@ -7,6 +7,8 @@ import shutil
 import signal
 import subprocess
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
@@ -14,6 +16,9 @@ from types import FrameType
 ROOT = Path(__file__).resolve().parents[1]
 SHUTDOWN_TIMEOUT_SECONDS = 5.0
 POLL_INTERVAL_SECONDS = 0.2
+BACKEND_READY_TIMEOUT_SECONDS = 60.0
+BACKEND_READY_REQUEST_TIMEOUT_SECONDS = 1.0
+BACKEND_READY_URL = "http://127.0.0.1:8000/ready"
 # Dev-container port forwarding requires binding beyond loopback.
 DEVELOPMENT_HOST = "0.0.0.0"  # noqa: S104
 stop_signal: int | None = None
@@ -111,6 +116,56 @@ def run_migrations() -> bool:
     return result.returncode == 0
 
 
+def start_service(service: Service) -> subprocess.Popen[bytes]:
+    """Launch one service in its own process group."""
+
+    print(f"[dev] Starting {service.name}: {' '.join(service.command)}", flush=True)
+    return subprocess.Popen(  # noqa: S603
+        service.command,
+        cwd=service.cwd,
+        start_new_session=True,
+    )
+
+
+def backend_is_ready() -> bool:
+    """Probe the public readiness endpoint without depending on frontend proxying."""
+
+    try:
+        with urllib.request.urlopen(
+            BACKEND_READY_URL,
+            timeout=BACKEND_READY_REQUEST_TIMEOUT_SECONDS,
+        ) as response:
+            return response.status == 200
+    except (OSError, TimeoutError, urllib.error.URLError):
+        return False
+
+
+def wait_for_backend_ready(process: subprocess.Popen[bytes]) -> bool:
+    """Wait for backend readiness before allowing the frontend to start."""
+
+    print(f"[dev] Waiting for backend readiness: {BACKEND_READY_URL}", flush=True)
+    deadline = time.monotonic() + BACKEND_READY_TIMEOUT_SECONDS
+    while True:
+        return_code = process.poll()
+        if return_code is not None:
+            print(f"[dev] Backend exited before readiness with code {return_code}.", flush=True)
+            return False
+        if backend_is_ready():
+            print("[dev] Backend is ready; starting frontend.", flush=True)
+            return True
+        if stop_signal is not None:
+            print("[dev] Startup interrupted while waiting for backend readiness.", flush=True)
+            return False
+        if time.monotonic() >= deadline:
+            print(
+                f"[dev] Backend did not become ready within "
+                f"{BACKEND_READY_TIMEOUT_SECONDS:.0f} seconds.",
+                flush=True,
+            )
+            return False
+        time.sleep(POLL_INTERVAL_SECONDS)
+
+
 def main() -> int:
     """Start both services and keep their lifecycle coupled."""
 
@@ -122,14 +177,13 @@ def main() -> int:
 
     processes: list[subprocess.Popen[bytes]] = []
     try:
-        for service in SERVICES:
-            print(f"[dev] Starting {service.name}: {' '.join(service.command)}", flush=True)
-            process = subprocess.Popen(  # noqa: S603
-                service.command,
-                cwd=service.cwd,
-                start_new_session=True,
-            )
-            processes.append(process)
+        backend_process = start_service(SERVICES[0])
+        processes.append(backend_process)
+        if not wait_for_backend_ready(backend_process):
+            return_code = backend_process.poll()
+            return return_code if return_code not in {None, 0} else 1
+
+        processes.append(start_service(SERVICES[1]))
 
         while stop_signal is None:
             for service, process in zip(SERVICES, processes, strict=True):

@@ -85,9 +85,11 @@ from the repository root with one command:
 make dev
 ```
 
-The command applies pending Alembic migrations, starts the backend on port `8000`
-and the frontend on port `5173`, and keeps their lifecycle coupled. `Ctrl+C` stops
-both processes; if either service exits unexpectedly, the other is stopped too.
+The command applies pending Alembic migrations, starts the backend on port `8000`,
+waits up to 60 seconds for its public `/ready` endpoint, and only then starts the
+frontend on port `5173`. If the backend exits or does not become ready, the frontend
+is not started. `Ctrl+C` stops both processes; if either running service exits
+unexpectedly, the other is stopped too.
 Environment variables such as `RENDER_NODE_WORKSPACE`,
 `RENDER_NODE_BACKEND_AUTH_TOKEN`, and the development runner settings are passed
 through unchanged. Settings are also loaded from the repository-root `.env`, so
