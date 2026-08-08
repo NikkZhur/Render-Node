@@ -11,6 +11,9 @@ Render Node — самостоятельный сервис для удалён�
 
 ## 2. Цели
 
+- Основной deployment — временный single-tenant GPU-сервер или облачный Pod:
+  владелец запускает готовый образ, рендерит собственные сцены, скачивает
+  результаты и удаляет узел. Приложение не является общей render farm.
 - Одна выбранная рабочая версия Blender для всех заданий. В образ входят 5.2.0
   и 4.1.1; дополнительные версии устанавливаются пользователем из официального
   архива.
@@ -587,13 +590,21 @@ Blender через единый `SandboxRunner`; прямой вызов subproc
 - лимиты wall time, CPU, RAM, pids и размера output;
 - `SIGTERM`, grace timeout и `SIGKILL` для всей process group в `finally`.
 
-Production sandbox дополнительно запрещает сеть и доступ к database, соседним
-jobs, Unix sockets, container runtime socket, host devices кроме назначенных GPU
-и секретам backend. Способ реализации является deployment boundary: отдельный
-worker container/namespace либо эквивалентный Linux sandbox. Production backend
-не начинает render и возвращает readiness error, если обязательный sandbox
-профиль недоступен. Запуск без OS sandbox допускается только в явно включённом
-development-режиме и не может быть значением по умолчанию.
+Trust boundary выбирается явным deployment profile:
+
+- `isolated_worker` — безопасное значение по умолчанию для shared deployment.
+  Production sandbox запрещает сеть и доступ к database, соседним jobs, Unix
+  sockets, container runtime socket, host devices кроме назначенных GPU и
+  секретам backend. Пока отдельный worker container/namespace не реализован,
+  scheduler в этом production-профиле не проходит readiness.
+- `single_tenant` — весь временно арендованный VM/Pod принадлежит одному
+  оператору и принимает только его собственные сцены. В production он разрешает
+  прямой `local_trusted` subprocess; границей изоляции является сам облачный
+  узел. Этот профиль не изолирует Blender от backend внутри узла и запрещён для
+  общей render farm или загрузок от несвязанных пользователей.
+
+Ни один production-профиль не выбирается неявно: прямой runner требует
+одновременно `deployment_profile=single_tenant` и `runner_mode=local_trusted`.
 
 Пример минимального окружения процесса:
 
@@ -774,8 +785,9 @@ Artifacts относятся к выбранному job. Последовате
 - Размер upload и количество chunks ограничены.
 - Blender всегда запускается с `--factory-startup`, `--disable-autoexec` и
   доверенным version-specific backend-скриптом.
-- Blender запускается от непривилегированного worker через `SandboxRunner`;
-  production не допускает unsandboxed fallback.
+- Blender запускается через единый `SandboxRunner`; прямой production runner
+  разрешён только на однопользовательском арендованном узле с явным профилем
+  `single_tenant`, а shared deployment требует непривилегированного OS sandbox.
 - Окружение subprocess строится по allowlist и не наследует backend secrets,
   `PYTHONPATH`, `PYTHONHOME` или пользовательские site-packages.
 - Jupyter не входит в публичный runtime-образ.
@@ -791,10 +803,12 @@ Artifacts относятся к выбранному job. Последовате
 - После checksum match отдельно проверяются пути, symlinks, число файлов,
   суммарный распакованный размер и точная версия бинарника.
 
-`.blend` считается потенциально недоверенным файлом во всех режимах. Для
-production/public deployment render worker дополнительно отделяется sandbox-
-границей без сети и с лимитами CPU, RAM, VRAM, pids, времени и размера
-результатов. Development override не считается проверкой production security.
+`.blend` считается потенциально недоверенным файлом во всех режимах. Основной
+single-tenant сценарий принимает только сцены владельца временного узла и
+использует сам VM/Pod как внешнюю границу доверия. Для shared/public deployment,
+где сцены отправляют несвязанные пользователи, render worker дополнительно
+отделяется sandbox-границей без сети и с лимитами CPU, RAM, VRAM, pids, времени
+и размера результатов.
 
 ## 17. Конфигурация
 
@@ -802,6 +816,8 @@ production/public deployment render worker дополнительно отдел
 
 ```text
 RENDER_NODE_ENV=production
+RENDER_NODE_DEPLOYMENT_PROFILE=single_tenant
+RENDER_NODE_RUNNER_MODE=local_trusted
 RENDER_NODE_WORKSPACE=/workspace
 RENDER_NODE_DATABASE_URL=sqlite+aiosqlite:////workspace/database/render-node.sqlite3
 RENDER_NODE_BLENDER_ROOT=/workspace/blender/versions
@@ -811,20 +827,19 @@ RENDER_NODE_MAX_BLENDER_ARCHIVE_GB=2
 RENDER_NODE_RELEASE_CATALOG_TTL_SECONDS=3600
 RENDER_NODE_LOW_SPACE_PERCENT=10
 RENDER_NODE_LOW_SPACE_GB=50
-RENDER_NODE_SANDBOX_MODE=required
 RENDER_NODE_BLENDER_TIMEOUT_SECONDS=21600
 RENDER_NODE_BLENDER_TERM_GRACE_SECONDS=15
 RENDER_NODE_MAX_OUTPUT_GB=50
 RENDER_NODE_MAX_WORKER_PIDS=128
 RENDER_NODE_MAX_ACTIVE_JOBS=1
 RENDER_NODE_ALLOWED_ORIGINS=https://example.runpod.net
-RENDER_NODE_AUTH_SECRET=...
+RENDER_NODE_AUTH_TOKEN=...
 ```
 
 Секреты не записываются в Dockerfile или git.
-`RENDER_NODE_SANDBOX_MODE=disabled` разрешён только вместе с
-`RENDER_NODE_ENV=development`; Pydantic Settings отклоняет такую комбинацию в
-production. Readiness проверяет доступность выбранного sandbox backend.
+`local_trusted` разрешён в production только вместе с явным
+`single_tenant`; Pydantic Settings отклоняет его с профилем
+`isolated_worker`. Readiness проверяет, что выбранная trust boundary доступна.
 
 ## 18. Логирование и наблюдаемость
 
@@ -967,7 +982,9 @@ Backend пишет структурированные JSON-логи:
 - Upload limits и resumable upload.
 - Cleanup policy.
 - Cleanup загруженных Blender archives и abandoned quarantine operations.
-- Production worker sandbox без сети, соседних jobs и backend secrets.
+- Single-tenant production profile для временно арендованного узла.
+- Production worker sandbox без сети, соседних jobs и backend secrets перед
+  shared deployment.
 - Health/readiness endpoints.
 - Непривилегированный контейнер.
 - Backup SQLite и результатов.
@@ -996,7 +1013,8 @@ Blender и публикует результаты.
 - Realtime: нативный WebSocket.
 - Один Pod и один активный Blender process.
 - Каждый `.blend` запускается через `SandboxRunner` с `--factory-startup` и
-  `--disable-autoexec`; production не имеет unsandboxed fallback.
+  `--disable-autoexec`; production direct runner требует явного single-tenant
+  профиля, а shared профиль остаётся fail-closed без изолированного worker.
 - В образе закреплены Blender 5.2.0 и 4.1.1; одна версия явно выбирается как
   рабочая для всех jobs.
 - Результаты в `/workspace/jobs`.

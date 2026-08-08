@@ -5,7 +5,7 @@
 
 ## Текущее состояние
 
-- Обновлено: 2026-08-07 после упорядочивания development-запуска сервисов.
+- Обновлено: 2026-08-07 после добавления single-tenant deployment profile.
 - Фазы 1–6 из `BACKEND_IMPLEMENTATION_MASTER_PROMPT.md` завершены.
 - Следующей фазы в master prompt нет; дальнейшая работа — отдельные deployment
   задачи, перечисленные ниже.
@@ -52,12 +52,14 @@
   production и общие browser security headers. JSON mutation body по умолчанию
   ограничен 1 MiB, клиентское WS-сообщение — 64 KiB; upload/archive limits
   остаются отдельными.
-- Production scheduler fail-closed без OS sandbox. Development override не
-  разрешается в production и не считается production-проверкой.
-- Для прямого локального запуска добавлен явный `runner_mode=local_trusted`.
-  Корневой `.env` загружается автоматически, старый boolean-флаг мигрирует в
-  новый режим, а production по-прежнему его запрещает. Локальный `.env` включает
-  режим для текущего узла и остаётся вне git.
+- Добавлен явный `deployment_profile`: безопасный default `isolated_worker`
+  сохраняет production fail-closed без OS sandbox, а `single_tenant` разрешает
+  прямой `local_trusted` runner в production на целиком арендованном одним
+  оператором VM/Pod с собственными доверенными сценами.
+- Для прямого запуска используется `runner_mode=local_trusted`. Корневой `.env`
+  загружается автоматически, старый boolean-флаг мигрирует в новый режим.
+  Production принимает его только вместе с `single_tenant`; локальный `.env`
+  остаётся вне git.
 - Корневой development launcher после миграций запускает backend, ожидает его
   публичный `/ready` до 60 секунд и только затем запускает frontend. При раннем
   завершении или неготовности backend frontend не запускается.
@@ -106,13 +108,20 @@
   и oversized client message кодом 1009.
 - `GET /api/v1/system/capabilities` возвращает `runner.available`, `mode` и
   пользовательское `message`; изменения схемы БД не потребовалось.
-- Новые настройки: `RENDER_NODE_AUTH_TOKEN`, `RENDER_NODE_MAX_API_REQUEST_MB`,
-  `RENDER_NODE_WEBSOCKET_MESSAGE_MAX_KB`, `RENDER_NODE_RUNNER_MODE`.
+- Настройки deployment boundary: `RENDER_NODE_DEPLOYMENT_PROFILE` принимает
+  `isolated_worker` или `single_tenant`; `RENDER_NODE_RUNNER_MODE=local_trusted`
+  в production валиден только со вторым профилем. Миграция БД не требуется.
+- Остальные security-настройки: `RENDER_NODE_AUTH_TOKEN`,
+  `RENDER_NODE_MAX_API_REQUEST_MB`, `RENDER_NODE_WEBSOCKET_MESSAGE_MAX_KB`.
 
 ## Последняя проверка
 
-- Backend: Ruff format/lint — успешно; strict mypy `app` — успешно;
-  все 129 pytest tests пройдены (одно upstream Starlette warning).
+- Backend: Ruff format/lint — успешно; strict mypy `app` — успешно. Целевые 23
+  pytest tests профиля/config/security пройдены. WebSocket limit-тест теперь
+  корректно пропускает уже поставленные в очередь metrics-события до close 1009.
+  Полный набор: 131 passed, одно upstream Starlette warning. Команда
+  `mypy app tests` дополнительно находит три ранее существовавшие ошибки
+  типизации в `tests/test_dev_script.py`; production-код `app` чистый.
   Покрыты auth/CORS/headers, REST+WS boundary, body/WS limits, production sandbox
   fail-closed, editable/locked job settings, безопасная замена upload, rerender с
   копией вложенного input, retry cleanup, missing scene, restart recovery,
@@ -167,11 +176,13 @@
 
 ## Известные ограничения и дальнейшая работа
 
-- Production worker image/namespace с network/filesystem/device isolation и
-  non-root runtime ещё не реализован; поэтому production rendering намеренно не
-  достигает readiness при включённом scheduler.
+- Production image/RunPod template и one-command installer ещё не реализованы.
+- Worker image/namespace с network/filesystem/device isolation и non-root
+  runtime ещё не реализован; поэтому shared production в профиле
+  `isolated_worker` не достигает readiness при включённом scheduler.
 - `local_trusted` запускает Blender subprocess напрямую и предназначен только для
-  доверенных сцен; он не является sandbox и запрещён при `ENV=production`.
+  доверенных сцен; он не является sandbox. В production он разрешён только для
+  явного `single_tenant`, где весь временный VM/Pod принадлежит одному оператору.
 - В контейнере нет production Blender image и GPU. Development CPU/Eevee для
   Blender 4.5.11 проверен через явный executable override; CUDA/OptiX, GPU
   isolation и bundled binaries не проверялись, их работа не заявляется.

@@ -11,10 +11,12 @@ uv run alembic upgrade head
 uv run uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000
 ```
 
-Set `RENDER_NODE_RUNNER_MODE=local_trusted` only for explicit local development
-with trusted `.blend`/ZIP files. Settings load from the repository-root `.env`.
-The production configuration fails closed while the deployment has no
-OS-isolated worker sandbox.
+Set `RENDER_NODE_RUNNER_MODE=local_trusted` only for trusted `.blend`/ZIP files.
+It is available in development and in an explicit production
+`RENDER_NODE_DEPLOYMENT_PROFILE=single_tenant`, where the entire rented VM or
+cloud Pod belongs to one operator. Production keeps the `isolated_worker`
+profile by default and fails closed there while no OS-isolated worker exists.
+Settings load from the repository-root `.env`.
 
 Production additionally requires a secret `RENDER_NODE_AUTH_TOKEN` with at least
 32 characters and exact HTTPS `RENDER_NODE_ALLOWED_ORIGINS`. `/health` and

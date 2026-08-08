@@ -23,6 +23,13 @@ class RunnerMode(StrEnum):
     LOCAL_TRUSTED = "local_trusted"
 
 
+class DeploymentProfile(StrEnum):
+    """Trust boundary selected by the operator for render execution."""
+
+    ISOLATED_WORKER = "isolated_worker"
+    SINGLE_TENANT = "single_tenant"
+
+
 class Settings(BaseSettings):
     """Validated settings loaded from ``RENDER_NODE_*`` environment variables."""
 
@@ -53,6 +60,7 @@ class Settings(BaseSettings):
     blender_catalog_ttl_seconds: int = Field(default=3600, ge=60, le=86_400)
     blender_download_timeout_seconds: int = Field(default=3600, ge=30, le=86_400)
     render_scheduler_enabled: bool = True
+    deployment_profile: DeploymentProfile = DeploymentProfile.ISOLATED_WORKER
     runner_mode: RunnerMode = RunnerMode.DISABLED
     # Kept as a fail-closed migration path for existing local installations.
     allow_unsandboxed_runner: bool = False
@@ -139,8 +147,15 @@ class Settings(BaseSettings):
                 raise ValueError("blender_executable_override is forbidden in production")
         if self.allow_unsandboxed_runner and self.runner_mode is RunnerMode.DISABLED:
             self.runner_mode = RunnerMode.LOCAL_TRUSTED
-        if self.env is Environment.PRODUCTION and self.runner_mode is RunnerMode.LOCAL_TRUSTED:
-            raise ValueError("local_trusted runner_mode is forbidden in production")
+        if (
+            self.env is Environment.PRODUCTION
+            and self.runner_mode is RunnerMode.LOCAL_TRUSTED
+            and self.deployment_profile is not DeploymentProfile.SINGLE_TENANT
+        ):
+            raise ValueError(
+                "local_trusted runner_mode in production requires the explicit "
+                "single_tenant deployment_profile"
+            )
         return self
 
     @property

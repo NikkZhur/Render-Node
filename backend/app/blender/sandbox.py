@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from app.config import Environment, RunnerMode
+from app.config import DeploymentProfile, Environment, RunnerMode
 from app.jobs.types import ComputeDevice
 from app.storage.jobs import contained_path
 
@@ -15,8 +15,15 @@ class SandboxUnavailableError(RuntimeError):
 
 
 class SandboxPolicy:
-    def __init__(self, *, environment: Environment, runner_mode: RunnerMode) -> None:
+    def __init__(
+        self,
+        *,
+        environment: Environment,
+        deployment_profile: DeploymentProfile,
+        runner_mode: RunnerMode,
+    ) -> None:
         self._environment = environment
+        self._deployment_profile = deployment_profile
         self._runner_mode = runner_mode
 
     @property
@@ -25,9 +32,14 @@ class SandboxPolicy:
 
     @property
     def local_runner_allowed(self) -> bool:
-        return self._environment is Environment.TEST or (
+        if self._environment is Environment.TEST:
+            return True
+        return self._runner_mode is RunnerMode.LOCAL_TRUSTED and (
             self._environment is Environment.DEVELOPMENT
-            and self._runner_mode is RunnerMode.LOCAL_TRUSTED
+            or (
+                self._environment is Environment.PRODUCTION
+                and self._deployment_profile is DeploymentProfile.SINGLE_TENANT
+            )
         )
 
     @property
@@ -35,13 +47,20 @@ class SandboxPolicy:
         if self.local_runner_allowed:
             return None
         if self._environment is Environment.PRODUCTION:
-            return "Production render sandbox is unavailable on this node"
+            if self._deployment_profile is DeploymentProfile.SINGLE_TENANT:
+                return "Single-tenant runner is disabled in configuration"
+            return "Production isolated worker is unavailable on this node"
         return "Local trusted runner is disabled in configuration"
 
     def ensure_startup_ready(self, *, scheduler_enabled: bool) -> None:
-        if scheduler_enabled and self._environment is Environment.PRODUCTION:
+        if (
+            scheduler_enabled
+            and self._environment is Environment.PRODUCTION
+            and not self.local_runner_allowed
+        ):
             raise SandboxUnavailableError(
-                "Production render sandbox is unavailable; local subprocess fallback is forbidden"
+                "Production isolated worker is unavailable; direct rendering requires the "
+                "explicit single_tenant deployment profile and local_trusted runner mode"
             )
 
     def ensure_local_runner_allowed(self) -> None:

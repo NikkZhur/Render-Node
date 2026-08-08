@@ -137,9 +137,9 @@ class SandboxRunner:
     def _child_limits(self) -> None:
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
-        # RLIMIT_NPROC is per real UID, so it cannot safely isolate a process in the
-        # shared-user development runner. The production sandbox must enforce this
-        # limit through its own cgroup/PID namespace before it may be enabled.
+        # RLIMIT_NPROC is per real UID, so it cannot safely isolate one render from
+        # other processes on the node. A future shared-service worker must enforce
+        # this limit through its own cgroup/PID namespace.
         resource.setrlimit(
             resource.RLIMIT_AS,
             (self._limits.memory_bytes, self._limits.memory_bytes),

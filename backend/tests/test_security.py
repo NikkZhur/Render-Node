@@ -10,7 +10,7 @@ from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from app.blender.sandbox import SandboxUnavailableError
-from app.config import Environment, Settings
+from app.config import DeploymentProfile, Environment, RunnerMode, Settings
 from app.main import create_app
 
 AUTH_TOKEN = "x" * 32
@@ -142,7 +142,10 @@ def test_websocket_uses_auth_origin_and_message_limits(job_settings: Settings) -
             assert websocket.receive_json()["type"] == "connection.ready"
             websocket.send_text("x" * 1025)
             with pytest.raises(WebSocketDisconnect) as oversized:
-                websocket.receive_json()
+                # Metrics may already be queued before the server processes the
+                # oversized client message, so consume events until the close.
+                while True:
+                    websocket.receive_json()
             assert oversized.value.code == 1009
 
 
@@ -166,9 +169,26 @@ async def test_production_scheduler_fails_closed_without_worker_sandbox(
 ) -> None:
     app: FastAPI = create_app(production_settings(job_settings, render_scheduler_enabled=True))
 
-    with pytest.raises(SandboxUnavailableError, match="sandbox is unavailable"):
+    with pytest.raises(SandboxUnavailableError, match="isolated worker is unavailable"):
         async with app.router.lifespan_context(app):
             pass
+
+
+async def test_single_tenant_production_can_start_direct_runner(
+    job_settings: Settings,
+) -> None:
+    app = create_app(
+        production_settings(
+            job_settings,
+            deployment_profile=DeploymentProfile.SINGLE_TENANT,
+            runner_mode=RunnerMode.LOCAL_TRUSTED,
+            render_scheduler_enabled=True,
+        )
+    )
+
+    async with app.router.lifespan_context(app):
+        assert app.state.ready is True
+        assert app.state.job_manager.runner_available is True
 
 
 async def test_general_mutation_body_limit_is_enforced(job_settings: Settings) -> None:

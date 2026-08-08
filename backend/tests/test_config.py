@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from app.config import Environment, RunnerMode, Settings
+from app.config import DeploymentProfile, Environment, RunnerMode, Settings
 
 
 def test_database_url_follows_workspace(tmp_path: Path) -> None:
@@ -52,11 +52,24 @@ def test_legacy_unsandboxed_flag_maps_to_explicit_local_trusted_mode() -> None:
     assert settings.runner_mode is RunnerMode.LOCAL_TRUSTED
 
 
-def test_local_trusted_runner_is_forbidden_in_production() -> None:
-    with pytest.raises(ValidationError, match="local_trusted"):
+def test_local_trusted_runner_requires_single_tenant_profile_in_production() -> None:
+    with pytest.raises(ValidationError, match="single_tenant"):
         Settings(
             env=Environment.PRODUCTION,
             runner_mode=RunnerMode.LOCAL_TRUSTED,
             auth_token="x" * 32,
             allowed_origins=["https://render.example.com"],
         )
+
+
+def test_single_tenant_profile_allows_local_runner_in_production() -> None:
+    settings = Settings(
+        env=Environment.PRODUCTION,
+        deployment_profile=DeploymentProfile.SINGLE_TENANT,
+        runner_mode=RunnerMode.LOCAL_TRUSTED,
+        auth_token="x" * 32,
+        allowed_origins=["https://render.example.com"],
+    )
+
+    assert settings.deployment_profile is DeploymentProfile.SINGLE_TENANT
+    assert settings.runner_mode is RunnerMode.LOCAL_TRUSTED

@@ -4,10 +4,11 @@ A single-node service for remote Blender rendering through a web browser. Users
 upload a scene, choose a Blender version and compute resources, start a render,
 and monitor jobs, logs, frames, and hardware status.
 
-The project focuses on a secure and verifiable MVP without premature
-infrastructure complexity. The first goal is a reliable render node running on
-one machine, while keeping the public API suitable for moving the worker to a
-separate node later.
+The primary deployment is a temporary single-tenant GPU server or cloud Pod:
+its owner starts Render Node from a prepared image, renders their own scenes,
+downloads the results, and can then delete the whole node. The project keeps the
+public API suitable for a separately isolated worker if a shared render service
+is needed later.
 
 > [!IMPORTANT]
 > The repository now contains the persistent Job API, safe scene uploads, the
@@ -134,8 +135,9 @@ uv run uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000
 Local Blender execution is intentionally disabled by default. For an isolated
 development machine that receives only trusted scenes, set
 `RENDER_NODE_RUNNER_MODE=local_trusted` in the repository-root `.env`.
-Production refuses to enable rendering until an OS-isolated worker sandbox is
-available; the development fallback is never accepted there.
+An authenticated production node dedicated to one operator may use the explicit
+`single_tenant` deployment profile described below. A shared service that accepts
+scenes from unrelated users still requires a separate OS-isolated worker.
 
 Open [http://localhost:8000/health](http://localhost:8000/health) for liveness,
 [http://localhost:8000/ready](http://localhost:8000/ready) for SQLite readiness,
@@ -159,12 +161,31 @@ WebSocket upgrades, and keep port 8000 private. The proxy-facing browser origin
 must be in `RENDER_NODE_ALLOWED_ORIGINS`. Do not expose the backend token to
 JavaScript or place it in a `VITE_*` variable.
 
-Production rendering remains deliberately fail-closed: this repository does not
-yet ship the required OS-isolated worker image/namespace, so enabling the render
-scheduler in production prevents application readiness. The development
-container is non-root for normal commands, but it is not a production image and
-does not prove the required network, filesystem, device, capability, or secret
-isolation.
+Render Node has two explicit trust profiles:
+
+- `isolated_worker` is the default. Production rendering fails closed until a
+  separate OS-isolated worker is available. Use it for a shared service that
+  accepts scenes from unrelated users.
+- `single_tenant` treats the entire rented VM or cloud Pod as the isolation
+  boundary. It permits direct Blender execution in production only together
+  with `RENDER_NODE_RUNNER_MODE=local_trusted`. The node must belong to one
+  operator and accept only that operator's scenes.
+
+An authenticated temporary RunPod-style node therefore uses:
+
+```dotenv
+RENDER_NODE_ENV=production
+RENDER_NODE_DEPLOYMENT_PROFILE=single_tenant
+RENDER_NODE_RUNNER_MODE=local_trusted
+RENDER_NODE_AUTH_TOKEN=<unique-secret-with-at-least-32-characters>
+RENDER_NODE_ALLOWED_ORIGINS=https://<public-panel-origin>
+```
+
+The single-tenant profile does not sandbox Blender away from the backend inside
+the node. It is not suitable for a public render farm or any deployment where
+unrelated users can submit files. Automatic Python remains disabled, subprocess
+environment and paths remain constrained, and resource/time/output limits still
+apply.
 
 ## Limits, Cleanup, and Backup
 
@@ -287,7 +308,9 @@ client.
 
 ## Remaining Deployment Work
 
-- add the OS-isolated, non-root production worker boundary;
+- publish a versioned single-tenant image and cloud Pod template;
+- add a one-command installer for ordinary rented Ubuntu GPU servers;
+- add the OS-isolated, non-root worker boundary before accepting third-party scenes;
 - validate CUDA/OptiX and process isolation in a cloud GPU environment;
 - add resumable uploads if deployment networks require them;
 - add an operator-selected retention policy instead of deleting user results by
