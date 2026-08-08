@@ -5,7 +5,8 @@
 
 ## Текущее состояние
 
-- Обновлено: 2026-08-07 после добавления single-tenant deployment profile.
+- Обновлено: 2026-08-08 после перехода native deployment на проверяемый GitHub
+  Release bundle с repair/update/rollback.
 - Фазы 1–6 из `BACKEND_IMPLEMENTATION_MASTER_PROMPT.md` завершены.
 - Следующей фазы в master prompt нет; дальнейшая работа — отдельные deployment
   задачи, перечисленные ниже.
@@ -60,6 +61,32 @@
   загружается автоматически, старый boolean-флаг мигрирует в новый режим.
   Production принимает его только вместе с `single_tenant`; локальный `.env`
   остаётся вне git.
+- Добавлен production `linux/amd64` image: он потребляет тот же собранный Release
+  bundle, скачивает Blender 5.2.0/4.1.1 только из официального архива и проверяет
+  закреплённые SHA-256. Короткий entrypoint готовит volume и credentials, затем
+  единый supervisor запускает долгоживущие процессы как UID 10001.
+- Внутренний Nginx обслуживает SPA на 8080, требует Basic Auth и заменяет
+  browser credential на закрытый Bearer для REST/WebSocket/download. Backend
+  слушает только loopback; RunPod platform proxy завершает HTTPS.
+- Основной `install.sh` поддерживает только Ubuntu 22.04/24.04 x86_64 GPU Pod.
+  Он всегда скачивает latest stable Release bundle и `.sha256` либо explicit
+  `vX.Y.Z`, безопасно проверяет tar paths/links, создаёт frozen per-release
+  Python 3.13.7 `.venv` и не устанавливает Node.js/Docker/systemd. RunPod origin
+  определяется по `RUNPOD_POD_ID`.
+- `/opt/render-node/current` переключается атомарно только после полной подготовки
+  release; failed readiness восстанавливает предыдущий release. No-op, repair
+  после потери `/opt`, credentials/jobs persistence и смена Pod origin покрыты
+  fake-command harness.
+- `render-node` управляет process group без systemd. PID хранится только в
+  `/run/render-node`; identity проверяет start time и ожидаемый supervisor
+  command, поэтому stale/reused/foreign PID не принимается. Uninstall сохраняет
+  database, jobs и дополнительные Blender runtimes.
+- Dockerfile/GHCR image сохранены как отдельный альтернативный путь: RunPod сам
+  запускает готовый image, Docker daemon внутри Pod не требуется.
+- GitHub Actions сначала выполняет backend Ruff/strict mypy/full pytest и
+  frontend lint/build. Один gated publish job создаёт bundle + checksum и
+  non-draft/non-prerelease Release только для stable semver tag, затем публикует
+  versioned GHCR image; `master` публикует только `latest`/SHA image.
 - Корневой development launcher после миграций запускает backend, ожидает его
   публичный `/ready` до 60 секунд и только затем запускает frontend. При раннем
   завершении или неготовности backend frontend не запускается.
@@ -113,14 +140,19 @@
   в production валиден только со вторым профилем. Миграция БД не требуется.
 - Остальные security-настройки: `RENDER_NODE_AUTH_TOKEN`,
   `RENDER_NODE_MAX_API_REQUEST_MB`, `RENDER_NODE_WEBSOCKET_MESSAGE_MAX_KB`.
+- Deployment contract не меняет REST API или БД. Для прямого image остаются
+  container-only границы: `RENDER_NODE_ADMIN_HTPASSWD_B64` либо
+  `RENDER_NODE_ADMIN_USERNAME` + `RENDER_NODE_ADMIN_PASSWORD` для прямого image;
+  plaintext password удаляется из environment до запуска backend.
 
 ## Последняя проверка
 
 - Backend: Ruff format/lint — успешно; strict mypy `app` — успешно. Целевые 23
   pytest tests профиля/config/security пройдены. WebSocket limit-тест теперь
   корректно пропускает уже поставленные в очередь metrics-события до close 1009.
-  Полный набор: 131 passed, одно upstream Starlette warning. Команда
-  `mypy app tests` дополнительно находит три ранее существовавшие ошибки
+  Финальный полный набор: 147 passed, 1 skipped (system Nginx отсутствует), одно
+  upstream Starlette warning. Ruff format/check и strict mypy `app` пройдены.
+  Команда `mypy app tests` дополнительно находит три ранее существовавшие ошибки
   типизации в `tests/test_dev_script.py`; production-код `app` чистый.
   Покрыты auth/CORS/headers, REST+WS boundary, body/WS limits, production sandbox
   fail-closed, editable/locked job settings, безопасная замена upload, rerender с
@@ -173,22 +205,35 @@
   reload — успешно. Fake Blender runner smoke: WebSocket log/progress, HTTP
   preview/original/ZIP, reload recovery, metrics и process-group cancellation —
   успешно.
+- Deployment: 16 пройденных behavioral tests используют только временные install/state/run
+  roots и fake external commands. Покрыты bundle manifest, latest/explicit URL,
+  checksum/tar safety, fresh/no-op/repair, persistence/origin, update/rollback,
+  partial cleanup, PID identity/process group, stdin password, clean child env,
+  envsubst и workflow checks gate. `bash -n` пройден; workflow проверен
+  `@action-validator/cli`. ShellCheck, system Nginx и Docker engine недоступны.
+  Frontend lint и production build пройдены. Реальные Pod/image/GPU smoke ниже
+  остаются внешними проверками.
 
 ## Известные ограничения и дальнейшая работа
 
-- Production image/RunPod template и one-command installer ещё не реализованы.
+- Нативный installer ещё не прогонялся целиком на реальном Ubuntu GPU Pod;
+  необходимо проверить apt/runtime libraries, обе bundled Blender версии,
+  RunPod HTTPS/WebSocket proxy и CUDA/OptiX до публикации команды пользователям.
+- GHCR workflow ещё не выполнялся для альтернативного image deployment; готовый
+  RunPod template ещё не создан.
 - Worker image/namespace с network/filesystem/device isolation и non-root
   runtime ещё не реализован; поэтому shared production в профиле
   `isolated_worker` не достигает readiness при включённом scheduler.
 - `local_trusted` запускает Blender subprocess напрямую и предназначен только для
   доверенных сцен; он не является sandbox. В production он разрешён только для
   явного `single_tenant`, где весь временный VM/Pod принадлежит одному оператору.
-- В контейнере нет production Blender image и GPU. Development CPU/Eevee для
-  Blender 4.5.11 проверен через явный executable override; CUDA/OptiX, GPU
-  isolation и bundled binaries не проверялись, их работа не заявляется.
-- Browser deployment с Bearer требует приватного backend за HTTPS reverse proxy,
-  который добавляет credential в HTTP и WebSocket upgrades. Токен нельзя
-  помещать в `VITE_*` или JavaScript.
+- Production image объявляет bundled Blender binaries, но локально не собирался.
+  Development CPU/Eevee для Blender 4.5.11 проверен ранее через executable
+  override; CUDA/OptiX и bundled 5.2.0/4.1.1 runtime smoke должны быть
+  проверены на реальном облачном GPU до заявления их работоспособности.
+- Для custom browser deployment вне поставляемого gateway backend также должен
+  оставаться приватным за HTTPS proxy, который подставляет Bearer в HTTP и
+  WebSocket upgrades. Токен нельзя помещать в `VITE_*` или JavaScript.
 - Resumable upload и автоматическая retention policy не реализованы. Cleanup
   explicit; оператор удаляет jobs и выполняет согласованный backup SQLite/jobs.
 - TestClient выдаёт upstream Starlette deprecation warning о будущем `httpx2`;

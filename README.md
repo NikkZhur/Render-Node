@@ -4,11 +4,11 @@ A single-node service for remote Blender rendering through a web browser. Users
 upload a scene, choose a Blender version and compute resources, start a render,
 and monitor jobs, logs, frames, and hardware status.
 
-The primary deployment is a temporary single-tenant GPU server or cloud Pod:
-its owner starts Render Node from a prepared image, renders their own scenes,
-downloads the results, and can then delete the whole node. The project keeps the
-public API suitable for a separately isolated worker if a shared render service
-is needed later.
+The primary deployment is a temporary single-tenant Ubuntu GPU Pod: its owner
+installs the latest verified stable Release bundle with one command, renders
+their own scenes, downloads the results, and deletes the node. A prepared GHCR
+image is an alternative. The public API remains suitable for a separately
+isolated worker if a shared render service is needed later.
 
 > [!IMPORTANT]
 > The repository now contains the persistent Job API, safe scene uploads, the
@@ -39,6 +39,8 @@ is needed later.
 - async SQLite persistence with SQLAlchemy and Alembic migrations;
 - public health/readiness probes, shared error responses, bounded request bodies,
   exact-origin CORS, and a production Bearer boundary for REST and WebSocket.
+- versioned production image with Blender 5.2.0 and 4.1.1;
+- interactive one-command installer and `render-node` management command.
 
 ## Target MVP
 
@@ -54,7 +56,7 @@ is needed later.
 - installation of additional versions only from the official Blender archive,
   with SHA-256 verification.
 
-The base image is planned to include Blender `5.2.0` and `4.1.1`. Other supported
+The production image includes Blender `5.2.0` and `4.1.1`. Other supported
 versions can be installed explicitly. Only one version can be active at a time,
 and it cannot be changed while a job is `QUEUED` or `RENDERING`. Additional
 inactive versions can be deleted from the runtime manager; bundled versions are
@@ -76,6 +78,50 @@ immutable.
 Redis, DragonflyDB, RabbitMQ, and PostgreSQL are intentionally excluded from the
 single-node MVP. They should be introduced only when horizontal scaling becomes
 a real requirement.
+
+## One-command installation
+
+Use this inside a fresh Ubuntu 22.04/24.04 x86_64 GPU Pod as root:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/NikkZhur/Render-Node/master/install.sh | bash
+```
+
+On RunPod the installer detects the public panel URL from `RUNPOD_POD_ID`.
+It checks the GPU, downloads the latest stable GitHub Release bundle and
+checksum, installs a pinned Python runtime and the verified Blender versions,
+then starts the already-built web interface as unprivileged Linux processes. It
+does not download Node.js, build frontend source, install Docker/Compose, or use
+systemd. Re-running the same command repairs or atomically updates the install;
+failed readiness rolls back to the previous release.
+
+Before running it:
+
+- choose Ubuntu 22.04 or 24.04 where `nvidia-smi` succeeds;
+- expose internal HTTP port `8080` in the Pod settings;
+- use a machine dedicated to one operator and their own trusted scenes.
+
+After installation:
+
+```bash
+render-node status
+render-node logs
+render-node credentials
+render-node restart
+render-node uninstall
+```
+
+`uninstall` preserves the database, scenes, results and downloaded Blender
+versions under `/workspace`. Exact paths, update/rollback behavior, explicit
+`--version`, and release publication are documented in
+[`deploy/README.md`](deploy/README.md).
+
+### RunPod and other managed Pods
+
+The command above is the main Ubuntu Pod flow: no nested Docker is used. As an
+alternative, a Pod template may directly start the published
+`ghcr.io/nikkzhur/render-node:latest` image. Both variants expose port
+`8080/http`, keep data in `/workspace`, and use the platform HTTPS proxy.
 
 ## Quick Start: Full Development Stack
 
@@ -308,8 +354,7 @@ client.
 
 ## Remaining Deployment Work
 
-- publish a versioned single-tenant image and cloud Pod template;
-- add a one-command installer for ordinary rented Ubuntu GPU servers;
+- publish the first GHCR image and create a ready-to-click RunPod template;
 - add the OS-isolated, non-root worker boundary before accepting third-party scenes;
 - validate CUDA/OptiX and process isolation in a cloud GPU environment;
 - add resumable uploads if deployment networks require them;

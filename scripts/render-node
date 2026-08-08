@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+if [[ "${RENDER_NODE_TEST_MODE:-}" == "1" ]]; then
+  INSTALL_ROOT="${RENDER_NODE_INSTALL_ROOT:?}"
+  STATE_ROOT="${RENDER_NODE_STATE_ROOT:?}"
+  RUNTIME_ROOT="${RENDER_NODE_RUNTIME_ROOT:?}"
+  MANAGEMENT_BIN="${RENDER_NODE_MANAGEMENT_BIN:-$0}"
+  APP_USER="${RENDER_NODE_APP_USER:-$(id -un)}"
+  SYSTEM_PATH="${RENDER_NODE_TEST_BIN:-}:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+else
+  INSTALL_ROOT="/opt/render-node"
+  STATE_ROOT="/workspace/.render-node"
+  RUNTIME_ROOT="/run/render-node"
+  MANAGEMENT_BIN="/usr/local/bin/render-node"
+  APP_USER="rendernode"
+  SYSTEM_PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+fi
+readonly INSTALL_ROOT STATE_ROOT RUNTIME_ROOT MANAGEMENT_BIN APP_USER SYSTEM_PATH
+readonly CONFIG_FILE="${STATE_ROOT}/render-node.env"
+readonly PID_FILE="${RUNTIME_ROOT}/service.pid"
+readonly SERVICE_LOG="${STATE_ROOT}/logs/service.log"
+readonly SUPERVISOR="${INSTALL_ROOT}/current/deploy/supervisor.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: render-node COMMAND
+
+Commands:
+  start        Start Render Node
+  stop         Stop Render Node and its process group
+  restart      Restart Render Node
+  status       Show process and readiness status
+  logs         Follow bounded service/error logs
+  credentials  Show the saved panel URL and credentials
+  uninstall    Remove the app; preserve database, jobs and extra Blender versions
+EOF
+}
+
+die() {
+  printf '[render-node] ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+if [[ "${1:-}" =~ ^(-h|--help|help)$ ]]; then
+  usage
+  exit 0
+fi
+
+if [[ "${RENDER_NODE_TEST_MODE:-}" != "1" && "$(id -u)" != "0" ]]; then
+  command -v sudo >/dev/null 2>&1 || die "This command requires root privileges."
+  exec sudo -- "$MANAGEMENT_BIN" "$@"
+fi
+
+process_start_time() {
+  local pid="$1"
+  awk '{print $22}' "/proc/${pid}/stat" 2>/dev/null
+}
+
+read_identity() {
+  SERVICE_PID=""
+  SERVICE_START=""
+  [[ -r "$PID_FILE" ]] || return 1
+  read -r SERVICE_PID SERVICE_START < "$PID_FILE" || return 1
+  [[ "$SERVICE_PID" =~ ^[0-9]+$ && "$SERVICE_START" =~ ^[0-9]+$ ]] || return 1
+}
+
+is_our_process() {
+  read_identity || return 1
+  [[ "$(process_start_time "$SERVICE_PID")" == "$SERVICE_START" ]] || return 1
+  local cmdline
+  cmdline="$(tr '\0' ' ' < "/proc/${SERVICE_PID}/cmdline" 2>/dev/null)" || return 1
+  [[ "$cmdline" == *"$SUPERVISOR"* && "$cmdline" == *"$CONFIG_FILE"* ]]
+}
+
+wait_for_exit() {
+  local pid="$1"
+  local attempts="${RENDER_NODE_STOP_ATTEMPTS:-300}"
+  for ((attempt = 0; attempt < attempts; attempt++)); do
+    [[ -d "/proc/${pid}" ]] || return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+wait_for_ready() {
+  local attempts="${RENDER_NODE_READY_ATTEMPTS:-120}"
+  for ((attempt = 0; attempt < attempts; attempt++)); do
+    is_our_process || return 1
+    PATH="$SYSTEM_PATH" curl --fail --silent http://127.0.0.1:8080/ready >/dev/null \
+      && return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+rotate_log() {
+  local path="$1"
+  [[ -f "$path" ]] || return 0
+  local size
+  size="$(wc -c < "$path")"
+  if ((size > 10485760)); then
+    mv -f -- "$path" "${path}.1"
+  fi
+}
+
+ensure_log_file() {
+  local path="$1"
+  [[ -e "$path" ]] || install -m 0640 -o "$APP_USER" -g "$APP_USER" /dev/null "$path"
+}
+
+start_service() {
+  [[ -r "$CONFIG_FILE" && -x "$SUPERVISOR" ]] || die "Render Node is not installed."
+  if is_our_process; then
+    printf '[render-node] Already running.\n'
+    return 0
+  fi
+  rm -f -- "$PID_FILE"
+  install -d -m 0750 -o "$APP_USER" -g "$APP_USER" "$RUNTIME_ROOT" "$STATE_ROOT/logs"
+  rotate_log "$SERVICE_LOG"
+  rotate_log "$STATE_ROOT/logs/nginx-error.log"
+  ensure_log_file "$SERVICE_LOG"
+  ensure_log_file "$STATE_ROOT/logs/nginx-error.log"
+
+  if [[ "${RENDER_NODE_TEST_MODE:-}" == "1" ]]; then
+    env -i PATH="$SYSTEM_PATH" HOME="$STATE_ROOT/home" LANG="${LANG:-C.UTF-8}" \
+      RENDER_NODE_TEST_MODE=1 RENDER_NODE_TEST_BIN="${RENDER_NODE_TEST_BIN:-}" \
+      setsid "$SUPERVISOR" "$CONFIG_FILE" >> "$SERVICE_LOG" 2>&1 &
+  else
+    setpriv --reuid="$APP_USER" --regid="$APP_USER" --init-groups \
+      --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
+      env -i PATH="$SYSTEM_PATH" HOME="$STATE_ROOT/home" LANG="${LANG:-C.UTF-8}" \
+      setsid "$SUPERVISOR" "$CONFIG_FILE" >> "$SERVICE_LOG" 2>&1 &
+  fi
+  local pid=$!
+  local start=""
+  for _ in {1..50}; do
+    start="$(process_start_time "$pid")"
+    [[ -n "$start" ]] && break
+    sleep 0.02
+  done
+  [[ -n "$start" ]] || die "Cannot record supervisor identity."
+  printf '%s %s\n' "$pid" "$start" > "$PID_FILE"
+  chmod 0644 "$PID_FILE"
+  if ! wait_for_ready; then
+    tail -n 100 "$SERVICE_LOG" >&2 2>/dev/null || true
+    stop_service true || true
+    die "Application did not become ready; inspect ${SERVICE_LOG}."
+  fi
+  printf '[render-node] Running on internal HTTP port 8080.\n'
+}
+
+stop_service() {
+  local quiet="${1:-false}"
+  if ! is_our_process; then
+    rm -f -- "$PID_FILE"
+    [[ "$quiet" == true ]] || printf '[render-node] Already stopped.\n'
+    return 0
+  fi
+  local pid="$SERVICE_PID"
+  kill -TERM -- "-${pid}" 2>/dev/null || true
+  if ! wait_for_exit "$pid"; then
+    kill -KILL -- "-${pid}" 2>/dev/null || true
+    wait_for_exit "$pid" || true
+  fi
+  rm -f -- "$PID_FILE"
+  [[ "$quiet" == true ]] || printf '[render-node] Stopped.\n'
+}
+
+command_name="${1:-}"
+[[ -n "$command_name" ]] || { usage; exit 1; }
+shift
+
+case "$command_name" in
+  start) [[ $# -eq 0 ]] || die "start takes no options"; start_service ;;
+  stop) [[ $# -eq 0 ]] || die "stop takes no options"; stop_service ;;
+  restart)
+    [[ $# -eq 0 ]] || die "restart takes no options"
+    stop_service true
+    start_service
+    ;;
+  status)
+    [[ $# -eq 0 ]] || die "status takes no options"
+    if is_our_process; then
+      if PATH="$SYSTEM_PATH" curl --fail --silent http://127.0.0.1:8080/ready >/dev/null; then
+        printf '[render-node] Running and ready (PID %s).\n' "$SERVICE_PID"
+      else
+        printf '[render-node] Running but not ready (PID %s).\n' "$SERVICE_PID"
+        exit 1
+      fi
+    else
+      rm -f -- "$PID_FILE"
+      printf '[render-node] Stopped.\n'
+      exit 1
+    fi
+    ;;
+  logs)
+    [[ $# -eq 0 ]] || die "logs takes no options"
+    install -d -m 0750 -o "$APP_USER" -g "$APP_USER" "$STATE_ROOT/logs"
+    ensure_log_file "$SERVICE_LOG"
+    ensure_log_file "$STATE_ROOT/logs/nginx-error.log"
+    tail -n 200 -F "$SERVICE_LOG" "$STATE_ROOT/logs/nginx-error.log"
+    ;;
+  credentials)
+    [[ $# -eq 0 ]] || die "credentials takes no options"
+    [[ -r "$STATE_ROOT/credentials" ]] || die "Credentials are unavailable."
+    cat "$STATE_ROOT/credentials"
+    ;;
+  uninstall)
+    [[ $# -eq 0 ]] || die "uninstall takes no options"
+    stop_service true
+    rm -rf -- "$INSTALL_ROOT" "$STATE_ROOT" "$RUNTIME_ROOT"
+    rm -f -- "$MANAGEMENT_BIN"
+    printf '[render-node] Application removed; database, jobs and extra Blender runtimes were preserved.\n'
+    ;;
+  *) die "Unknown command: $command_name" ;;
+esac

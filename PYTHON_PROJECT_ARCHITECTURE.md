@@ -89,6 +89,21 @@ FastAPI backend
 Frontend собирается Vite и в production обслуживается FastAPI либо отдельным
 reverse proxy. В development Vite работает на `5173`, FastAPI — на `8000`.
 
+Основной one-command flow для Ubuntu Pod скачивает проверенный bundle последнего
+стабильного GitHub Release. Frontend уже собран; Node.js и исходники frontend на
+GPU Pod не нужны. Backend и внутренний Nginx запускаются нативными процессами без
+Docker и systemd. Nginx слушает `8080`, требует Basic Auth и подставляет закрытый
+Bearer token для REST, WebSocket и artifacts; platform proxy завершает HTTPS.
+Все долгоживущие процессы работают как UID 10001, backend port `8000` остаётся
+loopback-only.
+
+Повторный запуск той же команды выполняет install, repair или update. Новый
+release и его per-release `.venv` полностью готовятся отдельно, затем symlink
+`/opt/render-node/current` меняется атомарно. Failed readiness возвращает
+предыдущий symlink и процесс. Сохраняются active и один previous release.
+Dockerfile используется только для альтернативного готового GHCR image, который
+RunPod запускает напрямую без Docker daemon внутри Pod.
+
 ## 6. Структура репозитория
 
 ```text
@@ -154,15 +169,40 @@ render-node/
 |   |-- public/
 |   |-- package.json
 |   `-- vite.config.js
-|-- blender_scripts/
-|   |-- configure_cycles_4_1.py
-|   `-- report_scene.py
-|-- docker/
-|   `-- entrypoint.sh
+|-- deploy/
+|   |-- nginx.conf.template
+|   |-- container-entrypoint.sh
+|   |-- supervisor.sh
+|   `-- README.md
+|-- scripts/
+|   |-- build-release-bundle.sh
+|   |-- dev.py
+|   `-- render-node
+|-- .github/workflows/release.yml
 |-- Dockerfile
-|-- compose.yaml
+|-- install.sh
 `-- README.md
 ```
+
+Production layout не зависит от checkout репозитория:
+
+```text
+/opt/render-node/releases/<version>  immutable release и per-release .venv
+/opt/render-node/current             symlink на active release
+/opt/render-node/blender/<version>   bundled Blender 5.2.0/4.1.1
+/workspace/.render-node              persistent config, credentials, logs
+/workspace/database                  SQLite
+/workspace/jobs                      scenes и результаты
+/workspace/blender                   дополнительные Blender runtimes
+/run/render-node                     PID и непостоянные gateway-файлы
+```
+
+Bundle создаётся локально запускаемым скриптом из явного manifest: backend
+`app`, migrations, Alembic/pyproject/lock, готовый `frontend/dist`, единый Nginx
+template, supervisor и management command. Frontend source, tests, `.venv`,
+`node_modules`, caches, Blender binaries, uploads и secrets в bundle отсутствуют.
+Stable tag `vX.Y.Z` публикуется только после backend/frontend checks; `master`
+может публиковать только `latest`/SHA GHCR image после тех же checks.
 
 ### 6.1 Frontend architecture
 
