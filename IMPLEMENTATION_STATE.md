@@ -5,8 +5,8 @@
 
 ## Текущее состояние
 
-- Обновлено: 2026-08-08 после перехода native deployment на проверяемый GitHub
-  Release bundle с repair/update/rollback.
+- Обновлено: 2026-08-17 после fail-closed reconciliation Blender runtimes и
+  frontend empty-state без активной версии.
 - Фазы 1–6 из `BACKEND_IMPLEMENTATION_MASTER_PROMPT.md` завершены.
 - Следующей фазы в master prompt нет; дальнейшая работа — отдельные deployment
   задачи, перечисленные ниже.
@@ -16,10 +16,16 @@
 
 - Фазы 1–5: FastAPI/SQLite/Alembic, безопасные jobs/uploads, Blender registry,
   `SandboxRunner`, FIFO Job Manager, realtime, artifacts/previews и metrics.
-- Bundled manifest сокращён до Blender 5.2.0 и 4.1.1; 5.2.0 активен по
-  умолчанию. При обновлении registry удаляет устаревшие bundled-записи, которых
-  больше нет в образе. Адаптеры 4.5.11, 4.2.22 и 3.6.23 сохранены для явной
+- Bundled manifest допускает Blender 5.2.0 и 4.1.1, но backend регистрирует
+  версию только после запуска реального executable и точного сравнения
+  patch-версии. Пустой registry не мешает readiness, а версия не активируется
+  автоматически. Адаптеры 4.5.11, 4.2.22 и 3.6.23 сохранены для явной
   пользовательской установки этих версий.
+- Startup проверяет также все official/manual runtimes в состоянии `INSTALLED`.
+  Повреждённая или исчезнувшая версия получает `FAILED`, теряет `active` и
+  очищается с диска; пригодный verified archive сохраняется для повторного
+  Install. Collision с найденной bundled-версией нормализует source и metadata,
+  не оставляя бесхозный archive. Другой runtime автоматически не активируется.
 - Runtime manager позволяет после подтверждения удалить скачанную или
   установленную дополнительную версию вместе с архивом. Bundled и активная
   версии остаются защищены; frontend синхронно обновляет versions/catalog cache.
@@ -100,6 +106,13 @@
 - Frontend mock API загружается только по `VITE_RENDER_NODE_MOCK=true`; mock
   fixtures/chunk отсутствуют в production bundle. Vite proxy умеет server-side
   Bearer injection для HTTP и WebSocket без передачи секрета в browser bundle.
+  Proxy сохраняет настоящий browser Origin; внешний dev/preview origin должен
+  быть точно перечислен в `RENDER_NODE_ALLOWED_ORIGINS`.
+- В real API mode frontend не подставляет фиктивную Blender 5.2.0. При пустом
+  registry Header и Job Setup показывают `No active Blender version`, manager
+  ведёт через `Download → Install → Activate`, а create/upload/start/rerender
+  заблокированы. Исторические jobs и artifacts остаются доступны для просмотра;
+  после activate Query cache обновляет UI без reload.
 - README и env examples описывают auth/reverse proxy, limits, cleanup, backup и
   остаточные production-риски.
 - Финальный аудит усилил official catalog: HTML/manifest читаются потоково с
@@ -147,18 +160,15 @@
 
 ## Последняя проверка
 
-- Backend: Ruff format/lint — успешно; strict mypy `app` — успешно. Целевые 23
-  pytest tests профиля/config/security пройдены. WebSocket limit-тест теперь
-  корректно пропускает уже поставленные в очередь metrics-события до close 1009.
-  Финальный полный набор: 147 passed, 1 skipped (system Nginx отсутствует), одно
-  upstream Starlette warning. Ruff format/check и strict mypy `app` пройдены.
-  Команда `mypy app tests` дополнительно находит три ранее существовавшие ошибки
-  типизации в `tests/test_dev_script.py`; production-код `app` чистый.
-  Покрыты auth/CORS/headers, REST+WS boundary, body/WS limits, production sandbox
-  fail-closed, editable/locked job settings, безопасная замена upload, rerender с
-  копией вложенного input, retry cleanup, missing scene, restart recovery,
-  адаптеры Blender, bounded streaming official catalog, clean
-  install-validation env, CPU-time limit и migration bootstrap нового workspace.
+- Backend: Ruff format/check и strict mypy `app` — успешно. Полный pytest:
+  167 passed, 1 skipped из-за отсутствующих system `nginx/envsubst`, одно
+  upstream Starlette warning. Новые тесты покрывают empty registry/readiness,
+  точную patch-версию, missing/permission/exec-format/nonzero/malformed/timeout/
+  cancellation executable, process-group cleanup, bundled и official/manual
+  reconciliation, invalid active, reusable archive, bundled collision и явный
+  API workflow download/install/activate перед созданием job. Origin boundary
+  повторно проверена для REST и WebSocket, включая недоверенный Origin с
+  доверенно выглядящими forwarded headers.
 - Реальный development CPU smoke: официальный Blender 4.5.11 LTS с проверенным
   SHA-256 успешно отрендерил кадр 1 `Untitled.blend` в Eevee через публичный Job
   API; job `COMPLETED`, progress `1.0`, exit code `0`. Original 600×900 PNG,
@@ -168,6 +178,16 @@
   повторный upgrade — успешно; head `20260730_0004`, schema diff отсутствует.
 - Frontend: ESLint, production Vite build и explicit mock build — успешно.
   Production bundle проверен на отсутствие mock chunk и fixture markers.
+- Целевой Playwright `qa:versions-empty`: пустой real-mode registry, сохранение
+  просмотра исторических jobs/artifacts, блокировка upload/start/rerender,
+  `Download → Install → Activate` без reload и последующая разблокировка —
+  успешно. Desktop/mobile screenshots просмотрены; найденный тестом mobile
+  header overflow исправлен, повторная проверка границ прошла. Регрессионный
+  `qa:versions` для bundled/mock manager также успешно пройден.
+- Реальный `make dev` после изменений запустил backend и frontend: `/ready`
+  вернул `200`, а `GET /api/v1/blender/versions` — пустой список. Внешний
+  forwarded browser origin намеренно не принимается без его точного добавления
+  в `RENDER_NODE_ALLOWED_ORIGINS`; localhost/127.0.0.1 остаются разрешены.
 - Целевой Playwright `qa:capabilities`: available/unavailable/API-error состояния,
   блокировка Start и desktop/mobile viewport fit — успешно; screenshots
   просмотрены. Появление job error отдельно проверено обычным кликом: высота
@@ -227,9 +247,11 @@
 - `local_trusted` запускает Blender subprocess напрямую и предназначен только для
   доверенных сцен; он не является sandbox. В production он разрешён только для
   явного `single_tenant`, где весь временный VM/Pod принадлежит одному оператору.
-- Production image объявляет bundled Blender binaries, но локально не собирался.
-  Development CPU/Eevee для Blender 4.5.11 проверен ранее через executable
-  override; CUDA/OptiX и bundled 5.2.0/4.1.1 runtime smoke должны быть
+- Production image может содержать bundled Blender binaries, но локально не
+  собирался. Development CPU/Eevee для Blender 4.5.11 проверялся ранее; глобальный
+  executable override удалён, поэтому повторная проверка должна использовать
+  обычный UI workflow и реальный version-specific runtime. CUDA/OptiX и bundled
+  5.2.0/4.1.1 runtime smoke должны быть
   проверены на реальном облачном GPU до заявления их работоспособности.
 - Для custom browser deployment вне поставляемого gateway backend также должен
   оставаться приватным за HTTPS proxy, который подставляет Bearer в HTTP и

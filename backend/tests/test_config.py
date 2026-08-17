@@ -12,6 +12,14 @@ def test_database_url_follows_workspace(tmp_path: Path) -> None:
     assert settings.database_path == tmp_path / "database" / "render-node.sqlite3"
 
 
+def test_bundled_blender_root_is_configurable(tmp_path: Path) -> None:
+    bundled_root = tmp_path / "bundled"
+
+    settings = Settings(env=Environment.TEST, bundled_blender_root=bundled_root)
+
+    assert settings.bundled_blender_root == bundled_root.resolve()
+
+
 def test_allowed_origins_accept_comma_separated_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

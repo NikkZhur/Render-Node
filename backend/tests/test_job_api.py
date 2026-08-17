@@ -158,7 +158,10 @@ async def test_jobs_survive_application_restart(job_settings: Settings) -> None:
     async with first_app.router.lifespan_context(first_app):
         first_transport = ASGITransport(app=first_app)
         async with AsyncClient(transport=first_transport, base_url="http://test") as client:
+            activated = await client.post("/api/v1/blender/versions/5.2.0/activate")
+            assert activated.status_code == 200
             response = await client.post("/api/v1/jobs", json=job_payload("Persistent scene"))
+            assert response.status_code == 201
             job_id = response.json()["id"]
             job_root = job_settings.jobs_root / job_id
             await asyncio.to_thread((job_root / "temp" / "upload.part").write_bytes, b"partial")
@@ -204,7 +207,10 @@ async def test_disabled_runner_rejects_start_without_changing_ready_job(
     async with app.router.lifespan_context(app):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
+            activated = await client.post("/api/v1/blender/versions/5.2.0/activate")
+            assert activated.status_code == 200
             created = await client.post("/api/v1/jobs", json=job_payload())
+            assert created.status_code == 201
             job_id = created.json()["id"]
             uploaded = await client.post(
                 f"/api/v1/jobs/{job_id}/uploads",

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import FastAPI
 
@@ -101,9 +100,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         database,
         runner,
         BlenderExecutableResolver(
-            bundled_root=Path("/opt/render-node/blender"),
+            bundled_root=settings.bundled_blender_root,
             installed_root=settings.blender_versions_root,
-            override=settings.blender_executable_override,
         ),
         gpu_discovery,
         artifact_service,
@@ -127,6 +125,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             download_timeout_seconds=settings.blender_download_timeout_seconds,
         ),
         event_hub,
+        bundled_root=settings.bundled_blender_root,
     )
     app.state.blender_service = blender_service
     system_metrics_service = SystemMetricsService(

@@ -203,6 +203,7 @@ const logLines = [
 ];
 
 export const mockApi = {
+  activeVersion: "5.2.0",
   frameCount,
   initialJobs,
   logLines,

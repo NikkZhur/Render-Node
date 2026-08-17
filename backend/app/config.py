@@ -62,9 +62,9 @@ class Settings(BaseSettings):
     render_scheduler_enabled: bool = True
     deployment_profile: DeploymentProfile = DeploymentProfile.ISOLATED_WORKER
     runner_mode: RunnerMode = RunnerMode.DISABLED
+    bundled_blender_root: Path = Path("/opt/render-node/blender")
     # Kept as a fail-closed migration path for existing local installations.
     allow_unsandboxed_runner: bool = False
-    blender_executable_override: Path | None = None
     render_timeout_seconds: int = Field(default=21_600, ge=1, le=604_800)
     render_terminate_grace_seconds: float = Field(default=5, ge=0.1, le=60)
     render_scheduler_poll_seconds: float = Field(default=0.5, ge=0.05, le=30)
@@ -109,6 +109,7 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_runtime_settings(self) -> Self:
         self.workspace = self.workspace.expanduser().resolve()
+        self.bundled_blender_root = self.bundled_blender_root.expanduser().resolve()
         if not self.database_url:
             database_path = self.workspace / "database" / "render-node.sqlite3"
             self.database_url = f"sqlite+aiosqlite:///{database_path}"
@@ -139,12 +140,6 @@ class Settings(BaseSettings):
             raise ValueError("auth_token must contain at least 32 characters")
         if self.env is Environment.PRODUCTION and self.auth_token is None:
             raise ValueError("auth_token is required in production")
-        if self.blender_executable_override is not None:
-            self.blender_executable_override = (
-                self.blender_executable_override.expanduser().resolve()
-            )
-            if self.env is Environment.PRODUCTION:
-                raise ValueError("blender_executable_override is forbidden in production")
         if self.allow_unsandboxed_runner and self.runner_mode is RunnerMode.DISABLED:
             self.runner_mode = RunnerMode.LOCAL_TRUSTED
         if (

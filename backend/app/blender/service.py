@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Coroutine
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,6 @@ from app.blender.state_machine import transition_operation, transition_runtime
 from app.blender.storage import BlenderStorage
 from app.blender.types import (
     BUNDLED_VERSIONS,
-    DEFAULT_ACTIVE_VERSION,
     SUPPORTED_VERSIONS,
     OperationKind,
     OperationState,
@@ -35,8 +35,6 @@ from app.jobs.models import utc_now
 from app.jobs.repository import JobRepository
 from app.storage.database import Database
 
-BUNDLED_ROOT = Path("/opt/render-node/blender")
-
 
 class BlenderService:
     def __init__(
@@ -45,17 +43,48 @@ class BlenderService:
         storage: BlenderStorage,
         catalog: OfficialCatalog,
         event_hub: EventHub,
+        *,
+        bundled_root: Path = Path("/opt/render-node/blender"),
     ) -> None:
         self._database = database
         self._storage = storage
         self._catalog = catalog
         self._events = event_hub
+        self._bundled_root = bundled_root
         self._mutation_lock = asyncio.Lock()
         self._tasks: dict[UUID, asyncio.Task[None]] = {}
 
     async def initialize(self) -> None:
-        """Recover interrupted work and register immutable image runtimes."""
-        referenced_archives: set[Path] = set()
+        """Recover interrupted work and reconcile verified image runtimes."""
+        bundled_versions: set[str] = set()
+        for version in BUNDLED_VERSIONS:
+            binary = self._bundled_root / version / "blender"
+            try:
+                await self._storage.validate_binary(binary, version)
+            except BlenderRejectedError:
+                continue
+            bundled_versions.add(version)
+
+        async with self._database.session_factory() as session:
+            installed_runtimes = [
+                (runtime.version, runtime.source)
+                for runtime in await BlenderRepository(session).list_runtimes()
+                if runtime.source is not RuntimeSource.BUNDLED
+                and runtime.state is RuntimeState.INSTALLED
+            ]
+
+        valid_installed_versions: set[str] = set()
+        invalid_installed_versions: dict[str, str] = {}
+        for version, _source in installed_runtimes:
+            binary = self._storage.versions_root / version / "blender"
+            try:
+                await self._storage.validate_binary(binary, version)
+            except BlenderRejectedError as exc:
+                invalid_installed_versions[version] = exc.message
+                continue
+            valid_installed_versions.add(version)
+
+        runtime_directories_to_remove = set(invalid_installed_versions)
         async with self._database.session_factory() as session, session.begin():
             repository = BlenderRepository(session)
             for operation in await repository.unfinished_operations():
@@ -65,17 +94,20 @@ class BlenderService:
             for runtime in await repository.list_runtimes():
                 if (
                     runtime.source is RuntimeSource.BUNDLED
-                    and runtime.version not in BUNDLED_VERSIONS
+                    and runtime.version not in bundled_versions
                 ):
                     await repository.delete_runtime(runtime)
                     continue
-                if runtime.archive_path:
-                    referenced_archives.add(Path(runtime.archive_path))
+                if runtime.version in invalid_installed_versions:
+                    runtime.state = RuntimeState.FAILED
+                    runtime.active = False
+                    runtime.error = invalid_installed_versions[runtime.version]
+                    runtime.updated_at = utc_now()
                 if runtime.state in {RuntimeState.DOWNLOADING, RuntimeState.INSTALLING}:
                     runtime.state = RuntimeState.FAILED
                     runtime.error = "Operation was interrupted by a service restart"
                     runtime.updated_at = utc_now()
-            for version in BUNDLED_VERSIONS:
+            for version in bundled_versions:
                 existing_runtime = await repository.get_runtime(version)
                 if existing_runtime is None:
                     await repository.add_runtime(
@@ -87,10 +119,45 @@ class BlenderService:
                             active=False,
                         )
                     )
-            if await repository.active_runtime() is None:
-                default_runtime = await repository.get_runtime(DEFAULT_ACTIVE_VERSION)
-                if default_runtime is not None:
-                    default_runtime.active = True
+                else:
+                    previous_source = existing_runtime.source
+                    keep_active = existing_runtime.active and (
+                        previous_source is RuntimeSource.BUNDLED
+                        or existing_runtime.version in valid_installed_versions
+                    )
+                    if previous_source is not RuntimeSource.BUNDLED:
+                        runtime_directories_to_remove.add(version)
+                    existing_runtime.source = RuntimeSource.BUNDLED
+                    existing_runtime.state = RuntimeState.INSTALLED
+                    existing_runtime.supported = True
+                    existing_runtime.active = keep_active
+                    existing_runtime.archive_path = None
+                    existing_runtime.official_filename = None
+                    existing_runtime.expected_sha256 = None
+                    existing_runtime.verified_sha256 = None
+                    existing_runtime.operation_id = None
+                    existing_runtime.error = None
+                    existing_runtime.updated_at = utc_now()
+
+            active_runtimes = [
+                runtime for runtime in await repository.list_runtimes() if runtime.active
+            ]
+            if len(active_runtimes) > 1:
+                for runtime in active_runtimes:
+                    runtime.active = False
+                    runtime.updated_at = utc_now()
+
+            referenced_archives = {
+                Path(runtime.archive_path)
+                for runtime in await repository.list_runtimes()
+                if runtime.archive_path
+            }
+
+        for version in runtime_directories_to_remove:
+            # A broken runtime must not make application readiness depend on
+            # whether its leftover directory can be removed during startup.
+            with contextlib.suppress(OSError):
+                await self._storage.delete_runtime(version)
         await self._storage.cleanup_quarantine()
         await self._storage.cleanup_unreferenced_downloads(referenced_archives)
 

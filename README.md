@@ -39,7 +39,8 @@ isolated worker if a shared render service is needed later.
 - async SQLite persistence with SQLAlchemy and Alembic migrations;
 - public health/readiness probes, shared error responses, bounded request bodies,
   exact-origin CORS, and a production Bearer boundary for REST and WebSocket.
-- versioned production image with Blender 5.2.0 and 4.1.1;
+- support for verified bundled Blender 5.2.0 and 4.1.1 when their binaries are
+  present in the runtime image;
 - interactive one-command installer and `render-node` management command.
 
 ## Target MVP
@@ -56,11 +57,13 @@ isolated worker if a shared render service is needed later.
 - installation of additional versions only from the official Blender archive,
   with SHA-256 verification.
 
-The production image includes Blender `5.2.0` and `4.1.1`. Other supported
-versions can be installed explicitly. Only one version can be active at a time,
-and it cannot be changed while a job is `QUEUED` or `RENDERING`. Additional
-inactive versions can be deleted from the runtime manager; bundled versions are
-immutable.
+An image may include Blender `5.2.0` and `4.1.1`, but the backend registers each
+bundled version only after executing its real binary and confirming the exact
+patch version. An empty runtime registry is a ready application state. The user
+then completes `Download → Install → Activate` in the runtime manager; no version
+is activated automatically. Only one version can be active at a time, and it
+cannot be changed while a job is `QUEUED` or `RENDERING`. Additional inactive
+versions can be deleted; detected bundled versions are immutable.
 
 ## Technology Stack
 
@@ -145,6 +148,9 @@ copy `.env.example` to `.env` once and set
 This mode starts Blender as a subprocess of Render Node and must only receive
 trusted `.blend`/ZIP files. If it is disabled, the UI reports that the runner is
 unavailable and keeps a started job in `READY` instead of creating a failed job.
+Startup does not require Blender to exist. When no verified runtime is present,
+open **Blender versions** in the UI and explicitly download, install, and activate
+one before creating a render job.
 
 ## Quick Start: Frontend
 
@@ -166,6 +172,18 @@ is forwarded.
 `http://127.0.0.1:8000`. For a locally authenticated backend, the Vite server can
 inject `RENDER_NODE_BACKEND_AUTH_TOKEN` into proxied HTTP and WebSocket requests;
 this variable is server-side and must never use a `VITE_` prefix.
+
+Vite preserves the browser's real `Origin`. If the development page is opened
+through port forwarding or a preview hostname, add that exact origin (scheme,
+host, and port) to `RENDER_NODE_ALLOWED_ORIGINS` before starting the backend, for
+example:
+
+```dotenv
+RENDER_NODE_ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173,https://exact-preview.example
+```
+
+Wildcards and implicit trust of forwarded hosts are intentionally unsupported;
+the same allowlist applies to HTTP and WebSocket requests.
 
 ## Quick Start: Backend
 
@@ -280,6 +298,7 @@ npm run build
 npm run dev:mock
 # In another terminal:
 npm run qa:smoke
+npm run qa:versions-empty
 ```
 
 If Playwright Chromium is not installed yet:

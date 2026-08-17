@@ -32,5 +32,4 @@ class OperationState(StrEnum):
 
 
 BUNDLED_VERSIONS = ("5.2.0", "4.1.1")
-DEFAULT_ACTIVE_VERSION = "5.2.0"
 SUPPORTED_VERSIONS = frozenset({"5.2.0", "4.5.11", "4.2.22", "4.1.1", "3.6.23"})

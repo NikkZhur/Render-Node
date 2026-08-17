@@ -26,6 +26,8 @@ def receive_type(websocket: object, expected: str) -> dict[str, object]:
 
 def test_websocket_subscription_job_events_and_metrics(app: FastAPI) -> None:
     with TestClient(app) as client, client.websocket_connect("/api/v1/events") as websocket:
+        activated = client.post("/api/v1/blender/versions/5.2.0/activate")
+        assert activated.status_code == 200
         ready = receive_type(websocket, "connection.ready")
         assert ready["resync"] == "/api/v1/jobs"
         websocket.send_json({"action": "subscribe", "job_ids": []})

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import shutil
 import time
 import zipfile
 from pathlib import Path
@@ -36,7 +37,7 @@ def render_settings(tmp_path: Path) -> Settings:
         env=Environment.TEST,
         workspace=tmp_path,
         database_url=database_url,
-        blender_executable_override=FAKE_BLENDER,
+        bundled_blender_root=tmp_path / "bundled",
         render_scheduler_enabled=True,
         render_scheduler_poll_seconds=0.05,
         render_timeout_seconds=5,
@@ -45,6 +46,14 @@ def render_settings(tmp_path: Path) -> Settings:
         max_render_log_mb=1,
         worker_memory_gb=1,
     )
+    for version in ("5.2.0", "4.1.1"):
+        binary = settings.bundled_blender_root / version / "blender"
+        binary.parent.mkdir(parents=True)
+        if version == "5.2.0":
+            shutil.copy2(FAKE_BLENDER, binary)
+        else:
+            binary.write_text(f"#!/bin/sh\nprintf 'Blender {version}\\n'\n")
+        binary.chmod(0o755)
     alembic_config = Config("alembic.ini")
     alembic_config.attributes["database_url"] = database_url
     command.upgrade(alembic_config, "head")
@@ -65,6 +74,8 @@ def job_payload(name: str) -> dict[str, object]:
 
 
 async def create_ready_job(client: AsyncClient, name: str, scene: bytes) -> UUID:
+    activated = await client.post("/api/v1/blender/versions/5.2.0/activate")
+    assert activated.status_code == 200
     created = await client.post("/api/v1/jobs", json=job_payload(name))
     assert created.status_code == 201
     job_id = UUID(created.json()["id"])
@@ -185,6 +196,7 @@ async def test_frame_pagination_is_persistent_and_bounded(render_settings: Setti
     async with app.router.lifespan_context(app):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
+            assert (await client.post("/api/v1/blender/versions/5.2.0/activate")).status_code == 200
             created = await client.post("/api/v1/jobs", json=job_payload("Sequence"))
             job_id = UUID(created.json()["id"])
             missing_log = await client.get(f"/api/v1/jobs/{job_id}/logs/blender/tail")
@@ -328,6 +340,7 @@ async def test_unavailable_gpu_fails_job_without_starting_blender(
     async with app.router.lifespan_context(app):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
+            assert (await client.post("/api/v1/blender/versions/5.2.0/activate")).status_code == 200
             payload = job_payload("Missing GPU")
             payload.update({"device": "CUDA", "gpu_ids": [999_999]})
             created = await client.post("/api/v1/jobs", json=payload)

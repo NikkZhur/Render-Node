@@ -84,6 +84,8 @@ async def test_origin_guard_and_cors_preflight(production_client: AsyncClient) -
         headers={
             "authorization": f"Bearer {AUTH_TOKEN}",
             "origin": "https://attacker.example",
+            "x-forwarded-host": "render.example.com",
+            "x-forwarded-proto": "https",
         },
     )
     assert denied.status_code == 403
@@ -127,6 +129,8 @@ def test_websocket_uses_auth_origin_and_message_limits(job_settings: Settings) -
                 headers={
                     "authorization": f"Bearer {AUTH_TOKEN}",
                     "origin": "https://attacker.example",
+                    "x-forwarded-host": "render.example.com",
+                    "x-forwarded-proto": "https",
                 },
             ):
                 pass

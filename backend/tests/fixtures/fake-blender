@@ -1,6 +1,11 @@
 #!/bin/sh
 set -eu
 
+if [ "${1-}" = "--version" ]; then
+    printf 'Blender 5.2.0\n'
+    exit 0
+fi
+
 scene=""
 for argument in "$@"; do
     case "$argument" in

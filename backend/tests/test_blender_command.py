@@ -6,12 +6,17 @@ from uuid import uuid4
 
 import pytest
 
-from app.blender.command import CommandBuildError, build_render_command
+from app.blender.command import (
+    BlenderExecutableResolver,
+    CommandBuildError,
+    build_render_command,
+)
 from app.blender.sandbox import (
     SandboxPolicy,
     SandboxUnavailableError,
     build_worker_environment,
 )
+from app.blender.types import RuntimeSource
 from app.config import DeploymentProfile, Environment, RunnerMode
 from app.jobs.models import Job
 from app.jobs.types import ComputeDevice, FrameMode, JobStatus, RenderEngine
@@ -69,6 +74,19 @@ def test_command_rejects_unverified_adapter_and_escaping_scene(tmp_path: Path) -
     (tmp_path / str(escaping.id)).mkdir()
     with pytest.raises(ValueError, match="escapes"):
         build_render_command(escaping, binary=Path("/blender"), jobs_root=tmp_path)
+
+
+def test_executable_resolver_uses_the_selected_runtime_version(tmp_path: Path) -> None:
+    bundled_root = tmp_path / "bundled"
+    installed_root = tmp_path / "installed"
+    resolver = BlenderExecutableResolver(
+        bundled_root=bundled_root,
+        installed_root=installed_root,
+    )
+
+    assert resolver.binary("4.1.1", RuntimeSource.BUNDLED) == bundled_root / "4.1.1/blender"
+    assert resolver.binary("5.2.0", RuntimeSource.BUNDLED) == bundled_root / "5.2.0/blender"
+    assert resolver.binary("4.5.11", RuntimeSource.OFFICIAL) == (installed_root / "4.5.11/blender")
 
 
 async def test_worker_environment_is_allowlisted_and_gpu_scoped(tmp_path: Path) -> None:

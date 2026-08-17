@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import hashlib
 import os
+import re
 import shutil
 import signal
 import stat
@@ -17,6 +18,9 @@ import aiofiles
 from fastapi import UploadFile
 
 from app.blender.exceptions import BlenderRejectedError
+
+BLENDER_VERSION_LINE = re.compile(r"^Blender (?P<version>\d+\.\d+\.\d+)(?:\s|$)")
+BINARY_VALIDATION_TIMEOUT_SECONDS = 30.0
 
 
 def _inside(path: Path, root: Path) -> bool:
@@ -120,12 +124,12 @@ class BlenderStorage:
                     "invalid_blender_runtime",
                     "Existing version path is not a regular runtime directory",
                 )
-            await self._validate_binary(destination / "blender", version)
+            await self.validate_binary(destination / "blender", version)
             return destination
         try:
             await asyncio.to_thread(temporary.mkdir, parents=False, exist_ok=False)
             runtime_root = await asyncio.to_thread(self._extract, archive, temporary)
-            await self._validate_binary(runtime_root / "blender", version)
+            await self.validate_binary(runtime_root / "blender", version)
             await asyncio.to_thread(os.replace, runtime_root, destination)
             return destination
         finally:
@@ -208,44 +212,55 @@ class BlenderStorage:
         return runtime_root
 
     @staticmethod
-    async def _validate_binary(binary: Path, version: str) -> None:
+    async def validate_binary(binary: Path, version: str) -> None:
         is_executable = await asyncio.to_thread(BlenderStorage._is_executable, binary)
         if not is_executable:
             raise BlenderRejectedError("invalid_blender_runtime", "Blender executable is missing")
-        process = await asyncio.create_subprocess_exec(
-            str(binary),
-            "--version",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            cwd=binary.parent,
-            env={
-                "HOME": str(binary.parent),
-                "LANG": "C.UTF-8",
-                "LC_ALL": "C.UTF-8",
-                "PATH": "/usr/local/bin:/usr/bin:/bin",
-                "TMPDIR": str(binary.parent),
-            },
-            close_fds=True,
-            start_new_session=True,
-        )
         try:
-            output, _ = await asyncio.wait_for(process.communicate(), timeout=30)
+            process = await asyncio.create_subprocess_exec(
+                str(binary),
+                "--version",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=binary.parent,
+                env={
+                    "HOME": str(binary.parent),
+                    "LANG": "C.UTF-8",
+                    "LC_ALL": "C.UTF-8",
+                    "PATH": "/usr/local/bin:/usr/bin:/bin",
+                    "TMPDIR": str(binary.parent),
+                },
+                close_fds=True,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            raise BlenderRejectedError(
+                "invalid_blender_runtime", "Blender executable could not be started"
+            ) from exc
+        try:
+            output, _ = await asyncio.wait_for(
+                process.communicate(), timeout=BINARY_VALIDATION_TIMEOUT_SECONDS
+            )
         except TimeoutError:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
-            await process.communicate()
+            await BlenderStorage._kill_process_group(process)
             raise BlenderRejectedError(
                 "invalid_blender_runtime", "Blender version check timed out"
             ) from None
+        except asyncio.CancelledError:
+            await BlenderStorage._kill_process_group(process)
+            raise
         first_line = output.decode("utf-8", errors="replace").splitlines()[:1]
-        if (
-            process.returncode != 0
-            or not first_line
-            or not first_line[0].startswith(f"Blender {version}")
-        ):
+        match = BLENDER_VERSION_LINE.match(first_line[0]) if first_line else None
+        if process.returncode != 0 or match is None or match.group("version") != version:
             raise BlenderRejectedError(
                 "invalid_blender_runtime", "Blender binary reported another version"
             )
+
+    @staticmethod
+    async def _kill_process_group(process: asyncio.subprocess.Process) -> None:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        await process.communicate()
 
     @staticmethod
     def _is_executable(binary: Path) -> bool:

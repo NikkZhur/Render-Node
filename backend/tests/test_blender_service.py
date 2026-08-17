@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import os
 import tarfile
+import time
 from pathlib import Path
 from uuid import UUID
 
@@ -11,6 +13,7 @@ import pytest
 from fastapi import FastAPI, UploadFile
 from httpx import ASGITransport, AsyncClient
 
+from app.blender import storage as blender_storage_module
 from app.blender.exceptions import BlenderConflictError, BlenderRejectedError
 from app.blender.models import BlenderOperation, BlenderRuntime
 from app.blender.official import OfficialRelease
@@ -20,6 +23,7 @@ from app.blender.storage import BlenderStorage
 from app.blender.types import OperationKind, OperationState, RuntimeSource, RuntimeState
 from app.config import Settings
 from app.events.hub import EventHub
+from app.main import create_app
 from app.storage.database import Database
 
 
@@ -39,6 +43,22 @@ def fake_blender_archive(version: str) -> bytes:
         executable.size = len(script)
         bundle.addfile(executable, io.BytesIO(script))
     return output.getvalue()
+
+
+def fake_blender_executable(path: Path, output: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"#!/bin/sh\nprintf '%s\\n' '{output}'\n")
+    path.chmod(0o755)
+
+
+def wait_for_file(path: Path, timeout_seconds: float = 2) -> str:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            return path.read_text()
+        except FileNotFoundError:
+            time.sleep(0.01)
+    raise AssertionError(f"file was not created: {path}")
 
 
 class FakeCatalog:
@@ -101,7 +121,16 @@ def make_service(settings: Settings, catalog: FakeCatalog) -> tuple[BlenderServi
         max_extracted_bytes=settings.max_blender_extracted_bytes,
         max_files=settings.max_blender_archive_files,
     )
-    return BlenderService(database, storage, catalog, EventHub()), database  # type: ignore[arg-type]
+    return (
+        BlenderService(
+            database,
+            storage,
+            catalog,
+            EventHub(),
+            bundled_root=settings.bundled_blender_root,
+        ),
+        database,
+    )  # type: ignore[arg-type]
 
 
 async def test_official_download_install_and_explicit_activation(
@@ -241,6 +270,91 @@ async def test_safe_extract_rejects_parent_path(job_settings: Settings) -> None:
     assert not (job_settings.workspace / "escape").exists()
 
 
+@pytest.mark.parametrize(
+    ("reported", "expected", "accepted"),
+    [
+        ("Blender 4.1.1", "4.1.1", True),
+        ("Blender 5.2.0 LTS", "5.2.0", True),
+        ("Blender 4.1.10", "4.1.1", False),
+        ("not Blender output", "4.1.1", False),
+        ("", "4.1.1", False),
+    ],
+)
+async def test_binary_validation_requires_exact_patch_version(
+    tmp_path: Path,
+    reported: str,
+    expected: str,
+    accepted: bool,
+) -> None:
+    binary = tmp_path / "blender"
+    fake_blender_executable(binary, reported)
+
+    if accepted:
+        await BlenderStorage.validate_binary(binary, expected)
+    else:
+        with pytest.raises(BlenderRejectedError, match="another version"):
+            await BlenderStorage.validate_binary(binary, expected)
+
+
+async def test_binary_validation_wraps_exec_format_error(tmp_path: Path) -> None:
+    binary = tmp_path / "blender"
+    binary.write_bytes(b"not an executable format")
+    binary.chmod(0o755)
+
+    with pytest.raises(BlenderRejectedError, match="could not be started"):
+        await BlenderStorage.validate_binary(binary, "4.1.1")
+
+
+@pytest.mark.parametrize("kind", ["missing", "permission", "nonzero"])
+async def test_binary_validation_wraps_expected_runtime_failures(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    binary = tmp_path / "blender"
+    if kind == "permission":
+        binary.write_text("#!/bin/sh\nprintf 'Blender 4.1.1\\n'\n")
+    elif kind == "nonzero":
+        binary.write_text("#!/bin/sh\nprintf 'Blender 4.1.1\\n'\nexit 3\n")
+        binary.chmod(0o755)
+
+    with pytest.raises(BlenderRejectedError):
+        await BlenderStorage.validate_binary(binary, "4.1.1")
+
+
+async def test_binary_validation_timeout_kills_process_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binary = tmp_path / "blender"
+    pid_path = tmp_path / "validator.pid"
+    binary.write_text(f"#!/bin/sh\nprintf '%s' $$ > '{pid_path}'\nsleep 60\n")
+    binary.chmod(0o755)
+    monkeypatch.setattr(blender_storage_module, "BINARY_VALIDATION_TIMEOUT_SECONDS", 0.05)
+
+    with pytest.raises(BlenderRejectedError, match="timed out"):
+        await BlenderStorage.validate_binary(binary, "4.1.1")
+
+    pid = int(pid_path.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+async def test_binary_validation_cancellation_kills_process_group(tmp_path: Path) -> None:
+    binary = tmp_path / "blender"
+    pid_path = tmp_path / "cancelled-validator.pid"
+    binary.write_text(f"#!/bin/sh\nprintf '%s' $$ > '{pid_path}'\nsleep 60\n")
+    binary.chmod(0o755)
+    validation = asyncio.create_task(BlenderStorage.validate_binary(binary, "4.1.1"))
+    pid = int(await asyncio.to_thread(wait_for_file, pid_path))
+
+    validation.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await validation
+
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
 async def test_install_does_not_adopt_symlinked_runtime_directory(
     job_settings: Settings,
 ) -> None:
@@ -298,7 +412,203 @@ async def test_initialize_reconciles_removed_bundled_versions(job_settings: Sett
         await service.initialize()
         runtimes = await service.list_runtimes()
         assert {runtime.version for runtime in runtimes} == {"5.2.0", "4.1.1"}
-        assert [runtime.version for runtime in runtimes if runtime.active] == ["5.2.0"]
+        assert [runtime.version for runtime in runtimes if runtime.active] == []
+    finally:
+        await service.shutdown()
+        await database.dispose()
+
+
+@pytest.mark.parametrize("source", [RuntimeSource.OFFICIAL, RuntimeSource.MANUAL])
+async def test_initialize_invalidates_missing_user_runtime_and_preserves_retry_archive(
+    job_settings: Settings,
+    source: RuntimeSource,
+) -> None:
+    version = "4.6.10"
+    archive = fake_blender_archive(version)
+    digest = hashlib.sha256(archive).hexdigest()
+    archive_path = job_settings.blender_downloads_root / "retry.archive"
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    archive_path.write_bytes(archive)
+    runtime_root = job_settings.blender_versions_root / version
+    runtime_root.mkdir(parents=True)
+    (runtime_root / "incomplete-runtime").write_text("broken")
+    catalog = FakeCatalog(version, archive)
+    service, database = make_service(job_settings, catalog)
+    await service._storage.prepare()
+    async with database.session_factory() as session, session.begin():
+        await BlenderRepository(session).add_runtime(
+            BlenderRuntime(
+                version=version,
+                source=source,
+                state=RuntimeState.INSTALLED,
+                supported=False,
+                active=True,
+                archive_path=str(archive_path),
+                expected_sha256=digest,
+                verified_sha256=digest,
+            )
+        )
+    try:
+        await service.initialize()
+        runtime = next(item for item in await service.list_runtimes() if item.version == version)
+
+        assert runtime.state is RuntimeState.FAILED
+        assert runtime.active is False
+        assert runtime.archive_available is True
+        assert archive_path.is_file()
+        assert not runtime_root.exists()
+        assert all(not item.active for item in await service.list_runtimes())
+
+        install = await service.start_install(version)
+        await service.wait(install.id)
+        runtime = next(item for item in await service.list_runtimes() if item.version == version)
+        assert runtime.state is RuntimeState.INSTALLED
+        assert runtime.active is False
+    finally:
+        await service.shutdown()
+        await database.dispose()
+
+
+async def test_initialize_promotes_download_collision_without_orphaned_metadata(
+    job_settings: Settings,
+) -> None:
+    version = "4.1.1"
+    archive_path = job_settings.blender_downloads_root / "duplicate.archive"
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    archive_path.write_bytes(b"verified duplicate")
+    catalog = FakeCatalog("4.6.0", fake_blender_archive("4.6.0"))
+    service, database = make_service(job_settings, catalog)
+    await service._storage.prepare()
+    async with database.session_factory() as session, session.begin():
+        await BlenderRepository(session).add_runtime(
+            BlenderRuntime(
+                version=version,
+                source=RuntimeSource.OFFICIAL,
+                state=RuntimeState.DOWNLOADED,
+                supported=True,
+                active=False,
+                archive_path=str(archive_path),
+                official_filename="blender-4.1.1-linux-x64.tar.xz",
+                expected_sha256="a" * 64,
+                verified_sha256="a" * 64,
+            )
+        )
+    try:
+        await service.initialize()
+        runtime = next(item for item in await service.list_runtimes() if item.version == version)
+
+        assert runtime.source is RuntimeSource.BUNDLED
+        assert runtime.state is RuntimeState.INSTALLED
+        assert runtime.active is False
+        assert runtime.archive_path is None
+        assert runtime.official_filename is None
+        assert runtime.expected_sha256 is None
+        assert runtime.verified_sha256 is None
+        assert runtime.operation_id is None
+        assert not archive_path.exists()
+    finally:
+        await service.shutdown()
+        await database.dispose()
+
+
+async def test_initialize_promotes_valid_installed_collision_and_preserves_activation(
+    job_settings: Settings,
+) -> None:
+    version = "5.2.0"
+    runtime_root = job_settings.blender_versions_root / version
+    fake_blender_executable(runtime_root / "blender", f"Blender {version}")
+    archive_path = job_settings.blender_downloads_root / "installed-duplicate.archive"
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    archive_path.write_bytes(b"verified duplicate")
+    catalog = FakeCatalog("4.6.0", fake_blender_archive("4.6.0"))
+    service, database = make_service(job_settings, catalog)
+    await service._storage.prepare()
+    async with database.session_factory() as session, session.begin():
+        await BlenderRepository(session).add_runtime(
+            BlenderRuntime(
+                version=version,
+                source=RuntimeSource.MANUAL,
+                state=RuntimeState.INSTALLED,
+                supported=True,
+                active=True,
+                archive_path=str(archive_path),
+                official_filename=f"blender-{version}-linux-x64.tar.xz",
+                expected_sha256="a" * 64,
+                verified_sha256="a" * 64,
+                operation_id=UUID("55555555-5555-4555-8555-555555555555"),
+            )
+        )
+    try:
+        await service.initialize()
+        runtime = next(item for item in await service.list_runtimes() if item.version == version)
+
+        assert runtime.source is RuntimeSource.BUNDLED
+        assert runtime.state is RuntimeState.INSTALLED
+        assert runtime.active is True
+        assert runtime.archive_path is None
+        assert runtime.official_filename is None
+        assert runtime.expected_sha256 is None
+        assert runtime.verified_sha256 is None
+        assert runtime.operation_id is None
+        assert not archive_path.exists()
+        assert not runtime_root.exists()
+    finally:
+        await service.shutdown()
+        await database.dispose()
+
+
+async def test_initialize_removes_bundled_runtime_when_binary_is_missing(
+    job_settings: Settings,
+) -> None:
+    missing_root = job_settings.workspace / "missing-bundled"
+    settings = job_settings.model_copy(update={"bundled_blender_root": missing_root})
+    catalog = FakeCatalog("4.6.0", fake_blender_archive("4.6.0"))
+    service, database = make_service(settings, catalog)
+    await service._storage.prepare()
+    async with database.session_factory() as session, session.begin():
+        await BlenderRepository(session).add_runtime(
+            BlenderRuntime(
+                version="4.1.1",
+                source=RuntimeSource.BUNDLED,
+                state=RuntimeState.INSTALLED,
+                supported=True,
+                active=True,
+            )
+        )
+    try:
+        await service.initialize()
+
+        assert await service.list_runtimes() == []
+    finally:
+        await service.shutdown()
+        await database.dispose()
+
+
+async def test_initialize_ignores_corrupted_bundled_runtime(
+    job_settings: Settings,
+) -> None:
+    broken_binary = job_settings.bundled_blender_root / "4.1.1" / "blender"
+    broken_binary.write_bytes(b"not an executable format")
+    broken_binary.chmod(0o755)
+    catalog = FakeCatalog("4.6.0", fake_blender_archive("4.6.0"))
+    service, database = make_service(job_settings, catalog)
+    await service._storage.prepare()
+    async with database.session_factory() as session, session.begin():
+        await BlenderRepository(session).add_runtime(
+            BlenderRuntime(
+                version="4.1.1",
+                source=RuntimeSource.BUNDLED,
+                state=RuntimeState.INSTALLED,
+                supported=True,
+                active=True,
+            )
+        )
+    try:
+        await service.initialize()
+
+        runtimes = await service.list_runtimes()
+        assert [runtime.version for runtime in runtimes] == ["5.2.0"]
+        assert runtimes[0].active is False
     finally:
         await service.shutdown()
         await database.dispose()
@@ -337,6 +647,7 @@ async def test_official_operation_api_contract(job_app: FastAPI, job_settings: S
             storage,
             catalog,  # type: ignore[arg-type]
             job_app.state.event_hub,
+            bundled_root=job_settings.bundled_blender_root,
         )
         await storage.prepare()
         await service.initialize()
@@ -366,6 +677,70 @@ async def test_official_operation_api_contract(job_app: FastAPI, job_settings: S
                 assert list(job_settings.blender_downloads_root.iterdir()) == []
                 versions = await client.get("/api/v1/blender/versions")
                 assert version not in {item["version"] for item in versions.json()}
+        finally:
+            await service.shutdown()
+
+
+async def test_empty_registry_stays_ready_until_explicit_install_and_activation(
+    job_settings: Settings,
+) -> None:
+    version = "4.5.11"
+    settings = job_settings.model_copy(
+        update={"bundled_blender_root": job_settings.workspace / "missing-bundled"}
+    )
+    app = create_app(settings)
+    async with app.router.lifespan_context(app):
+        storage = BlenderStorage(
+            settings.blender_versions_root,
+            settings.blender_downloads_root,
+            settings.blender_quarantine_root,
+            max_archive_bytes=settings.max_blender_archive_bytes,
+            max_extracted_bytes=settings.max_blender_extracted_bytes,
+            max_files=settings.max_blender_archive_files,
+        )
+        catalog = FakeCatalog(version, fake_blender_archive(version))
+        service = BlenderService(
+            app.state.database,
+            storage,
+            catalog,  # type: ignore[arg-type]
+            app.state.event_hub,
+            bundled_root=settings.bundled_blender_root,
+        )
+        await storage.prepare()
+        await service.initialize()
+        app.state.blender_service = service
+        transport = ASGITransport(app=app)
+        try:
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                assert (await client.get("/ready")).status_code == 200
+                assert (await client.get("/api/v1/blender/versions")).json() == []
+
+                payload = {
+                    "name": "Needs runtime",
+                    "blender_version": version,
+                    "engine": "BLENDER_EEVEE",
+                    "device": "CPU",
+                    "gpu_ids": [],
+                    "frame_mode": "SINGLE",
+                    "frame_start": 1,
+                    "frame_end": None,
+                }
+                blocked = await client.post("/api/v1/jobs", json=payload)
+                assert blocked.status_code == 409
+                assert blocked.json()["error"]["code"] == "active_blender_missing"
+
+                download = await client.post(f"/api/v1/blender/releases/{version}/download")
+                await service.wait(UUID(download.json()["operation_id"]))
+                install = await client.post(f"/api/v1/blender/versions/{version}/install")
+                await service.wait(UUID(install.json()["operation_id"]))
+                installed = await client.get("/api/v1/blender/versions")
+                assert installed.json()[0]["active"] is False
+
+                activated = await client.post(f"/api/v1/blender/versions/{version}/activate")
+                assert activated.status_code == 200
+                created = await client.post("/api/v1/jobs", json=payload)
+                assert created.status_code == 201
+                assert created.json()["blender_version"] == version
         finally:
             await service.shutdown()
 

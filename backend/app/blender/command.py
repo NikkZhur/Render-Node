@@ -38,15 +38,11 @@ class BlenderExecutableResolver:
         *,
         bundled_root: Path,
         installed_root: Path,
-        override: Path | None = None,
     ) -> None:
         self._bundled_root = bundled_root
         self._installed_root = installed_root
-        self._override = override
 
     def binary(self, version: str, source: RuntimeSource) -> Path:
-        if self._override is not None:
-            return self._override
         root = self._bundled_root if source is RuntimeSource.BUNDLED else self._installed_root
         return root / version / "blender"
 

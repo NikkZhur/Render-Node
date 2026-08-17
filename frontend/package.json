@@ -13,6 +13,7 @@
     "qa:smoke": "node scripts/qa-smoke.mjs",
     "qa:jobs": "node scripts/qa-jobs.mjs",
     "qa:versions": "node scripts/qa-versions.mjs",
+    "qa:versions-empty": "node scripts/qa-versions-empty.mjs",
     "qa:api": "node scripts/qa-api-smoke.mjs",
     "qa:runner": "node scripts/qa-runner-smoke.mjs",
     "qa:capabilities": "node scripts/qa-runner-capabilities.mjs",

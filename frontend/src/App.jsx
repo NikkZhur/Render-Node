@@ -220,7 +220,7 @@ function StatusBadge({ status }) {
   );
 }
 
-function Header({ activeVersion, connectionState, gpuCount, onThemeChange, onVersions, queuedCount, storageWarning, theme }) {
+function Header({ activeVersion, connectionState, gpuCount, onThemeChange, onVersions, queuedCount, storageWarning, theme, versionsLoading }) {
   return (
     <header className="app-header">
       <div className="brand-block">
@@ -268,7 +268,11 @@ function Header({ activeVersion, connectionState, gpuCount, onThemeChange, onVer
               <Icon name="cube" size={16} />
             </span>
             <span>
-              Blender {activeVersion ?? "—"}
+              {versionsLoading
+                ? "Checking Blender versions…"
+                : activeVersion
+                  ? `Blender ${activeVersion}`
+                  : "No active Blender version"}
             </span>
             <Icon name="down" size={15} />
           </button>
@@ -434,9 +438,11 @@ function JobSetup({
   onSave,
   onSceneUpload,
   onStart,
+  onVersions,
   operationError,
   operationPending,
   runner,
+  versionsLoading,
 }) {
   const [engine, setEngine] = useState(job.engine ?? "Cycles");
   const [device, setDevice] = useState(
@@ -453,10 +459,11 @@ function JobSetup({
   const isDraft = job.id === "draft";
   const editable = isDraft || job.status === "created" || job.status === "ready";
   const rerenderable = ["completed", "failed", "cancelled"].includes(job.status);
-  const controlsDisabled = !editable || operationPending;
+  const runtimeUnavailable = !activeVersion;
+  const controlsDisabled = !editable || operationPending || runtimeUnavailable;
   const activeGpuIds = selectedGpus ?? devices.map((gpu) => gpu.id);
   const computeDevices = devices.length > 0 ? COMPUTE_DEVICES : [...new Set([device, "CPU"])];
-  const runtimeVersion = job.version ?? job.blender_version ?? activeVersion;
+  const runtimeVersion = isDraft ? activeVersion : (job.version ?? job.blender_version);
   const runnerUnavailable = !runner.available;
 
   const markChanged = (setter) => (value) => {
@@ -525,7 +532,7 @@ function JobSetup({
           type="file"
           accept=".blend,.zip"
           className="sr-only"
-          disabled={!editable || operationPending}
+          disabled={controlsDisabled}
           onChange={async (event) => {
             const input = event.currentTarget;
             const nextFile = input.files?.[0];
@@ -545,7 +552,7 @@ function JobSetup({
         />
         <button
           className="file-drop"
-          disabled={!editable || operationPending}
+          disabled={controlsDisabled}
           onClick={() => fileInput.current?.click()}
           type="button"
         >
@@ -557,6 +564,8 @@ function JobSetup({
             <small>
               {operationPending
                 ? "Saving…"
+                : runtimeUnavailable
+                  ? "Activate a Blender version before uploading"
                 : !editable
                   ? "Source locked after first render start"
                   : job.status === "ready"
@@ -564,7 +573,13 @@ function JobSetup({
                     : "Select a scene to upload"}
             </small>
           </span>
-          <span className="replace-file">{editable ? (fileName === draftJob.file ? "Choose" : "Replace") : "Locked"}</span>
+          <span className="replace-file">
+            {runtimeUnavailable
+              ? "Blocked"
+              : editable
+                ? (fileName === draftJob.file ? "Choose" : "Replace")
+                : "Locked"}
+          </span>
         </button>
       </div>
 
@@ -654,13 +669,26 @@ function JobSetup({
           {operationError && <p className="setup-error" role="alert">{operationError}</p>}
         </div>
 
-        <div className="active-runtime">
+        <div className={`active-runtime ${runtimeUnavailable ? "unavailable" : ""}`}>
           <span>
             <Icon name="cube" size={15} />
-            Runtime
+            {isDraft ? "Active runtime" : "Job runtime"}
           </span>
-          <strong>Blender {runtimeVersion}</strong>
+          <strong>
+            {isDraft && versionsLoading
+              ? "Checking versions…"
+              : runtimeVersion
+                ? `Blender ${runtimeVersion}`
+                : "No active Blender version"}
+          </strong>
         </div>
+
+        {runtimeUnavailable && !versionsLoading && (
+          <div className="runtime-empty" role="status">
+            <span>Download, install and activate Blender to enable render actions.</span>
+            <button onClick={onVersions} type="button">Manage versions</button>
+          </div>
+        )}
 
         <div className={`runner-status ${runner.available ? "available" : "unavailable"}`} role="status">
           <span className="runner-status-dot" />
@@ -669,10 +697,10 @@ function JobSetup({
 
         {job.status === "ready" && editable && (
           <div className="setup-actions">
-            <button className="secondary-action" disabled={!dirty || operationPending} onClick={save} type="button">
+            <button className="secondary-action" disabled={!dirty || operationPending || runtimeUnavailable} onClick={save} type="button">
               Save changes
             </button>
-            <button aria-busy={operationPending} className="primary-action" disabled={operationPending || runnerUnavailable} onClick={start} type="button">
+            <button aria-busy={operationPending} className="primary-action" disabled={operationPending || runnerUnavailable || runtimeUnavailable} onClick={start} type="button">
               <Icon name="play" size={18} /> Start render
             </button>
           </div>
@@ -689,7 +717,7 @@ function JobSetup({
           </button>
         )}
         {rerenderable && (
-          <button aria-busy={operationPending} className="primary-action" disabled={operationPending} onClick={() => void onRerender(job.id).catch(() => undefined)} type="button">
+          <button aria-busy={operationPending} className="primary-action" disabled={operationPending || runtimeUnavailable} onClick={() => void onRerender(job.id).catch(() => undefined)} type="button">
             <Icon name="repeat" size={18} /> Rerender as new job
           </button>
         )}
@@ -1521,7 +1549,7 @@ function VersionPanel({
   actionError,
 }) {
   const entered = useModalEntrance();
-  const [catalogOpen, setCatalogOpen] = useState(false);
+  const [catalogOpen, setCatalogOpen] = useState(versions.length === 0);
   const closeButton = useRef(null);
   const dialogRef = useDialogBehavior(onClose, closeButton);
   const installerInput = useRef(null);
@@ -1546,7 +1574,7 @@ function VersionPanel({
           <div>
             <span className="eyebrow">Runtime manager</span>
             <h2 id="versions-title">Blender versions</h2>
-            <p>One installed version is active for every new render job.</p>
+            <p>Activate one installed version for new render jobs.</p>
           </div>
           <button
             aria-label="Close version manager"
@@ -1567,6 +1595,12 @@ function VersionPanel({
         )}
 
         <div className="version-list">
+          {versions.length === 0 && (
+            <div className="version-list-empty" role="status">
+              <strong>No Blender versions installed</strong>
+              <span>Choose an official release below, then download, install and activate it.</span>
+            </div>
+          )}
           {versions.map((version) => (
             <article className={`version-row ${version.active ? "active" : ""}`} key={version.version}>
               <span className="version-cube"><Icon name="cube" size={20} /></span>
@@ -1838,7 +1872,8 @@ export default function App({ mockApi = null }) {
     },
   });
 
-  const activeVersion = versionsQuery.data?.find((version) => version.active)?.version ?? "5.2.0";
+  const queriedActiveVersion = versionsQuery.data?.find((version) => version.active)?.version;
+  const activeVersion = queriedActiveVersion ?? (isMockMode ? mockApi.activeVersion : null);
   const mockPageCount = Math.max(1, Math.ceil(mockJobs.length / JOBS_PER_PAGE));
   const jobs = isMockMode
     ? mockJobs.slice((jobPage - 1) * JOBS_PER_PAGE, jobPage * JOBS_PER_PAGE)
@@ -1873,6 +1908,7 @@ export default function App({ mockApi = null }) {
   };
   const sceneUploadMutation = useMutation({
     mutationFn: async ({ file, configuration, job }) => {
+      if (!activeVersion) throw new Error("Activate a Blender version before uploading a scene");
       if (job.id !== "draft") {
         await jobsApi.update(job.id, configuration);
         return jobsApi.upload(job.id, file);
@@ -1896,6 +1932,7 @@ export default function App({ mockApi = null }) {
   });
   const startJobMutation = useMutation({
     mutationFn: async ({ configuration, jobId }) => {
+      if (!activeVersion) throw new Error("Activate a Blender version before starting a render");
       await jobsApi.update(jobId, configuration);
       return jobsApi.start(jobId);
     },
@@ -1906,7 +1943,10 @@ export default function App({ mockApi = null }) {
     onSuccess: updateJobCache,
   });
   const rerenderJobMutation = useMutation({
-    mutationFn: jobsApi.rerender,
+    mutationFn: (jobId) => {
+      if (!activeVersion) throw new Error("Activate a Blender version before creating a rerender");
+      return jobsApi.rerender(jobId);
+    },
     onSuccess: (rerenderedJob) => {
       prependJobToFirstPage(rerenderedJob);
       setSelectedJobId(rerenderedJob.id);
@@ -2103,6 +2143,7 @@ export default function App({ mockApi = null }) {
         queuedCount={jobs.filter((job) => job.status === "queued").length}
         storageWarning={storageWarning}
         theme={theme}
+        versionsLoading={versionsQuery.isPending}
       />
 
       <main>
@@ -2117,6 +2158,7 @@ export default function App({ mockApi = null }) {
             onSave={saveJob}
             onSceneUpload={uploadScene}
             onStart={startRender}
+            onVersions={() => setVersionPanelOpen(true)}
             operationError={
               sceneUploadMutation.error?.message
               ?? saveJobMutation.error?.message
@@ -2134,6 +2176,7 @@ export default function App({ mockApi = null }) {
               || rerenderJobMutation.isPending
             }
             runner={runner}
+            versionsLoading={versionsQuery.isPending}
           />
           <RenderPreview
             isMockMode={isMockMode}

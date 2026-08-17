@@ -20,8 +20,14 @@ def settings(tmp_path: Path) -> Settings:
     configured = Settings(
         env=Environment.TEST,
         workspace=tmp_path,
+        bundled_blender_root=tmp_path / "bundled",
         runner_mode=RunnerMode.DISABLED,
     )
+    for version in ("5.2.0", "4.1.1"):
+        binary = configured.bundled_blender_root / version / "blender"
+        binary.parent.mkdir(parents=True)
+        binary.write_text(f"#!/bin/sh\nprintf 'Blender {version}\\n'\n")
+        binary.chmod(0o755)
     assert configured.database_path is not None
     configured.database_path.parent.mkdir(parents=True)
     alembic_config = Config("alembic.ini")
@@ -40,6 +46,8 @@ async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
     async with app.router.lifespan_context(app):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as http_client:
+            activated = await http_client.post("/api/v1/blender/versions/5.2.0/activate")
+            assert activated.status_code == 200
             yield http_client
 
 
@@ -49,6 +57,7 @@ async def job_settings(tmp_path: Path) -> Settings:
     configured = Settings(
         env=Environment.TEST,
         workspace=tmp_path,
+        bundled_blender_root=tmp_path / "bundled",
         database_url=database_url,
         max_upload_gb=0.000001,
         max_zip_files=2,
@@ -56,6 +65,11 @@ async def job_settings(tmp_path: Path) -> Settings:
         render_scheduler_enabled=False,
         runner_mode=RunnerMode.DISABLED,
     )
+    for version in ("5.2.0", "4.1.1"):
+        binary = configured.bundled_blender_root / version / "blender"
+        binary.parent.mkdir(parents=True)
+        binary.write_text(f"#!/bin/sh\nprintf 'Blender {version}\\n'\n")
+        binary.chmod(0o755)
     alembic_config = Config("alembic.ini")
     alembic_config.attributes["database_url"] = database_url
     await asyncio.to_thread(command.upgrade, alembic_config, "head")
@@ -76,4 +90,6 @@ async def job_client(job_app: FastAPI) -> AsyncIterator[AsyncClient]:
     async with job_app.router.lifespan_context(job_app):
         transport = ASGITransport(app=job_app)
         async with AsyncClient(transport=transport, base_url="http://test") as http_client:
+            activated = await http_client.post("/api/v1/blender/versions/5.2.0/activate")
+            assert activated.status_code == 200
             yield http_client
