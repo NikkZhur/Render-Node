@@ -9,8 +9,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.artifacts.service import ArtifactService
+from app.blender.cgroups import CgroupIsolation, CgroupLimits
 from app.blender.command import BlenderExecutableResolver
-from app.blender.devices import GpuDiscovery
+from app.blender.devices import GpuDiscovery, GpuScheduler
 from app.blender.official import OfficialCatalog
 from app.blender.runner import RunnerLimits, SandboxRunner
 from app.blender.sandbox import SandboxPolicy
@@ -91,11 +92,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             terminate_grace_seconds=settings.render_terminate_grace_seconds,
             max_output_bytes=settings.max_render_output_bytes,
             max_log_bytes=settings.max_render_log_bytes,
-            memory_bytes=settings.worker_memory_bytes,
-            pids=settings.worker_pids_limit,
+        ),
+        CgroupIsolation(
+            settings.resource_isolation_mode,
+            CgroupLimits(
+                memory_bytes=settings.worker_memory_bytes,
+                swap_bytes=settings.worker_swap_bytes,
+                pids=settings.worker_pids_limit,
+                cleanup_timeout_seconds=settings.render_terminate_grace_seconds,
+            ),
+            configured_root=settings.cgroup_root,
         ),
     )
     gpu_discovery = GpuDiscovery()
+    gpu_scheduler = GpuScheduler(gpu_discovery)
     job_manager = JobManager(
         database,
         runner,
@@ -103,7 +113,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             bundled_root=settings.bundled_blender_root,
             installed_root=settings.blender_versions_root,
         ),
-        gpu_discovery,
+        gpu_scheduler,
         artifact_service,
         event_hub,
         jobs_root=settings.jobs_root,
@@ -111,6 +121,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         poll_seconds=settings.render_scheduler_poll_seconds,
     )
     app.state.gpu_discovery = gpu_discovery
+    app.state.gpu_scheduler = gpu_scheduler
     app.state.job_manager = job_manager
     app.state.job_service = JobService(
         database, job_storage, locks, event_hub, artifact_service, job_manager

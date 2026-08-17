@@ -278,6 +278,7 @@ cp {releases}/"$version"/"${{url##*/}}" "$output"
         "install.sh",
         "scripts/render-node",
         "scripts/build-release-bundle.sh",
+        "deploy/cgroup-delegation.sh",
         "deploy/container-entrypoint.sh",
         "deploy/supervisor.sh",
     ],
@@ -334,6 +335,7 @@ def test_bundle_manifest_is_explicit_and_clean(tmp_path: Path) -> None:
         "render-node/backend/uv.lock",
         "render-node/frontend/dist/index.html",
         "render-node/deploy/nginx.conf.template",
+        "render-node/deploy/cgroup-delegation.sh",
         "render-node/deploy/supervisor.sh",
         "render-node/scripts/render-node",
     }
@@ -540,6 +542,8 @@ def test_native_flow_has_no_node_docker_systemd_and_image_is_pinned() -> None:
     assert "| htpasswd -iBC" in entrypoint
     assert "unset RENDER_NODE_ADMIN_PASSWORD" in entrypoint
     assert "exec env -i" in entrypoint
+    assert "RENDER_NODE_RESOURCE_ISOLATION_MODE=strict" in entrypoint
+    assert "prepare_render_node_cgroup" in entrypoint
 
 
 def test_publish_job_is_gated_by_all_checks() -> None:

@@ -23,6 +23,13 @@ class RunnerMode(StrEnum):
     LOCAL_TRUSTED = "local_trusted"
 
 
+class ResourceIsolationMode(StrEnum):
+    """How Blender receives per-job process and system-memory limits."""
+
+    STRICT = "strict"
+    TRUSTED = "trusted"
+
+
 class DeploymentProfile(StrEnum):
     """Trust boundary selected by the operator for render execution."""
 
@@ -70,7 +77,10 @@ class Settings(BaseSettings):
     render_scheduler_poll_seconds: float = Field(default=0.5, ge=0.05, le=30)
     max_render_output_gb: float = Field(default=20, gt=0, le=2048)
     max_render_log_mb: int = Field(default=100, ge=1, le=4096)
+    resource_isolation_mode: ResourceIsolationMode = ResourceIsolationMode.TRUSTED
+    cgroup_root: Path | None = None
     worker_memory_gb: float = Field(default=16, gt=0, le=2048)
+    worker_swap_gb: float = Field(default=0, ge=0, le=2048)
     worker_pids_limit: int = Field(default=256, ge=16, le=65_536)
     preview_max_width: int = Field(default=1280, ge=64, le=8192)
     preview_max_height: int = Field(default=1280, ge=64, le=8192)
@@ -110,6 +120,8 @@ class Settings(BaseSettings):
     def validate_runtime_settings(self) -> Self:
         self.workspace = self.workspace.expanduser().resolve()
         self.bundled_blender_root = self.bundled_blender_root.expanduser().resolve()
+        if self.cgroup_root is not None:
+            self.cgroup_root = self.cgroup_root.expanduser().resolve()
         if not self.database_url:
             database_path = self.workspace / "database" / "render-node.sqlite3"
             self.database_url = f"sqlite+aiosqlite:///{database_path}"
@@ -150,6 +162,14 @@ class Settings(BaseSettings):
             raise ValueError(
                 "local_trusted runner_mode in production requires the explicit "
                 "single_tenant deployment_profile"
+            )
+        if (
+            self.env is Environment.PRODUCTION
+            and self.resource_isolation_mode is not ResourceIsolationMode.STRICT
+        ):
+            raise ValueError(
+                "production requires resource_isolation_mode=strict; trusted resource "
+                "fallback is limited to local/test environments"
             )
         return self
 
@@ -219,3 +239,7 @@ class Settings(BaseSettings):
     @property
     def worker_memory_bytes(self) -> int:
         return int(self.worker_memory_gb * 1024**3)
+
+    @property
+    def worker_swap_bytes(self) -> int:
+        return int(self.worker_swap_gb * 1024**3)

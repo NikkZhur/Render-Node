@@ -9,12 +9,23 @@ import math
 import os
 import resource
 import signal
+import subprocess
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import StrEnum
+from functools import partial
 from pathlib import Path
+from uuid import UUID
 
 import aiofiles
 
+from app.blender.cgroups import (
+    CgroupHandle,
+    CgroupIsolation,
+    CgroupIsolationError,
+    MemoryEvents,
+    ResourceIsolationStatus,
+)
 from app.blender.command import RenderCommand
 from app.blender.sandbox import SandboxPolicy
 
@@ -32,14 +43,19 @@ class RunnerError(RuntimeError):
     pass
 
 
+class FailureKind(StrEnum):
+    SYSTEM_MEMORY_OOM = "system_memory_oom"
+    GPU_MEMORY_OOM = "gpu_memory_oom"
+    BLENDER_ABORT = "blender_abort"
+    BLENDER_ERROR = "blender_error"
+
+
 @dataclass(frozen=True, slots=True)
 class RunnerLimits:
     timeout_seconds: float
     terminate_grace_seconds: float
     max_output_bytes: int
     max_log_bytes: int
-    memory_bytes: int
-    pids: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,16 +64,27 @@ class RunResult:
     cancelled: bool = False
     timed_out: bool = False
     limit_exceeded: bool = False
+    failure_kind: FailureKind | None = None
+    memory_events: MemoryEvents = field(default_factory=MemoryEvents)
 
 
 class SandboxRunner:
-    def __init__(self, policy: SandboxPolicy, limits: RunnerLimits) -> None:
+    def __init__(
+        self,
+        policy: SandboxPolicy,
+        limits: RunnerLimits,
+        resource_isolation: CgroupIsolation,
+    ) -> None:
         self._policy = policy
         self._limits = limits
+        self._resource_isolation = resource_isolation
+
+    async def initialize(self) -> None:
+        await self._resource_isolation.initialize()
 
     @property
     def available(self) -> bool:
-        return self._policy.local_runner_allowed
+        return self._policy.local_runner_allowed and self._resource_isolation.available
 
     @property
     def mode(self) -> str:
@@ -65,12 +92,17 @@ class SandboxRunner:
 
     @property
     def unavailable_reason(self) -> str | None:
-        return self._policy.unavailable_reason
+        return self._policy.unavailable_reason or self._resource_isolation.unavailable_reason
+
+    @property
+    def isolation_status(self) -> ResourceIsolationStatus:
+        return self._resource_isolation.status
 
     async def run(
         self,
         command: RenderCommand,
         *,
+        job_id: UUID,
         environment: dict[str, str],
         cancellation: asyncio.Event,
         on_started: StartedCallback,
@@ -78,32 +110,90 @@ class SandboxRunner:
         on_output: OutputCallback | None = None,
     ) -> RunResult:
         self._policy.ensure_local_runner_allowed()
+        isolation_reason = self._resource_isolation.unavailable_reason
+        if isolation_reason is not None:
+            raise RunnerError(isolation_reason)
         binary = Path(command.arguments[0])
         if not await asyncio.to_thread(self._is_executable, binary):
             raise RunnerError(f"Blender executable is unavailable: {binary}")
+        try:
+            cgroup = await self._resource_isolation.create(job_id)
+        except CgroupIsolationError as exc:
+            raise RunnerError(str(exc)) from exc
+        try:
+            return await self._run_process(
+                command,
+                cgroup=cgroup,
+                environment=environment,
+                cancellation=cancellation,
+                on_started=on_started,
+                on_line=on_line,
+                on_output=on_output,
+            )
+        finally:
+            if cgroup is not None:
+                cleanup_task = asyncio.create_task(cgroup.cleanup())
+                try:
+                    await asyncio.shield(cleanup_task)
+                except asyncio.CancelledError:
+                    await cleanup_task
+                    raise
+                except CgroupIsolationError as exc:
+                    raise RunnerError(str(exc)) from exc
+
+    async def _run_process(
+        self,
+        command: RenderCommand,
+        *,
+        cgroup: CgroupHandle | None,
+        environment: dict[str, str],
+        cancellation: asyncio.Event,
+        on_started: StartedCallback,
+        on_line: LineCallback,
+        on_output: OutputCallback | None,
+    ) -> RunResult:
         limit_event = asyncio.Event()
-        process = await asyncio.create_subprocess_exec(
-            *command.arguments,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            cwd=command.job_directory,
-            env=environment,
-            close_fds=True,
-            start_new_session=True,
-            preexec_fn=self._child_limits,
-        )
-        await on_started(process.pid)
-        stdout_task = asyncio.create_task(
-            self._read_stdout(process, command.log_path, on_line, limit_event)
-        )
-        process_task = asyncio.create_task(process.wait())
-        cancellation_task = asyncio.create_task(cancellation.wait())
-        output_task = asyncio.create_task(
-            self._watch_output(command.output_directory, limit_event, process_task, on_output)
-        )
+        gpu_memory_event = asyncio.Event()
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command.arguments,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=command.job_directory,
+                env=environment,
+                close_fds=True,
+                start_new_session=True,
+                preexec_fn=partial(self._child_limits, cgroup),
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RunnerError(f"Cannot start Blender in its resource boundary: {exc}") from exc
+        stdout_task: asyncio.Task[None] | None = None
+        process_task: asyncio.Task[int] | None = None
+        cancellation_task: asyncio.Task[bool] | None = None
+        output_task: asyncio.Task[None] | None = None
         timed_out = False
         cancelled = False
         try:
+            await on_started(process.pid)
+            stdout_task = asyncio.create_task(
+                self._read_stdout(
+                    process,
+                    command.log_path,
+                    on_line,
+                    limit_event,
+                    gpu_memory_event,
+                )
+            )
+            process_task = asyncio.create_task(process.wait())
+            cancellation_task = asyncio.create_task(cancellation.wait())
+            output_task = asyncio.create_task(
+                self._watch_output(
+                    command.output_directory,
+                    limit_event,
+                    process_task,
+                    on_output,
+                )
+            )
             done, _ = await asyncio.wait(
                 {process_task, cancellation_task, output_task},
                 timeout=self._limits.timeout_seconds,
@@ -121,29 +211,38 @@ class SandboxRunner:
         finally:
             if process.returncode is None:
                 await self._terminate_group(process)
-            cancellation_task.cancel()
-            await asyncio.gather(cancellation_task, return_exceptions=True)
-            await output_task
-            await stdout_task
+            if cancellation_task is not None:
+                cancellation_task.cancel()
+                await asyncio.gather(cancellation_task, return_exceptions=True)
+            if output_task is not None:
+                await output_task
+            if stdout_task is not None:
+                await stdout_task
+        memory_events = await cgroup.memory_events() if cgroup is not None else MemoryEvents()
+        exit_code = int(process.returncode if process.returncode is not None else -signal.SIGKILL)
         return RunResult(
-            exit_code=int(
-                process.returncode if process.returncode is not None else -signal.SIGKILL
-            ),
+            exit_code=exit_code,
             cancelled=cancelled,
             timed_out=timed_out,
             limit_exceeded=limit_event.is_set(),
+            failure_kind=self._failure_kind(
+                exit_code,
+                memory_events=memory_events,
+                gpu_memory_reported=gpu_memory_event.is_set(),
+                cancelled=cancelled,
+                timed_out=timed_out,
+                limit_exceeded=limit_event.is_set(),
+            ),
+            memory_events=memory_events,
         )
 
-    def _child_limits(self) -> None:
+    def _child_limits(self, cgroup: CgroupHandle | None = None) -> None:
+        if cgroup is not None:
+            cgroup.attach_current_process_in_child()
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
-        # RLIMIT_NPROC is per real UID, so it cannot safely isolate one render from
-        # other processes on the node. A future shared-service worker must enforce
-        # this limit through its own cgroup/PID namespace.
-        resource.setrlimit(
-            resource.RLIMIT_AS,
-            (self._limits.memory_bytes, self._limits.memory_bytes),
-        )
+        # RLIMIT_AS is intentionally absent: CUDA/OptiX reserve large virtual address
+        # ranges. Actual resident memory and process counts belong to the job cgroup.
         file_limit = self._limits.max_output_bytes
         resource.setrlimit(resource.RLIMIT_FSIZE, (file_limit, file_limit))
         # RLIMIT_CPU counts aggregate CPU time across Blender's render threads.
@@ -175,6 +274,7 @@ class SandboxRunner:
         log_path: Path,
         on_line: LineCallback,
         limit_event: asyncio.Event,
+        gpu_memory_event: asyncio.Event,
     ) -> None:
         if process.stdout is None:
             return
@@ -192,12 +292,52 @@ class SandboxRunner:
                 pending += chunk
                 while b"\n" in pending:
                     raw_line, pending = pending.split(b"\n", maxsplit=1)
-                    await on_line(raw_line.decode("utf-8", errors="replace").rstrip("\r"))
+                    line = raw_line.decode("utf-8", errors="replace").rstrip("\r")
+                    if self._reports_gpu_memory_exhaustion(line):
+                        gpu_memory_event.set()
+                    await on_line(line)
                 if len(pending) > 1024 * 1024:
                     await on_line(pending.decode("utf-8", errors="replace"))
                     pending = b""
             if pending:
-                await on_line(pending.decode("utf-8", errors="replace"))
+                line = pending.decode("utf-8", errors="replace")
+                if self._reports_gpu_memory_exhaustion(line):
+                    gpu_memory_event.set()
+                await on_line(line)
+
+    @staticmethod
+    def _failure_kind(
+        exit_code: int,
+        *,
+        memory_events: MemoryEvents,
+        gpu_memory_reported: bool,
+        cancelled: bool,
+        timed_out: bool,
+        limit_exceeded: bool,
+    ) -> FailureKind | None:
+        if exit_code == 0 or cancelled or timed_out or limit_exceeded:
+            return None
+        if memory_events.killed_by_oom or (memory_events.oom > 0 and exit_code != 0):
+            return FailureKind.SYSTEM_MEMORY_OOM
+        if gpu_memory_reported:
+            return FailureKind.GPU_MEMORY_OOM
+        if exit_code in {-signal.SIGABRT, 128 + signal.SIGABRT}:
+            return FailureKind.BLENDER_ABORT
+        return FailureKind.BLENDER_ERROR
+
+    @staticmethod
+    def _reports_gpu_memory_exhaustion(line: str) -> bool:
+        normalized = line.casefold()
+        return any(
+            marker in normalized
+            for marker in (
+                "system is out of gpu and shared host memory",
+                "out of gpu memory",
+                "cuda_error_out_of_memory",
+                "cuda error: out of memory",
+                "optix error: out of memory",
+            )
+        )
 
     async def _watch_output(
         self,

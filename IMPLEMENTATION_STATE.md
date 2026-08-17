@@ -5,8 +5,9 @@
 
 ## Текущее состояние
 
-- Обновлено: 2026-08-17 после fail-closed reconciliation Blender runtimes и
-  frontend empty-state без активной версии.
+- Обновлено: 2026-08-17 после замены `RLIMIT_AS` на per-job cgroup v2,
+  перевода GPU reservations на стабильные NVML UUID и исправления live
+  sample progress для фактических логов Blender 4.1.
 - Фазы 1–6 из `BACKEND_IMPLEMENTATION_MASTER_PROMPT.md` завершены.
 - Следующей фазы в master prompt нет; дальнейшая работа — отдельные deployment
   задачи, перечисленные ниже.
@@ -96,6 +97,11 @@
 - Корневой development launcher после миграций запускает backend, ожидает его
   публичный `/ready` до 60 секунд и только затем запускает frontend. При раннем
   завершении или неготовности backend frontend не запускается.
+- Vite читает server-only development settings из корневого `.env`. Если
+  allowlist содержит один внешний browser origin (или выбран
+  `RENDER_NODE_DEV_PUBLIC_ORIGIN`), HMR primary/fallback используют этот
+  публичный host. Остановка dev-server больше не заставляет browser обращаться
+  к `localhost` оператора и запрашивать Local Network Access.
 - Start/retry выполняют runner preflight до перехода в `QUEUED`; недоступный
   scheduler/runner возвращает `runner_unavailable`, сохраняя исходный статус.
   Frontend показывает capability runner и блокирует Start при недоступности.
@@ -125,6 +131,31 @@
   CPU-рендер раньше настроенного wall-time. Alembic создаёт отсутствующий
   родительский каталог абсолютной SQLite path, поэтому migration bootstrap
   работает на полностью новом workspace.
+- `RLIMIT_AS` полностью удалён из Blender child setup: CUDA/OptiX больше не
+  ограничены ложным пределом виртуального адресного пространства. Strict mode
+  обнаруживает mount/current cgroup без предположений о `/sys/fs/cgroup`,
+  требует delegated writable cgroup v2 и создаёт отдельную группу job с
+  `memory.max`, optional `memory.swap.max`, `pids.max` и optional
+  `memory.oom.group`.
+- Blender присоединяется к job-cgroup до exec, поэтому его потомки наследуют
+  группу. После success/failure/cancel/timeout/setup error сохраняется прежнее
+  завершение process group, читаются `memory.events`, уничтожаются оставшиеся
+  члены и удаляется cgroup. cgroup RAM OOM, Blender/CUDA VRAM OOM и обычный
+  `SIGABRT` имеют разные job errors.
+- Progress parser распознаёт реальный вывод Blender 4.1
+  `Fra:1 ... | Sample 48/512` и вариант с пробелами, а также прежний
+  `Rendering X / Y samples`. Job Manager объединяет sample текущего кадра с
+  диапазоном кадров в persisted overall progress; WebSocket snapshot с
+  `sample`/`total_samples` теперь отображается в Current task на desktop/mobile
+  и очищается при смене кадра, resync или terminal status.
+- Local/test `trusted` resource mode явно использует внешний лимит узла без
+  per-job cgroup и без `RLIMIT_AS`; production принимает только `strict` и
+  отказывает Start/Retry, если cgroup создать нельзя. cgroup v1 распознаётся и
+  даёт проверенный fail-closed fallback, записи в него не выполняются.
+- NVML inventory фиксируется при startup. Совместимые публичные `gpu_ids`
+  переводятся в стабильные UUID; scheduler резервирует все UUID до `finally`,
+  повторно проверяет их наличие и передаёт Blender UUID через
+  `CUDA_VISIBLE_DEVICES`, включая multi-GPU process.
 
 ## Контракты и миграции
 
@@ -147,12 +178,20 @@
 - `WS /api/v1/events` закрывает unauthorized/forbidden handshake кодами 4401/4403
   и oversized client message кодом 1009.
 - `GET /api/v1/system/capabilities` возвращает `runner.available`, `mode` и
-  пользовательское `message`; изменения схемы БД не потребовалось.
+  пользовательское `message`, а также additive `runner.isolation` с mode,
+  backend/cgroup version, лимитами, feature support и диагностикой; изменения
+  схемы БД не потребовалось.
+- Схема `render.progress` не менялась: frontend начал использовать уже
+  существующие optional поля `frame`, `sample`, `total_samples` и `progress`.
 - Настройки deployment boundary: `RENDER_NODE_DEPLOYMENT_PROFILE` принимает
   `isolated_worker` или `single_tenant`; `RENDER_NODE_RUNNER_MODE=local_trusted`
   в production валиден только со вторым профилем. Миграция БД не требуется.
 - Остальные security-настройки: `RENDER_NODE_AUTH_TOKEN`,
   `RENDER_NODE_MAX_API_REQUEST_MB`, `RENDER_NODE_WEBSOCKET_MESSAGE_MAX_KB`.
+- Resource settings: `RENDER_NODE_RESOURCE_ISOLATION_MODE=strict|trusted`,
+  optional `RENDER_NODE_CGROUP_ROOT`, `RENDER_NODE_WORKER_MEMORY_GB` как
+  `memory.max`, `RENDER_NODE_WORKER_SWAP_GB` как optional `memory.swap.max` и
+  `RENDER_NODE_WORKER_PIDS_LIMIT` как `pids.max`. Production требует `strict`.
 - Deployment contract не меняет REST API или БД. Для прямого image остаются
   container-only границы: `RENDER_NODE_ADMIN_HTPASSWD_B64` либо
   `RENDER_NODE_ADMIN_USERNAME` + `RENDER_NODE_ADMIN_PASSWORD` для прямого image;
@@ -160,15 +199,35 @@
 
 ## Последняя проверка
 
-- Backend: Ruff format/check и strict mypy `app` — успешно. Полный pytest:
-  167 passed, 1 skipped из-за отсутствующих system `nginx/envsubst`, одно
-  upstream Starlette warning. Новые тесты покрывают empty registry/readiness,
-  точную patch-версию, missing/permission/exec-format/nonzero/malformed/timeout/
-  cancellation executable, process-group cleanup, bundled и official/manual
-  reconciliation, invalid active, reusable archive, bundled collision и явный
-  API workflow download/install/activate перед созданием job. Origin boundary
-  повторно проверена для REST и WebSocket, включая недоверенный Origin с
-  доверенно выглядящими forwarded headers.
+- Backend: Ruff format/check и strict mypy `app tests` — успешно. Полный pytest:
+  190 passed, 1 skipped из-за отсутствующих system `nginx/envsubst`, одно
+  upstream Starlette warning. Новые cgroup/GPU тесты покрывают отсутствие
+  `RLIMIT_AS`, fake cgroup v2 setup/attach/OOM/cleanup, read-only и v1
+  detection, strict/trusted modes, success/failure/cancel/timeout/setup error,
+  VRAM-vs-RAM-vs-SIGABRT diagnostics, UUID stability при перестановке NVML
+  indices, one/multi-GPU visibility и release в `finally`. `bash -n` для
+  deployment scripts и `git diff --check` успешны.
+- Sample progress: 16 целевых backend-тестов parser/Job Manager и 4 frontend
+  realtime contract-теста успешны. Сохранённый реальный Blender 4.1.1 log
+  разобран без запуска Blender: 64 sample updates, для кадров 1 и 2 от `0/512`
+  до `512/512`. Отдельный desktop/mobile mock sample smoke успешен; screenshots
+  просмотрены, clipping и horizontal overflow не
+  обнаружены. В ходе этого follow-up реальный render не запускался.
+- Фактическая системная диагностика: devcontainer использует cgroup v1 без
+  writable v2 delegation. Strict mode вернул `available=false` с явным
+  требованием delegated cgroup v2; trusted mode вернул external boundary и не
+  обращался к cgroupfs. Kernel cgroup v2 setup/attach/OOM/cleanup и его
+  совместная работа с GPU-процессом не заявляются проверенными.
+- Реальный development GPU smoke после перезапуска backend с новым runner:
+  официальный Blender 4.1.1 отрендерил кадры 1–2 пользовательской сцены через
+  Cycles/OptiX на NVIDIA RTX A5000. Job
+  `54c6f8ca-bd41-4218-80a2-1bc02169a8f1` завершён как `COMPLETED`, progress
+  `1.0`, exit code `0`; сохранены `frame_0001.png` (5 239 667 bytes) и
+  `frame_0002.png` (5 237 288 bytes). Во время трассировки наблюдались 100% GPU,
+  около 3.36 GiB VRAM и более 35 GiB virtual address space, что подтверждает
+  устранение ложного OOM от прежнего `RLIMIT_AS`. Это проверка текущего
+  trusted/devcontainer runtime, а не released production image или strict
+  delegated-cgroup deployment.
 - Реальный development CPU smoke: официальный Blender 4.5.11 LTS с проверенным
   SHA-256 успешно отрендерил кадр 1 `Untitled.blend` в Eevee через публичный Job
   API; job `COMPLETED`, progress `1.0`, exit code `0`. Original 600×900 PNG,
@@ -193,6 +252,11 @@
   просмотрены. Появление job error отдельно проверено обычным кликом: высота
   desktop-панели и положение Runtime/actions не меняются; clipping, overlap и
   horizontal overflow не обнаружены.
+- RunPod proxy HMR smoke через реальный Chromium: страница и same-origin API
+  вернули `200`, HMR и application WebSocket использовали только
+  `wss://<pod>-5173.proxy.runpod.net`, localhost/127.0.0.1 sockets отсутствуют.
+  Новый Node config-test (3 tests), frontend ESLint и production build успешны;
+  desktop screenshot просмотрен, prompt, clipping и overflow не обнаружены.
 - После обычного перезапуска `make dev` реальные `/ready` и
   `/api/v1/system/capabilities` вернули ready и `local_trusted/available=true`;
   настройки процесса вручную через shell env больше не требуются. Порядок
@@ -244,15 +308,24 @@
 - Worker image/namespace с network/filesystem/device isolation и non-root
   runtime ещё не реализован; поэтому shared production в профиле
   `isolated_worker` не достигает readiness при включённом scheduler.
+- Текущее devcontainer-окружение использует cgroup v1 и не делегирует writable
+  cgroup v2. Здесь проверены v1 detection/strict fail-closed и trusted fallback;
+  реальный kernel cgroup v2 setup/attach/OOM/cleanup требует Ubuntu Pod с
+  delegated `memory`/`pids`. Fake cgroup v2 покрывает эти lifecycle-контракты.
 - `local_trusted` запускает Blender subprocess напрямую и предназначен только для
   доверенных сцен; он не является sandbox. В production он разрешён только для
   явного `single_tenant`, где весь временный VM/Pod принадлежит одному оператору.
 - Production image может содержать bundled Blender binaries, но локально не
   собирался. Development CPU/Eevee для Blender 4.5.11 проверялся ранее; глобальный
   executable override удалён, поэтому повторная проверка должна использовать
-  обычный UI workflow и реальный version-specific runtime. CUDA/OptiX и bundled
-  5.2.0/4.1.1 runtime smoke должны быть
-  проверены на реальном облачном GPU до заявления их работоспособности.
+  обычный UI workflow и реальный version-specific runtime. Blender 4.1.1 с
+  Cycles/OptiX проверен на RTX A5000 в текущем devcontainer; bundled 5.2.0,
+  released production image и совместный strict cgroup v2 + GPU lifecycle ещё
+  должны быть проверены на целевом облачном Pod.
+- Реального совместного smoke `strict cgroup v2 + Blender/CUDA/OptiX` нет:
+  текущий GPU smoke относится только к trusted devcontainer без per-job cgroup.
+  После просьбы пользователя дальнейшие render smoke не запускаются; целевой
+  strict/GPU сценарий остаётся ручной внешней проверкой.
 - Для custom browser deployment вне поставляемого gateway backend также должен
   оставаться приватным за HTTPS proxy, который подставляет Bearer в HTTP и
   WebSocket upgrades. Токен нельзя помещать в `VITE_*` или JavaScript.

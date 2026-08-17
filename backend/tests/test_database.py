@@ -30,7 +30,7 @@ async def test_migrations_reach_current_head(tmp_path: Path) -> None:
 
 
 async def test_lifespan_rejects_database_without_current_migration(tmp_path: Path) -> None:
-    settings = Settings(env=Environment.TEST, workspace=tmp_path)
+    settings = Settings(env=Environment.TEST, workspace=tmp_path, database_url="")
     app = create_app(settings)
 
     with pytest.raises(RuntimeError, match="alembic upgrade head"):

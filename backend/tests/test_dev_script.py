@@ -5,6 +5,7 @@ import sys
 from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
+from typing import Any, cast
 
 import pytest
 
@@ -28,7 +29,7 @@ def dev_script(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, spec.name, module)
     spec.loader.exec_module(module)
-    module.stop_signal = None
+    cast(Any, module).stop_signal = None
     return module
 
 
@@ -56,7 +57,7 @@ def test_main_starts_frontend_only_after_backend_is_ready(
     started: list[str] = []
 
     def start_service(service: object) -> FakeProcess:
-        service_name = service.name
+        service_name = str(cast(Any, service).name)
         started.append(service_name)
         return backend if service_name == "backend" else frontend
 
@@ -84,7 +85,7 @@ def test_main_does_not_start_frontend_when_backend_is_not_ready(
     started: list[str] = []
 
     def start_service(service: object) -> FakeProcess:
-        started.append(service.name)
+        started.append(str(cast(Any, service).name))
         return backend
 
     monkeypatch.setattr(dev_script, "require_commands", lambda: True)

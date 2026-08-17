@@ -20,6 +20,7 @@ def settings(tmp_path: Path) -> Settings:
     configured = Settings(
         env=Environment.TEST,
         workspace=tmp_path,
+        database_url="",
         bundled_blender_root=tmp_path / "bundled",
         runner_mode=RunnerMode.DISABLED,
     )

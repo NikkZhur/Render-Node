@@ -96,10 +96,10 @@ async def test_worker_environment_is_allowlisted_and_gpu_scoped(tmp_path: Path) 
     environment = await build_worker_environment(
         job_root,
         device=ComputeDevice.OPTIX,
-        gpu_ids=[1, 3],
+        gpu_uuids=["GPU-first", "GPU-second"],
     )
 
-    assert environment["CUDA_VISIBLE_DEVICES"] == "1,3"
+    assert environment["CUDA_VISIBLE_DEVICES"] == "GPU-first,GPU-second"
     assert environment["PYTHONPATH"] == ""
     assert environment["PYTHONHOME"] == ""
     assert "DATABASE_URL" not in environment

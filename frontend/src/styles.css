@@ -1708,6 +1708,10 @@ main {
   text-align: right;
 }
 
+.progress-stat-samples {
+  min-width: 72px;
+}
+
 .progress-stats small {
   display: block;
   margin-bottom: 3px;
@@ -3252,7 +3256,10 @@ main {
     align-items: flex-end;
   }
 
-  .progress-stats span { display: none; }
+  .progress-stat-frame,
+  .progress-stat-state { display: none; }
+
+  .progress-stats .progress-stat-samples { display: block; }
 
   .setup-panel { padding: 17px; }
   .two-column-fields { grid-template-columns: 1fr; }

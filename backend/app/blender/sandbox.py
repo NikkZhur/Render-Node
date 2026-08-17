@@ -73,7 +73,7 @@ async def build_worker_environment(
     job_directory: Path,
     *,
     device: ComputeDevice,
-    gpu_ids: list[int],
+    gpu_uuids: list[str],
 ) -> dict[str, str]:
     temp_root = contained_path(job_directory, job_directory / "temp")
     home = contained_path(temp_root, temp_root / "home")
@@ -93,5 +93,5 @@ async def build_worker_environment(
         "PYTHONHOME": "",
     }
     if device is not ComputeDevice.CPU:
-        environment["CUDA_VISIBLE_DEVICES"] = ",".join(str(gpu_id) for gpu_id in gpu_ids)
+        environment["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_uuids)
     return environment

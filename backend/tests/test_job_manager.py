@@ -16,6 +16,9 @@ from alembic.config import Config
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from app.blender.cgroups import MemoryEvents
+from app.blender.devices import GpuDevice, GpuDiscovery, GpuScheduler
+from app.blender.runner import FailureKind, RunnerError, RunResult, SandboxRunner
 from app.config import Environment, Settings
 from app.jobs.manager import JobManager
 from app.jobs.models import Job, utc_now
@@ -130,6 +133,36 @@ def read_when_created(path: Path, *, max_wait_seconds: float = 2) -> str:
         except FileNotFoundError:
             time.sleep(0.02)
     raise AssertionError(f"file was not created: {path}")
+
+
+def test_job_error_messages_distinguish_system_ram_vram_and_plain_abort() -> None:
+    system_oom = RunResult(
+        exit_code=-9,
+        failure_kind=FailureKind.SYSTEM_MEMORY_OOM,
+        memory_events=MemoryEvents(oom=1, oom_kill=1),
+    )
+    gpu_oom = RunResult(exit_code=-6, failure_kind=FailureKind.GPU_MEMORY_OOM)
+    plain_abort = RunResult(exit_code=-6, failure_kind=FailureKind.BLENDER_ABORT)
+
+    assert "cgroup system memory" in JobManager._failure_message(system_oom)
+    assert "does not limit VRAM" in JobManager._failure_message(gpu_oom)
+    assert "without a cgroup OOM event" in JobManager._failure_message(plain_abort)
+
+
+def test_overall_progress_combines_current_sample_and_frame_range() -> None:
+    job = Job(
+        name="Samples",
+        blender_version="4.1.1",
+        engine=RenderEngine.CYCLES,
+        device=ComputeDevice.OPTIX,
+        gpu_ids=[0],
+        frame_mode=FrameMode.RANGE,
+        frame_start=1,
+        frame_end=2,
+    )
+
+    assert JobManager._overall_progress(job, 1, 400 / 512) == pytest.approx(400 / 1024)
+    assert JobManager._overall_progress(job, 2, 400 / 512) == pytest.approx(912 / 1024)
 
 
 async def test_scheduler_runs_fake_blender_serially_and_persists_progress(
@@ -365,6 +398,80 @@ async def test_unavailable_gpu_fails_job_without_starting_blender(
     assert failed.process_pid is None
     log_path = render_settings.jobs_root / str(job_id) / "logs" / "blender.log"
     assert not await asyncio.to_thread(log_path.exists)
+
+
+async def test_multi_gpu_job_uses_uuid_visibility_and_releases_every_gpu(
+    render_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    devices = [
+        GpuDevice(id=0, uuid="GPU-stable-a", name="GPU A", memory_total_bytes=24 * 1024**3),
+        GpuDevice(id=1, uuid="GPU-stable-b", name="GPU B", memory_total_bytes=48 * 1024**3),
+    ]
+    monkeypatch.setattr(GpuDiscovery, "discover", lambda self: devices)
+    app = create_app(render_settings)
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            assert (await client.post("/api/v1/blender/versions/5.2.0/activate")).status_code == 200
+            payload = job_payload("Multi GPU")
+            payload.update({"device": "OPTIX", "gpu_ids": [0, 1]})
+            created = await client.post("/api/v1/jobs", json=payload)
+            job_id = UUID(created.json()["id"])
+            uploaded = await client.post(
+                f"/api/v1/jobs/{job_id}/uploads",
+                files={"file": ("scene.blend", b"BLENDER-v300 FAST", "application/octet-stream")},
+            )
+            assert uploaded.status_code == 200
+            assert (await client.post(f"/api/v1/jobs/{job_id}/start")).status_code == 200
+            manager = cast(JobManager, app.state.job_manager)
+            completed = await manager.wait_for_terminal(job_id, max_wait_seconds=3)
+            scheduler = cast(GpuScheduler, app.state.gpu_scheduler)
+
+    assert completed.status is JobStatus.COMPLETED
+    raw_log = await asyncio.to_thread(
+        (render_settings.jobs_root / str(job_id) / "logs" / "blender.log").read_text
+    )
+    assert "visible-gpus=GPU-stable-a,GPU-stable-b" in raw_log
+    assert scheduler.reserved_uuids == set()
+
+
+async def test_gpu_reservation_is_released_when_runner_setup_fails(
+    render_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    devices = [GpuDevice(id=0, uuid="GPU-stable-a", name="GPU A", memory_total_bytes=24 * 1024**3)]
+    monkeypatch.setattr(GpuDiscovery, "discover", lambda self: devices)
+
+    async def fail_run(self: SandboxRunner, *args: object, **kwargs: object) -> None:
+        raise RunnerError("synthetic cgroup setup failure")
+
+    monkeypatch.setattr(SandboxRunner, "run", fail_run)
+    app = create_app(render_settings)
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            assert (await client.post("/api/v1/blender/versions/5.2.0/activate")).status_code == 200
+            payload = job_payload("GPU setup failure")
+            payload.update({"device": "CUDA", "gpu_ids": [0]})
+            created = await client.post("/api/v1/jobs", json=payload)
+            job_id = UUID(created.json()["id"])
+            assert (
+                await client.post(
+                    f"/api/v1/jobs/{job_id}/uploads",
+                    files={
+                        "file": ("scene.blend", b"BLENDER-v300 FAST", "application/octet-stream")
+                    },
+                )
+            ).status_code == 200
+            assert (await client.post(f"/api/v1/jobs/{job_id}/start")).status_code == 200
+            manager = cast(JobManager, app.state.job_manager)
+            failed = await manager.wait_for_terminal(job_id, max_wait_seconds=3)
+            scheduler = cast(GpuScheduler, app.state.gpu_scheduler)
+
+    assert failed.status is JobStatus.FAILED
+    assert failed.error == "synthetic cgroup setup failure"
+    assert scheduler.reserved_uuids == set()
 
 
 async def test_wall_time_limit_fails_job_and_clears_process(

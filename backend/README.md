@@ -18,6 +18,24 @@ cloud Pod belongs to one operator. Production keeps the `isolated_worker`
 profile by default and fails closed there while no OS-isolated worker exists.
 Settings load from the repository-root `.env`.
 
+Resource isolation is separate from the scene trust profile:
+
+- `RENDER_NODE_RESOURCE_ISOLATION_MODE=strict` requires a delegated writable
+  cgroup v2 subtree and is mandatory in production. Each job sets
+  `memory.max`, optional `memory.swap.max`, `pids.max`, and optional
+  `memory.oom.group`; startup diagnostics reject rendering when this boundary
+  cannot be prepared.
+- `RENDER_NODE_RESOURCE_ISOLATION_MODE=trusted` is local/test-only. It never
+  applies `RLIMIT_AS` and explicitly relies on external container/Pod limits.
+
+`RENDER_NODE_WORKER_MEMORY_GB` is the actual system-RAM cgroup limit;
+`RENDER_NODE_WORKER_SWAP_GB` defaults to zero, and
+`RENDER_NODE_WORKER_PIDS_LIMIT` controls the per-job process count. An optional
+`RENDER_NODE_CGROUP_ROOT` must remain inside the process's current cgroup subtree.
+Only cgroup v2 is enforced; detected v1 or read-only hierarchies fail closed in
+strict mode. `/api/v1/system/capabilities` exposes the selected backend and
+feature support.
+
 Production additionally requires a secret `RENDER_NODE_AUTH_TOKEN` with at least
 32 characters and exact HTTPS `RENDER_NODE_ALLOWED_ORIGINS`. `/health` and
 `/ready` are public probes; every REST and WebSocket route below `/api/v1`
@@ -49,7 +67,14 @@ Render lifecycle:
   queued and rendering jobs return `409` until cancelled;
 - `POST /api/v1/jobs/{id}/start` queues a ready job;
 - one scheduler task starts the oldest queued job;
+- NVML inventory is captured at startup; scheduler reservations and
+  `CUDA_VISIBLE_DEVICES` use stable GPU UUIDs even if runtime indices reorder;
 - `GET /api/v1/jobs/{id}` exposes persisted progress and process state;
+- Blender 4.1 progress lines such as `Fra:1 ... | Sample 48/512` update both
+  persisted overall frame-range progress and the existing WebSocket
+  `sample`/`total_samples` fields; unrecognized log lines remain non-fatal;
 - `POST /api/v1/jobs/{id}/cancel` stops the whole process group before persisting
   `cancelled`;
+- cgroup `memory.events` distinguishes actual system-RAM OOM from Blender/CUDA
+  VRAM exhaustion and a plain `SIGABRT`; cgroups do not limit VRAM;
 - `GET /api/v1/devices` returns an empty list safely when NVIDIA NVML is unavailable.

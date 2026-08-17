@@ -8,11 +8,12 @@ from pathlib import Path
 from uuid import UUID
 
 from app.artifacts.service import ArtifactService
+from app.blender.cgroups import ResourceIsolationStatus
 from app.blender.command import BlenderExecutableResolver, build_render_command
-from app.blender.devices import GpuDiscovery
+from app.blender.devices import GpuAllocation, GpuReservationError, GpuScheduler
 from app.blender.progress import parse_progress
 from app.blender.repository import BlenderRepository
-from app.blender.runner import RunnerError, RunResult, SandboxRunner
+from app.blender.runner import FailureKind, RunnerError, RunResult, SandboxRunner
 from app.blender.sandbox import SandboxUnavailableError, build_worker_environment
 from app.blender.types import RuntimeSource, RuntimeState
 from app.events.hub import EventHub
@@ -30,7 +31,7 @@ class JobManager:
         database: Database,
         runner: SandboxRunner,
         executable_resolver: BlenderExecutableResolver,
-        gpu_discovery: GpuDiscovery,
+        gpu_scheduler: GpuScheduler,
         artifact_service: ArtifactService,
         event_hub: EventHub,
         *,
@@ -41,7 +42,7 @@ class JobManager:
         self._database = database
         self._runner = runner
         self._resolver = executable_resolver
-        self._gpu_discovery = gpu_discovery
+        self._gpu_scheduler = gpu_scheduler
         self._artifacts = artifact_service
         self._events = event_hub
         self._jobs_root = jobs_root
@@ -56,6 +57,8 @@ class JobManager:
         self._active_finished: asyncio.Event | None = None
 
     async def start(self) -> None:
+        await self._runner.initialize()
+        await self._gpu_scheduler.initialize()
         await self._recover_interrupted()
         if self._enabled:
             self._scheduler_task = asyncio.create_task(self._scheduler_loop())
@@ -87,6 +90,10 @@ class JobManager:
         if not self._enabled:
             return "Render scheduler is disabled"
         return self._runner.unavailable_reason
+
+    @property
+    def resource_isolation_status(self) -> ResourceIsolationStatus:
+        return self._runner.isolation_status
 
     def ensure_accepting_jobs(self) -> None:
         reason = self.runner_unavailable_reason
@@ -150,6 +157,7 @@ class JobManager:
     async def _execute(self, job_id: UUID) -> None:
         cancellation = asyncio.Event()
         finished = asyncio.Event()
+        gpu_allocation: GpuAllocation | None = None
         async with self._state_lock:
             if self._active_job_id is not None:
                 raise RuntimeError("Job Manager attempted to run two jobs")
@@ -160,11 +168,12 @@ class JobManager:
             job, source = await self._prepare(job_id)
             binary = self._resolver.binary(job.blender_version, source)
             command = build_render_command(job, binary=binary, jobs_root=self._jobs_root)
-            await self._validate_gpu_request(job)
+            if job.device is not ComputeDevice.CPU:
+                gpu_allocation = await self._gpu_scheduler.reserve(job.gpu_ids)
             environment = await build_worker_environment(
                 command.job_directory,
                 device=job.device,
-                gpu_ids=job.gpu_ids,
+                gpu_uuids=list(gpu_allocation.uuids) if gpu_allocation is not None else [],
             )
             await self._mark_rendering(job_id)
 
@@ -179,6 +188,7 @@ class JobManager:
 
             result = await self._runner.run(
                 command,
+                job_id=job_id,
                 environment=environment,
                 cancellation=cancellation,
                 on_started=on_started,
@@ -189,6 +199,7 @@ class JobManager:
         except (
             RunnerError,
             SandboxUnavailableError,
+            GpuReservationError,
             ServiceError,
             ValueError,
             RuntimeError,
@@ -197,6 +208,14 @@ class JobManager:
         except Exception:
             await self._fail(job_id, "Unexpected render worker failure")
         finally:
+            cleanup_cancellation: asyncio.CancelledError | None = None
+            if gpu_allocation is not None:
+                release_task = asyncio.create_task(self._gpu_scheduler.release(gpu_allocation))
+                try:
+                    await asyncio.shield(release_task)
+                except asyncio.CancelledError as exc:
+                    await release_task
+                    cleanup_cancellation = exc
             with contextlib.suppress(Exception):
                 await self._artifacts.register_log(job_id)
             async with self._state_lock:
@@ -205,6 +224,8 @@ class JobManager:
                 self._active_finished = None
                 finished.set()
             self._wake.set()
+            if cleanup_cancellation is not None:
+                raise cleanup_cancellation
 
     async def _prepare(self, job_id: UUID) -> tuple[Job, RuntimeSource]:
         async with self._database.session_factory() as session:
@@ -219,14 +240,6 @@ class JobManager:
             if runtime is None or runtime.state is not RuntimeState.INSTALLED:
                 raise RuntimeError("Job Blender version is not installed")
             return job, runtime.source
-
-    async def _validate_gpu_request(self, job: Job) -> None:
-        if job.device is ComputeDevice.CPU:
-            return
-        devices = await asyncio.to_thread(self._gpu_discovery.discover)
-        available = {device.id for device in devices}
-        if not set(job.gpu_ids).issubset(available):
-            raise RuntimeError("Requested GPU is unavailable")
 
     async def _mark_rendering(self, job_id: UUID) -> None:
         async with self._database.session_factory() as session, session.begin():
@@ -303,6 +316,9 @@ class JobManager:
             elif result.limit_exceeded:
                 target = JobStatus.FAILED
                 error = "Render exceeded its output or log size limit"
+            elif result.failure_kind is not None:
+                target = JobStatus.FAILED
+                error = self._failure_message(result)
             elif result.exit_code == 0:
                 target = JobStatus.COMPLETED
                 error = None
@@ -316,6 +332,19 @@ class JobManager:
             job.error = error
             job.finished_at = utc_now()
         await self._publish_status(job)
+
+    @staticmethod
+    def _failure_message(result: RunResult) -> str:
+        if result.failure_kind is FailureKind.SYSTEM_MEMORY_OOM:
+            return "Render exceeded its per-job cgroup system memory limit"
+        if result.failure_kind is FailureKind.GPU_MEMORY_OOM:
+            return (
+                "Blender/CUDA reported GPU or shared GPU-memory exhaustion; "
+                "the system-memory cgroup does not limit VRAM"
+            )
+        if result.failure_kind is FailureKind.BLENDER_ABORT:
+            return "Blender aborted (SIGABRT) without a cgroup OOM event"
+        return f"Blender exited with code {result.exit_code}"
 
     async def _fail(self, job_id: UUID, message: str) -> None:
         async with self._database.session_factory() as session, session.begin():

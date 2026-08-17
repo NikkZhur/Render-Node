@@ -127,6 +127,11 @@ start_service() {
       RENDER_NODE_TEST_MODE=1 RENDER_NODE_TEST_BIN="${RENDER_NODE_TEST_BIN:-}" \
       setsid "$SUPERVISOR" "$CONFIG_FILE" >> "$SERVICE_LOG" 2>&1 &
   else
+    # The root management process delegates only the service's cgroup subtree;
+    # Blender jobs remain unprivileged descendants of the backend.
+    # shellcheck source=/dev/null
+    source "${INSTALL_ROOT}/current/deploy/cgroup-delegation.sh"
+    prepare_render_node_cgroup "$APP_USER"
     setpriv --reuid="$APP_USER" --regid="$APP_USER" --init-groups \
       --inh-caps=-all --ambient-caps=-all --bounding-set=-all \
       env -i PATH="$SYSTEM_PATH" HOME="$STATE_ROOT/home" LANG="${LANG:-C.UTF-8}" \

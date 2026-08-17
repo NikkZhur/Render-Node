@@ -5,7 +5,7 @@ from uuid import UUID
 
 from httpx import ASGITransport, AsyncClient
 
-from app.config import Settings
+from app.config import ResourceIsolationMode, Settings
 from app.jobs.repository import JobRepository
 from app.jobs.types import JobStatus
 from app.main import create_app
@@ -229,17 +229,55 @@ async def test_disabled_runner_rejects_start_without_changing_ready_job(
             persisted_after_retry = await client.get(f"/api/v1/jobs/{job_id}")
 
     assert capabilities.status_code == 200
-    assert capabilities.json()["runner"] == {
-        "available": False,
-        "mode": "disabled",
-        "message": "Render scheduler is disabled",
-    }
+    runner_capability = capabilities.json()["runner"]
+    assert runner_capability["available"] is False
+    assert runner_capability["mode"] == "disabled"
+    assert runner_capability["message"] == "Render scheduler is disabled"
+    assert runner_capability["isolation"]["mode"] == "trusted"
+    assert runner_capability["isolation"]["backend"] == "external"
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "runner_unavailable"
     assert persisted.json()["status"] == "ready"
     assert retry.status_code == 409
     assert retry.json()["error"]["code"] == "runner_unavailable"
     assert persisted_after_retry.json()["status"] == "cancelled"
+
+
+async def test_strict_cgroup_failure_rejects_start_without_queueing(
+    job_settings: Settings,
+) -> None:
+    settings = job_settings.model_copy(
+        update={
+            "render_scheduler_enabled": True,
+            "resource_isolation_mode": ResourceIsolationMode.STRICT,
+            "cgroup_root": job_settings.workspace / "not-a-delegated-cgroup",
+        }
+    )
+    app = create_app(settings)
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            assert (await client.post("/api/v1/blender/versions/5.2.0/activate")).status_code == 200
+            created = await client.post("/api/v1/jobs", json=job_payload())
+            job_id = created.json()["id"]
+            assert (
+                await client.post(
+                    f"/api/v1/jobs/{job_id}/uploads",
+                    files={"file": ("scene.blend", b"BLENDER-v300", "application/octet-stream")},
+                )
+            ).status_code == 200
+
+            capabilities = await client.get("/api/v1/system/capabilities")
+            response = await client.post(f"/api/v1/jobs/{job_id}/start")
+            persisted = await client.get(f"/api/v1/jobs/{job_id}")
+
+    assert capabilities.json()["runner"]["available"] is False
+    assert capabilities.json()["runner"]["isolation"]["mode"] == "strict"
+    assert capabilities.json()["runner"]["isolation"]["available"] is False
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "runner_unavailable"
+    assert "cgroup" in response.json()["error"]["message"].lower()
+    assert persisted.json()["status"] == "ready"
 
 
 async def test_unknown_job_uses_shared_error_contract(job_client: AsyncClient) -> None:

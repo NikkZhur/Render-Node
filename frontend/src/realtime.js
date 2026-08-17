@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { eventsApi, presentMetrics } from "./api";
+import { mergeRenderProgress } from "./renderProgress";
 
 const MAX_LOG_LINES = 500;
 
@@ -15,6 +16,7 @@ const resync = (queryClient) => {
 
 export function useRenderEvents(queryClient, enabled = true) {
   const [logsByJob, setLogsByJob] = useState({});
+  const [progressByJob, setProgressByJob] = useState({});
   const [connectionState, setConnectionState] = useState(enabled ? "connecting" : "mock");
 
   useEffect(() => {
@@ -31,6 +33,7 @@ export function useRenderEvents(queryClient, enabled = true) {
       socket.addEventListener("open", () => {
         retryDelay = 500;
         setConnectionState("connected");
+        setProgressByJob({});
         socket.send(JSON.stringify({ action: "subscribe", job_ids: null }));
         resync(queryClient);
       });
@@ -53,8 +56,25 @@ export function useRenderEvents(queryClient, enabled = true) {
           return;
         }
         if (event.type === "resync.required") {
+          setProgressByJob({});
           resync(queryClient);
           return;
+        }
+        if (event.type === "render.progress" && event.job_id) {
+          setProgressByJob((current) => {
+            return {
+              ...current,
+              [event.job_id]: mergeRenderProgress(current[event.job_id], event),
+            };
+          });
+        }
+        if (event.type === "job.status_changed" && event.job_id) {
+          setProgressByJob((current) => {
+            if (!(event.job_id in current)) return current;
+            const next = { ...current };
+            delete next[event.job_id];
+            return next;
+          });
         }
         if (event.type?.startsWith("job.") || event.type === "render.progress") {
           queryClient.invalidateQueries({ queryKey: ["jobs"] });
@@ -86,5 +106,5 @@ export function useRenderEvents(queryClient, enabled = true) {
     };
   }, [enabled, queryClient]);
 
-  return { connectionState, logsByJob };
+  return { connectionState, logsByJob, progressByJob };
 }

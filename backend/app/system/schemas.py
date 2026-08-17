@@ -51,10 +51,24 @@ class SystemMetricsResponse(BaseModel):
     websocket_clients: int = Field(ge=0)
 
 
+class ResourceIsolationCapabilityResponse(BaseModel):
+    mode: str
+    available: bool
+    backend: str
+    cgroup_version: int | None
+    memory_limit_bytes: int = Field(ge=1)
+    swap_limit_bytes: int = Field(ge=0)
+    pids_limit: int = Field(ge=1)
+    swap_limit_supported: bool
+    oom_group_supported: bool
+    message: str
+
+
 class RunnerCapabilityResponse(BaseModel):
     available: bool
     mode: str
     message: str
+    isolation: ResourceIsolationCapabilityResponse
 
 
 class SystemCapabilitiesResponse(BaseModel):

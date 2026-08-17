@@ -1,12 +1,11 @@
 """Minimal render-device inventory used by Job setup."""
 
-import asyncio
 from typing import cast
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
-from app.blender.devices import GpuDiscovery
+from app.blender.devices import GpuScheduler
 
 router = APIRouter(prefix="/devices", tags=["devices"])
 
@@ -21,8 +20,8 @@ class DeviceResponse(BaseModel):
 
 @router.get("", response_model=list[DeviceResponse])
 async def list_devices(request: Request) -> list[DeviceResponse]:
-    discovery = cast(GpuDiscovery, request.app.state.gpu_discovery)
-    devices = await asyncio.to_thread(discovery.discover)
+    scheduler = cast(GpuScheduler, request.app.state.gpu_scheduler)
+    devices = scheduler.inventory
     return [
         DeviceResponse(
             id=device.id,

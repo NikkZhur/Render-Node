@@ -15,6 +15,7 @@ done
 
 printf '%s\n' "$@" > "$PWD/logs/arguments.txt"
 printf 'inherited-secret=%s\n' "${RENDER_NODE_TEST_SECRET-unset}"
+printf 'visible-gpus=%s\n' "${CUDA_VISIBLE_DEVICES-unset}"
 
 write_frame() {
     printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=' \

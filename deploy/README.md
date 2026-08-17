@@ -35,6 +35,14 @@ port 8080. An update switches `/opt/render-node/current` atomically only after
 the new release is complete; failed readiness restores and restarts the previous
 release. The active and one previous release are retained.
 
+Before dropping privileges, `render-node start` detects the caller's cgroup v2
+mount/current path, enables delegated `memory` and `pids` controllers when the
+host permits it, and gives UID 10001 only `<current-cgroup>/render-node`. The
+backend then creates one child cgroup per job. If the host exposes only cgroup v1
+or does not delegate writable v2 controllers, installation and HTTP readiness
+remain available, but strict runner diagnostics reject Start/Retry. Do not make
+the host cgroup tree broadly writable; delegate only the service subtree.
+
 Paths:
 
 | Path | Purpose |
@@ -91,6 +99,21 @@ Its short entrypoint prepares writable state, converts the password to bcrypt,
 clears the inherited environment, and starts all long-lived processes as UID
 10001. Port 8000 remains loopback-only; Nginx requires Basic Auth and replaces
 it with the private Bearer token for API, WebSocket, and download requests.
+
+Production configuration sets
+`RENDER_NODE_RESOURCE_ISOLATION_MODE=strict`. A root-started image entrypoint
+attempts the same narrow cgroup v2 delegation before switching to UID 10001. A
+platform that starts the image directly as UID 10001 must pre-create/delegate
+the subtree instead. Read-only cgroups, cgroup v1, or missing `memory`/`pids`
+controllers leave rendering fail-closed; the capabilities endpoint contains the
+reason. The local-only `trusted` fallback is intentionally rejected in
+production.
+
+`RENDER_NODE_WORKER_MEMORY_GB` maps to actual `memory.max`,
+`RENDER_NODE_WORKER_SWAP_GB` to `memory.swap.max` when available, and
+`RENDER_NODE_WORKER_PIDS_LIMIT` to `pids.max`. `memory.oom.group=1` and
+`memory.events` are used when supported. This limits host RAM/swap/processes,
+not GPU VRAM; VRAM errors come from Blender/CUDA logs.
 
 ## Publication
 

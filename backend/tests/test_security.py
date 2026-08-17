@@ -10,7 +10,13 @@ from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from app.blender.sandbox import SandboxUnavailableError
-from app.config import DeploymentProfile, Environment, RunnerMode, Settings
+from app.config import (
+    DeploymentProfile,
+    Environment,
+    ResourceIsolationMode,
+    RunnerMode,
+    Settings,
+)
 from app.main import create_app
 
 AUTH_TOKEN = "x" * 32
@@ -27,6 +33,7 @@ def production_settings(job_settings: Settings, **updates: object) -> Settings:
             "auth_token": AUTH_TOKEN,
             "allowed_origins": [ALLOWED_ORIGIN],
             "render_scheduler_enabled": False,
+            "resource_isolation_mode": ResourceIsolationMode.STRICT,
             **updates,
         }
     )
@@ -178,7 +185,7 @@ async def test_production_scheduler_fails_closed_without_worker_sandbox(
             pass
 
 
-async def test_single_tenant_production_can_start_direct_runner(
+async def test_single_tenant_production_requires_delegated_cgroup(
     job_settings: Settings,
 ) -> None:
     app = create_app(
@@ -187,12 +194,14 @@ async def test_single_tenant_production_can_start_direct_runner(
             deployment_profile=DeploymentProfile.SINGLE_TENANT,
             runner_mode=RunnerMode.LOCAL_TRUSTED,
             render_scheduler_enabled=True,
+            cgroup_root=job_settings.workspace / "not-a-delegated-cgroup",
         )
     )
 
     async with app.router.lifespan_context(app):
         assert app.state.ready is True
-        assert app.state.job_manager.runner_available is True
+        assert app.state.job_manager.runner_available is False
+        assert "cgroup" in app.state.job_manager.runner_unavailable_reason.lower()
 
 
 async def test_general_mutation_body_limit_is_enforced(job_settings: Settings) -> None:

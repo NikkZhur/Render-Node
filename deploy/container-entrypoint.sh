@@ -22,6 +22,10 @@ if [[ "$(id -u)" == "0" ]]; then
     /workspace/blender/versions /workspace/blender/downloads \
     /workspace/blender/quarantine
 
+  # shellcheck source=/opt/render-node/cgroup-delegation.sh
+  source /opt/render-node/cgroup-delegation.sh
+  prepare_render_node_cgroup "$APP_UID"
+
   umask 077
   if [[ -n "${RENDER_NODE_ADMIN_HTPASSWD_B64:-}" ]]; then
     printf '%s' "$RENDER_NODE_ADMIN_HTPASSWD_B64" | base64 --decode \
@@ -50,6 +54,7 @@ RENDER_NODE_RUNTIME_ROOT=${RUNTIME_ROOT}
 RENDER_NODE_ENV=production
 RENDER_NODE_DEPLOYMENT_PROFILE=single_tenant
 RENDER_NODE_RUNNER_MODE=local_trusted
+RENDER_NODE_RESOURCE_ISOLATION_MODE=strict
 RENDER_NODE_RENDER_SCHEDULER_ENABLED=true
 RENDER_NODE_AUTH_TOKEN=${RENDER_NODE_AUTH_TOKEN}
 RENDER_NODE_ALLOWED_ORIGINS=${RENDER_NODE_ALLOWED_ORIGINS}

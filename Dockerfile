@@ -64,6 +64,7 @@ RUN apt-get update \
 COPY --from=release-build /opt/render-node /opt/render-node
 COPY --from=blender-build /opt/render-node/blender /opt/render-node/blender
 COPY deploy/container-entrypoint.sh /opt/render-node/container-entrypoint.sh
+COPY deploy/cgroup-delegation.sh /opt/render-node/cgroup-delegation.sh
 RUN chmod 0755 /opt/render-node/container-entrypoint.sh \
     && mkdir -p /workspace /run/render-node \
     && chown rendernode:rendernode /workspace /run/render-node \

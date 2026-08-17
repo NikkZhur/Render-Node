@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
+from app.blender.cgroups import CgroupIsolation, CgroupLimits
 from app.blender.command import RenderCommand
-from app.blender.runner import RunnerLimits, SandboxRunner, _cpu_time_limit
+from app.blender.runner import FailureKind, RunnerLimits, SandboxRunner, _cpu_time_limit
 from app.blender.sandbox import SandboxPolicy
-from app.config import DeploymentProfile, Environment, RunnerMode
+from app.config import DeploymentProfile, Environment, ResourceIsolationMode, RunnerMode
 
 
 def executable(tmp_path: Path, body: str) -> Path:
@@ -41,8 +43,15 @@ def runner(*, timeout_seconds: float = 5) -> SandboxRunner:
             terminate_grace_seconds=0.2,
             max_output_bytes=1024 * 1024,
             max_log_bytes=1024 * 1024,
-            memory_bytes=1024**3,
-            pids=32,
+        ),
+        CgroupIsolation(
+            ResourceIsolationMode.TRUSTED,
+            CgroupLimits(
+                memory_bytes=1024**3,
+                swap_bytes=0,
+                pids=32,
+                cleanup_timeout_seconds=0.2,
+            ),
         ),
     )
 
@@ -72,6 +81,7 @@ async def test_runner_preserves_log_and_does_not_inherit_secrets(
 
     result = await runner().run(
         command(tmp_path, binary),
+        job_id=uuid4(),
         environment={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path / "temp")},
         cancellation=asyncio.Event(),
         on_started=on_started,
@@ -101,6 +111,7 @@ async def test_cancel_terminates_whole_process_group(tmp_path: Path) -> None:
 
     result = await runner().run(
         command(tmp_path, binary),
+        job_id=uuid4(),
         environment={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path / "temp")},
         cancellation=cancellation,
         on_started=on_started,
@@ -123,6 +134,7 @@ async def test_timeout_terminates_process(tmp_path: Path) -> None:
 
     result = await runner(timeout_seconds=0.1).run(
         command(tmp_path, binary),
+        job_id=uuid4(),
         environment={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path / "temp")},
         cancellation=asyncio.Event(),
         on_started=ignore_pid,
@@ -130,6 +142,42 @@ async def test_timeout_terminates_process(tmp_path: Path) -> None:
     )
     assert result.timed_out is True
     assert result.exit_code != 0
+
+
+async def test_gpu_memory_log_is_distinct_from_plain_sigabrt(tmp_path: Path) -> None:
+    async def ignore_line(line: str) -> None:
+        pass
+
+    async def ignore_pid(pid: int) -> None:
+        pass
+
+    gpu_result = await runner().run(
+        command(
+            tmp_path,
+            executable(
+                tmp_path,
+                "echo 'System is out of GPU and shared host memory'; kill -ABRT $$",
+            ),
+        ),
+        job_id=uuid4(),
+        environment={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path / "temp")},
+        cancellation=asyncio.Event(),
+        on_started=ignore_pid,
+        on_line=ignore_line,
+    )
+    plain_root = tmp_path / "plain"
+    plain_root.mkdir()
+    plain_result = await runner().run(
+        command(plain_root, executable(plain_root, "kill -ABRT $$")),
+        job_id=uuid4(),
+        environment={"PATH": "/usr/bin:/bin", "HOME": str(plain_root / "temp")},
+        cancellation=asyncio.Event(),
+        on_started=ignore_pid,
+        on_line=ignore_line,
+    )
+
+    assert gpu_result.failure_kind is FailureKind.GPU_MEMORY_OOM
+    assert plain_result.failure_kind is FailureKind.BLENDER_ABORT
 
 
 async def assert_process_stopped(pid: int) -> None:

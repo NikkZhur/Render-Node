@@ -83,6 +83,7 @@ FastAPI backend
   |-- SQLite
   |
   `-- Blender subprocess(es)
+        |-- per-job cgroup v2 (RAM/swap/pids)
         |
         `-- /workspace/jobs/{job_id}/output
 ```
@@ -630,8 +631,24 @@ Blender через единый `SandboxRunner`; прямой вызов subproc
 - read-only Blender installation и version-specific backend scripts;
 - read/write доступ только к директории текущего job;
 - доступ только к назначенным GPU;
-- лимиты wall time, CPU, RAM, pids и размера output;
+- лимиты wall time, CPU и размера output, а также per-job cgroup v2 для
+  фактически используемой RAM, swap и pids;
 - `SIGTERM`, grace timeout и `SIGKILL` для всей process group в `finally`.
+
+`RLIMIT_AS` не используется: CUDA/OptiX резервируют большие диапазоны
+виртуального адресного пространства, не равные фактически занятой RAM. В
+`strict`-режиме runner до exec создаёт отдельный cgroup v2, задаёт `memory.max`,
+`pids.max`, доступные `memory.swap.max` и `memory.oom.group`, а child setup пишет
+себя в `cgroup.procs`. Поэтому Blender и все его потомки наследуют один cgroup.
+После любого результата runner читает `memory.events`, завершает оставшихся
+членов через `cgroup.kill` или `SIGKILL` fallback и удаляет job-cgroup.
+
+Версия и текущий путь cgroup определяются из `/proc/self/mountinfo` и
+`/proc/self/cgroup`. Backend пишет только в делегированное writable-поддерево
+текущего cgroup. cgroup v1 и read-only/неделегированный v2 дают явную
+недоступность strict runner; production не переключается автоматически в
+`trusted`. Локальный `trusted`-режим не создаёт per-job cgroup и явно полагается
+на внешний лимит контейнера/Pod, также без `RLIMIT_AS`.
 
 Trust boundary выбирается явным deployment profile:
 
@@ -656,7 +673,7 @@ HOME=/workspace/jobs/{job_id}/temp/home
 XDG_CONFIG_HOME=/workspace/jobs/{job_id}/temp/config
 XDG_CACHE_HOME=/workspace/jobs/{job_id}/temp/cache
 TMPDIR=/workspace/jobs/{job_id}/temp
-CUDA_VISIBLE_DEVICES=0
+CUDA_VISIBLE_DEVICES=GPU-<stable-nvml-uuid>
 PYTHONPATH=
 PYTHONHOME=
 ```
@@ -734,7 +751,9 @@ install. Другой runtime при этом автоматически не а
 2. Процессу отправляется `SIGTERM`.
 3. Backend ждёт заданный timeout.
 4. Если процесс не завершился, отправляется `SIGKILL`.
-5. После завершения процесса статус фиксируется как `CANCELLED`.
+5. Считываются cgroup OOM counters, уничтожаются оставшиеся члены cgroup и
+   удаляется его каталог.
+6. После очистки ресурсов статус фиксируется как `CANCELLED`.
 
 Backend должен запускать Blender в отдельной process group, чтобы остановка
 завершала также дочерние процессы.
@@ -751,10 +770,13 @@ Backend должен запускать Blender в отдельной process gr
 - температуру;
 - энергопотребление.
 
-Задание получает список `gpu_ids`. Доступ ограничивается через окружение:
+Публичный совместимый контракт задания сохраняет список числовых `gpu_ids`, но
+scheduler при старте обнаруживает NVML inventory и переводит их в стабильные
+UUID. Резервации, повторная проверка доступности и ограничение subprocess
+используют UUID, поэтому смена NVML-индекса не меняет выбранную карту:
 
 ```text
-CUDA_VISIBLE_DEVICES=0,1
+CUDA_VISIBLE_DEVICES=GPU-<uuid-a>,GPU-<uuid-b>
 ```
 
 ### Режимы планирования
@@ -765,9 +787,12 @@ CUDA_VISIBLE_DEVICES=0,1
 **Frame parallelism** — отдельный Blender-процесс на каждую GPU получает свою
 часть кадров. Обычно обеспечивает лучший throughput для анимации.
 
-Первый MVP поддерживает один процесс и один набор GPU. Поэтому отдельные GPU-locks
-не нужны: наличие активного процесса уже является блокировкой. Резервации GPU и
-параллельные процессы добавляются только вместе с параллельными jobs.
+Первый MVP поддерживает один процесс и один набор GPU, но `GpuScheduler` всё
+равно атомарно резервирует все UUID задания до полного `finally` runner. Это
+делает освобождение одной/нескольких карт проверяемым и сохраняет правильную
+границу для будущего frame parallelism. Один тяжёлый кадр получает один процесс
+с несколькими UUID; распределение кадров сможет создавать отдельный процесс и
+cgroup на каждую выделенную карту без изменения публичного Job API.
 
 ## 13. Очередь и Scheduler
 
@@ -778,9 +803,11 @@ CUDA_VISIBLE_DEVICES=0,1
 
 1. Если активного процесса нет, найти старейший `QUEUED` job.
 2. Проверить наличие запрошенных GPU.
-3. Запустить Blender.
-4. Передавать события и обновлять прогресс.
-5. После завершения перейти к следующему job.
+3. Зарезервировать все выбранные GPU по UUID.
+4. Создать per-job cgroup и запустить Blender.
+5. Передавать события и обновлять прогресс.
+6. В `finally` удалить cgroup и освободить все GPU.
+7. После завершения перейти к следующему job.
 
 После перезапуска backend задание со статусом `RENDERING` переводится в `FAILED`
 с причиной прерывания. Пользователь может повторить его.
@@ -803,7 +830,14 @@ FastAPI `BackgroundTasks` не используется для длительн�
 - traceback Python.
 
 Неизвестная строка не считается ошибкой и отправляется как событие `render.log`.
-Парсер покрывается тестами на сохранённых фрагментах вывода Blender 4.1.
+Для Blender 4.1 поддерживается фактический формат
+`Fra:1 ... | Sample 48/512` (включая необязательные пробелы), а legacy-строки
+`Rendering 48 / 512 samples` сохраняются для совместимости с fake/старыми
+адаптерами. Sample progress текущего кадра пересчитывается в overall progress
+диапазона кадров и публикуется в существующих полях WebSocket
+`sample`/`total_samples`. Frontend хранит этот snapshot только до смены кадра
+или terminal status и показывает его в блоке Current task. Парсер покрывается
+тестами на сохранённых фрагментах вывода Blender 4.1.
 
 ## 15. Preview и результаты
 
@@ -869,6 +903,9 @@ single-tenant сценарий принимает только сцены вла
 RENDER_NODE_ENV=production
 RENDER_NODE_DEPLOYMENT_PROFILE=single_tenant
 RENDER_NODE_RUNNER_MODE=local_trusted
+RENDER_NODE_RESOURCE_ISOLATION_MODE=strict
+# optional: pre-delegated child of the current cgroup
+RENDER_NODE_CGROUP_ROOT=/sys/fs/cgroup/render-node
 RENDER_NODE_WORKSPACE=/workspace
 RENDER_NODE_DATABASE_URL=sqlite+aiosqlite:////workspace/database/render-node.sqlite3
 RENDER_NODE_BLENDER_ROOT=/workspace/blender/versions
@@ -880,8 +917,10 @@ RENDER_NODE_LOW_SPACE_PERCENT=10
 RENDER_NODE_LOW_SPACE_GB=50
 RENDER_NODE_BLENDER_TIMEOUT_SECONDS=21600
 RENDER_NODE_BLENDER_TERM_GRACE_SECONDS=15
-RENDER_NODE_MAX_OUTPUT_GB=50
-RENDER_NODE_MAX_WORKER_PIDS=128
+RENDER_NODE_MAX_RENDER_OUTPUT_GB=50
+RENDER_NODE_WORKER_MEMORY_GB=16
+RENDER_NODE_WORKER_SWAP_GB=0
+RENDER_NODE_WORKER_PIDS_LIMIT=128
 RENDER_NODE_MAX_ACTIVE_JOBS=1
 RENDER_NODE_ALLOWED_ORIGINS=https://example.runpod.net
 RENDER_NODE_AUTH_TOKEN=...
@@ -890,7 +929,11 @@ RENDER_NODE_AUTH_TOKEN=...
 Секреты не записываются в Dockerfile или git.
 `local_trusted` разрешён в production только вместе с явным
 `single_tenant`; Pydantic Settings отклоняет его с профилем
-`isolated_worker`. Readiness проверяет, что выбранная trust boundary доступна.
+`isolated_worker`. Production требует `resource_isolation_mode=strict`.
+`WORKER_MEMORY_GB` означает фактический `memory.max`, а не виртуальное адресное
+пространство; `WORKER_SWAP_GB` и pids limit применяются только соответствующими
+cgroup v2 controllers. Readiness API остаётся доступным для диагностики, но
+Start/Retry fail-closed, если strict cgroup недоступен.
 
 ## 18. Логирование и наблюдаемость
 
@@ -938,6 +981,8 @@ Backend пишет структурированные JSON-логи:
 - правила выбора единственной активной версии;
 - расчёт storage status и low-space thresholds;
 - GPU scheduler;
+- cgroup v2 detection/configuration, read-only/v1 failure, strict/trusted mode;
+- отсутствие `RLIMIT_AS`, cgroup OOM counters и cleanup всех terminal paths;
 - проверка API schemas.
 
 ### Integration
@@ -949,6 +994,9 @@ Backend пишет структурированные JSON-логи:
 - запрет сети и превышения pids/resource limits в production sandbox fixture;
 - live-события и завершение;
 - отмена всей process group, включая дочерний fake process;
+- создание fake cgroup v2, наследование потомками и cleanup после
+  success/failure/cancel/timeout/setup failure;
+- UUID-резервация и освобождение одной/нескольких GPU без настоящей GPU;
 - восстановление после перезапуска;
 - создание preview и выдача artifact;
 - пагинация кадров с `page_size <= 50`, original download и потоковый ZIP;
@@ -1066,6 +1114,9 @@ Blender и публикует результаты.
 - Каждый `.blend` запускается через `SandboxRunner` с `--factory-startup` и
   `--disable-autoexec`; production direct runner требует явного single-tenant
   профиля, а shared профиль остаётся fail-closed без изолированного worker.
+- `RLIMIT_AS` не применяется. Strict production требует writable delegated
+  cgroup v2 на job; local trusted fallback использует внешний лимит узла и явно
+  отображается в diagnostics.
 - Если образ содержит Blender 5.2.0 и 4.1.1, backend проверяет их бинарники и
   точные версии перед регистрацией; одна установленная версия явно выбирается
   как рабочая для всех jobs.

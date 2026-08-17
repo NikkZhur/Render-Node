@@ -6,7 +6,9 @@ import io
 import os
 import tarfile
 import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import cast
 from uuid import UUID
 
 import pytest
@@ -16,7 +18,7 @@ from httpx import ASGITransport, AsyncClient
 from app.blender import storage as blender_storage_module
 from app.blender.exceptions import BlenderConflictError, BlenderRejectedError
 from app.blender.models import BlenderOperation, BlenderRuntime
-from app.blender.official import OfficialRelease
+from app.blender.official import OfficialCatalog, OfficialRelease
 from app.blender.repository import BlenderRepository
 from app.blender.service import BlenderService
 from app.blender.storage import BlenderStorage
@@ -103,11 +105,11 @@ class FakeCatalog:
         *,
         expected_sha256: str,
         max_bytes: int,
-        on_progress: object,
+        on_progress: Callable[[int, int | None], Awaitable[None]],
     ) -> tuple[str, int]:
         assert len(self.archive) <= max_bytes
         await asyncio.to_thread(destination.write_bytes, self.archive)
-        await on_progress(len(self.archive), len(self.archive))  # type: ignore[operator]
+        await on_progress(len(self.archive), len(self.archive))
         return self.digest, len(self.archive)
 
 
@@ -125,12 +127,12 @@ def make_service(settings: Settings, catalog: FakeCatalog) -> tuple[BlenderServi
         BlenderService(
             database,
             storage,
-            catalog,
+            cast(OfficialCatalog, catalog),
             EventHub(),
             bundled_root=settings.bundled_blender_root,
         ),
         database,
-    )  # type: ignore[arg-type]
+    )
 
 
 async def test_official_download_install_and_explicit_activation(

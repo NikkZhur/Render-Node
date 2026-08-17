@@ -776,7 +776,7 @@ function FramePreviewModal({ frameNumber, imageUrl, onClose }) {
   );
 }
 
-function RenderPreview({ isMockMode, job, liveLogs = [], mockLogLines = [] }) {
+function RenderPreview({ isMockMode, job, liveLogs = [], mockLogLines = [], sampleProgress = null }) {
   const [frameOpen, setFrameOpen] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
   const [logPanelOpen, setLogPanelOpen] = useState(false);
@@ -807,8 +807,21 @@ function RenderPreview({ isMockMode, job, liveLogs = [], mockLogLines = [] }) {
     ? job.status === "completed" || isRendering
     : Boolean(latestFrame?.preview_url);
   const frameReady = isMockMode ? job.status === "completed" : Boolean(latestFrame?.original_url);
-  const shownProgress = isRendering ? job.progress : job.status === "completed" ? 100 : 0;
-  const currentFrame = latestFrame?.frame ?? job.current_frame ?? job.frame_start ?? 1;
+  const currentFrame = isRendering
+    ? sampleProgress?.frame ?? job.current_frame ?? latestFrame?.frame ?? job.frame_start ?? 1
+    : latestFrame?.frame ?? job.current_frame ?? job.frame_start ?? 1;
+  const shownProgress = isRendering
+    ? Math.max(job.progress, sampleProgress?.progress ?? 0)
+    : job.status === "completed" ? 100 : 0;
+  const sampleMatchesFrame = sampleProgress?.frame === null
+    || sampleProgress?.frame === undefined
+    || sampleProgress.frame === currentFrame;
+  const shownSamples = isRendering
+    && sampleMatchesFrame
+    && Number.isInteger(sampleProgress?.sample)
+    && Number.isInteger(sampleProgress?.totalSamples)
+    ? `${sampleProgress.sample} / ${sampleProgress.totalSamples}`
+    : "—";
   const frameNumber = String(currentFrame).padStart(3, "0");
   const rawDisplayedLogs = isMockMode
     ? mockLogLines
@@ -990,8 +1003,9 @@ function RenderPreview({ isMockMode, job, liveLogs = [], mockLogLines = [] }) {
               <strong>{currentTask}</strong>
             </div>
             <div className="progress-stats">
-              <span><small>FRAME</small>{isRendering ? currentFrame : "—"}</span>
-              <span><small>STATE</small>{job.status}</span>
+              <span className="progress-stat-frame"><small>FRAME</small>{isRendering ? currentFrame : "—"}</span>
+              <span className="progress-stat-samples"><small>SAMPLES</small>{shownSamples}</span>
+              <span className="progress-stat-state"><small>STATE</small>{job.status}</span>
               <b>{shownProgress}%</b>
             </div>
           </div>
@@ -2001,6 +2015,14 @@ export default function App({ mockApi = null }) {
   }, [isMockMode, isRendering]);
 
   const displayJob = setupJob;
+  const sampleProgress = isMockMode && displayJob.status === "rendering"
+    ? {
+        frame: displayJob.current_frame ?? displayJob.frame_start ?? null,
+        progress: displayJob.progress,
+        sample: Math.round((displayJob.progress / 100) * 512),
+        totalSamples: 512,
+      }
+    : realtime.progressByJob[displayJob.id] ?? null;
 
   const saveJob = async (jobId, configuration) => {
     if (!isMockMode) return saveJobMutation.mutateAsync({ configuration, jobId });
@@ -2183,6 +2205,7 @@ export default function App({ mockApi = null }) {
             job={displayJob}
             liveLogs={realtime.logsByJob[displayJob.id] ?? []}
             mockLogLines={mockApi?.logLines}
+            sampleProgress={sampleProgress}
           />
           <div className="right-rail">
             <JobQueue

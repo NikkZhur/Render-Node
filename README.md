@@ -25,8 +25,14 @@ isolated worker if a shared render service is needed later.
 - backend-owned Blender commands with automatic Python disabled;
 - one active render process, FIFO queueing, persisted progress, timeout, restart
   recovery, and process-group cancellation;
+- per-job cgroup v2 limits for actual system RAM, swap and pids in strict mode,
+  with cgroup OOM counters and fail-closed diagnostics;
+- stable NVML UUID reservations for single- and multi-GPU jobs; numeric API
+  selections are resolved against the startup inventory and CUDA receives UUIDs;
 - raw Blender logs stored and downloadable inside the job directory;
 - WebSocket job/progress/log/preview/operation/metrics events with REST resync;
+- live Current task progress with the current frame and Blender sample count
+  parsed from real `Fra:… | Sample X/Y` output;
 - persistent preview/original frame metadata, frame pages capped at 50, and
   disk-built frame ZIP downloads;
 - real preview, log overlay, jobs, artifacts, CPU/GPU/storage metrics, and
@@ -145,6 +151,11 @@ Environment variables such as `RENDER_NODE_WORKSPACE`,
 through unchanged. Settings are also loaded from the repository-root `.env`, so
 copy `.env.example` to `.env` once and set
 `RENDER_NODE_RUNNER_MODE=local_trusted` for persistent direct-on-host rendering.
+Development also uses the explicit
+`RENDER_NODE_RESOURCE_ISOLATION_MODE=trusted` fallback unless a writable cgroup
+v2 subtree has been delegated to the current user. This fallback never applies
+`RLIMIT_AS`; it relies on the actual memory/pids boundary of the development
+container or machine and is reported by `/api/v1/system/capabilities`.
 This mode starts Blender as a subprocess of Render Node and must only receive
 trusted `.blend`/ZIP files. If it is disabled, the UI reports that the runner is
 unavailable and keeps a started job in `READY` instead of creating a failed job.
@@ -164,7 +175,12 @@ npm run dev
 
 Open [http://localhost:5173](http://localhost:5173). Vite is configured to listen
 on `0.0.0.0:5173`, so the page is accessible from the host when the container port
-is forwarded.
+is forwarded. When `RENDER_NODE_ALLOWED_ORIGINS` contains exactly one
+non-loopback origin, Vite also uses that origin for HMR through an HTTPS Pod
+proxy. This keeps Vite's reconnect fallback on the remote Pod instead of asking
+the browser for access to `localhost` on the operator's device. If several
+external development origins are allowed, select one explicitly with
+`RENDER_NODE_DEV_PUBLIC_ORIGIN`; it must also be present in the allowlist.
 
 `npm run dev` uses the real Job API through Vite's `/api` proxy. Run
 `npm run dev:mock` only when the explicit legacy mock mode is needed. Set
@@ -241,6 +257,7 @@ An authenticated temporary RunPod-style node therefore uses:
 RENDER_NODE_ENV=production
 RENDER_NODE_DEPLOYMENT_PROFILE=single_tenant
 RENDER_NODE_RUNNER_MODE=local_trusted
+RENDER_NODE_RESOURCE_ISOLATION_MODE=strict
 RENDER_NODE_AUTH_TOKEN=<unique-secret-with-at-least-32-characters>
 RENDER_NODE_ALLOWED_ORIGINS=https://<public-panel-origin>
 ```
@@ -251,12 +268,39 @@ unrelated users can submit files. Automatic Python remains disabled, subprocess
 environment and paths remain constrained, and resource/time/output limits still
 apply.
 
+Production resource isolation is always strict. Render Node detects the current
+cgroup hierarchy from `/proc/self/mountinfo` and `/proc/self/cgroup`; it does not
+assume that `/sys/fs/cgroup` is writable. A usable deployment must delegate a
+writable cgroup v2 subtree with the `memory` and `pids` controllers to the
+unprivileged backend. The native root management command and root image
+entrypoint try to prepare `<current-cgroup>/render-node` before dropping
+privileges. Managed containers must expose/delegate those controllers; a
+read-only host cgroup mount is insufficient. `RENDER_NODE_CGROUP_ROOT` may name
+an already-delegated child of the backend's current cgroup.
+
+If only cgroup v1 is available, or v2 is not writable/delegated, strict mode
+keeps the API ready for diagnostics but reports the runner unavailable and
+rejects Start/Retry before queueing. The verified fallback is
+`RENDER_NODE_RESOURCE_ISOLATION_MODE=trusted`, accepted only in development/test
+and never selected automatically in production.
+
 ## Limits, Cleanup, and Backup
 
 JSON mutations default to 1 MiB and WebSocket client messages to 64 KiB. Scene,
-Blender archive, ZIP extraction, render time, process memory/pids, logs, and
-outputs have separate settings in [`.env.example`](.env.example). Uploads are
+Blender archive, ZIP extraction, render time, actual system RAM, swap, pids,
+logs, and outputs have separate settings in [`.env.example`](.env.example).
+`RENDER_NODE_WORKER_MEMORY_GB` now means `memory.max`, not virtual address space;
+`RENDER_NODE_WORKER_SWAP_GB` maps to `memory.swap.max` when supported, and
+`RENDER_NODE_WORKER_PIDS_LIMIT` maps to `pids.max`. Uploads are
 bounded streaming multipart requests; resumable uploads are not implemented.
+
+Every strict job gets its own cgroup before Blender exec. Blender joins it in
+the child setup, so descendants inherit membership, while process-group
+cancellation still uses `SIGTERM` → grace period → `SIGKILL`. Cleanup also uses
+`cgroup.kill` when available and removes the per-job directory. Failure
+diagnostics prioritize `memory.events` for system-RAM OOM, then Blender/CUDA log
+markers for VRAM or shared GPU-memory exhaustion, then report a plain `SIGABRT`
+or other exit. Cgroups do not impose a VRAM limit.
 
 Cleanup is conservative and explicit:
 
@@ -375,7 +419,8 @@ client.
 
 - publish the first GHCR image and create a ready-to-click RunPod template;
 - add the OS-isolated, non-root worker boundary before accepting third-party scenes;
-- validate CUDA/OptiX and process isolation in a cloud GPU environment;
+- repeat the CUDA/OptiX smoke in the released Pod image and validate delegated
+  cgroup v2 process isolation there;
 - add resumable uploads if deployment networks require them;
 - add an operator-selected retention policy instead of deleting user results by
   age implicitly.

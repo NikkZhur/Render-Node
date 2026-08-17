@@ -31,6 +31,7 @@ cp "${ROOT}/backend/alembic.ini" "${ROOT}/backend/pyproject.toml" \
 cp -a "${ROOT}/frontend/dist" "${bundle_root}/frontend/dist"
 cp "${ROOT}/deploy/nginx.conf.template" "${bundle_root}/deploy/"
 install -m 0755 "${ROOT}/deploy/supervisor.sh" "${bundle_root}/deploy/supervisor.sh"
+install -m 0755 "${ROOT}/deploy/cgroup-delegation.sh" "${bundle_root}/deploy/cgroup-delegation.sh"
 install -m 0755 "${ROOT}/scripts/render-node" "${bundle_root}/scripts/render-node"
 
 find "$bundle_root" -type d -name __pycache__ -prune -exec rm -rf -- {} +
