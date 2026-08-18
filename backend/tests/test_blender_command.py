@@ -11,13 +11,8 @@ from app.blender.command import (
     CommandBuildError,
     build_render_command,
 )
-from app.blender.sandbox import (
-    SandboxPolicy,
-    SandboxUnavailableError,
-    build_worker_environment,
-)
+from app.blender.sandbox import build_worker_environment
 from app.blender.types import RuntimeSource
-from app.config import DeploymentProfile, Environment, RunnerMode
 from app.jobs.models import Job
 from app.jobs.types import ComputeDevice, FrameMode, JobStatus, RenderEngine
 
@@ -105,38 +100,3 @@ async def test_worker_environment_is_allowlisted_and_gpu_scoped(tmp_path: Path) 
     assert "DATABASE_URL" not in environment
     assert "TOKEN" not in environment
     assert await asyncio.to_thread(Path(environment["HOME"]).is_dir)
-
-
-def test_production_sandbox_is_fail_closed() -> None:
-    policy = SandboxPolicy(
-        environment=Environment.PRODUCTION,
-        deployment_profile=DeploymentProfile.ISOLATED_WORKER,
-        runner_mode=RunnerMode.DISABLED,
-    )
-    with pytest.raises(SandboxUnavailableError, match="isolated worker"):
-        policy.ensure_startup_ready(scheduler_enabled=True)
-    with pytest.raises(SandboxUnavailableError, match="isolated worker is unavailable"):
-        policy.ensure_local_runner_allowed()
-
-    development = SandboxPolicy(
-        environment=Environment.DEVELOPMENT,
-        deployment_profile=DeploymentProfile.ISOLATED_WORKER,
-        runner_mode=RunnerMode.LOCAL_TRUSTED,
-    )
-    development.ensure_local_runner_allowed()
-
-    single_tenant = SandboxPolicy(
-        environment=Environment.PRODUCTION,
-        deployment_profile=DeploymentProfile.SINGLE_TENANT,
-        runner_mode=RunnerMode.LOCAL_TRUSTED,
-    )
-    single_tenant.ensure_startup_ready(scheduler_enabled=True)
-    single_tenant.ensure_local_runner_allowed()
-
-    single_tenant_disabled = SandboxPolicy(
-        environment=Environment.PRODUCTION,
-        deployment_profile=DeploymentProfile.SINGLE_TENANT,
-        runner_mode=RunnerMode.DISABLED,
-    )
-    with pytest.raises(SandboxUnavailableError, match="single_tenant"):
-        single_tenant_disabled.ensure_startup_ready(scheduler_enabled=True)

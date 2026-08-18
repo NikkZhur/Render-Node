@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { eventsApi, presentMetrics } from "./api";
+import { accessApi, eventsApi, presentMetrics } from "./api";
 import { mergeRenderProgress } from "./renderProgress";
+import { BROWSER_WEBSOCKET_PROTOCOL } from "./requestPolicy";
 
 const MAX_LOG_LINES = 500;
 
@@ -29,7 +30,7 @@ export function useRenderEvents(queryClient, enabled = true) {
     const connect = () => {
       if (closed) return;
       setConnectionState("connecting");
-      socket = new WebSocket(eventsApi.url());
+      socket = new WebSocket(eventsApi.url(), BROWSER_WEBSOCKET_PROTOCOL);
       socket.addEventListener("open", () => {
         retryDelay = 500;
         setConnectionState("connected");
@@ -89,8 +90,16 @@ export function useRenderEvents(queryClient, enabled = true) {
           queryClient.invalidateQueries({ queryKey: ["official-versions"] });
         }
       });
-      socket.addEventListener("close", () => {
+      socket.addEventListener("close", async (event) => {
         if (closed) return;
+        if (event.code === 4401) {
+          try {
+            await accessApi.claim();
+          } catch {
+            setConnectionState("blocked");
+            return;
+          }
+        }
         setConnectionState("reconnecting");
         retryTimer = window.setTimeout(connect, retryDelay);
         retryDelay = Math.min(retryDelay * 2, 10_000);

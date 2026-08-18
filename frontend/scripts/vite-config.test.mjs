@@ -1,39 +1,30 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { resolveDevPublicOrigin, webSocketOptionsForOrigin } from "../vite.config.js";
+import { apiProxyOptions, devServerOptions } from "../vite.config.js";
 
-test("local development does not override the browser HMR host", () => {
-  assert.equal(
-    resolveDevPublicOrigin({
-      RENDER_NODE_ALLOWED_ORIGINS: "http://localhost:5173,http://127.0.0.1:5173",
-    }),
-    null,
-  );
+test("development uses Vite browser-host WebSocket defaults", () => {
+  const server = devServerOptions(apiProxyOptions("http://127.0.0.1:8000"));
+
+  assert.equal(server.ws, undefined);
+  assert.equal(server.hmr, undefined);
+  assert.equal(server.host, "0.0.0.0");
+  assert.equal(server.allowedHosts, true);
 });
 
-test("a sole remote allowlisted origin keeps HMR away from browser localhost", () => {
-  const origin = resolveDevPublicOrigin({
-    RENDER_NODE_ALLOWED_ORIGINS:
-      "http://localhost:5173,https://pod-5173.proxy.runpod.net",
-  });
+test("API proxy preserves browser Host and Origin for HTTP and WebSocket", () => {
+  const proxy = apiProxyOptions("http://127.0.0.1:8000");
 
-  assert.equal(origin?.origin, "https://pod-5173.proxy.runpod.net");
-  assert.deepEqual(webSocketOptionsForOrigin(origin), {
-    protocol: "wss",
-    host: "pod-5173.proxy.runpod.net",
-    port: 5173,
-    clientPort: 443,
-  });
+  assert.equal(proxy.target, "http://127.0.0.1:8000");
+  assert.equal(proxy.ws, true);
+  assert.equal(proxy.changeOrigin, false);
+  assert.equal(proxy.rewriteWsOrigin, false);
+  assert.equal(proxy.headers, undefined);
 });
 
-test("an explicit HMR origin must be in the backend allowlist", () => {
-  assert.throws(
-    () =>
-      resolveDevPublicOrigin({
-        RENDER_NODE_ALLOWED_ORIGINS: "https://allowed.example.com",
-        RENDER_NODE_DEV_PUBLIC_ORIGIN: "https://different.example.com",
-      }),
-    /must be present/,
-  );
+test("browser proxy never injects the private backend Bearer", () => {
+  const proxy = apiProxyOptions("http://127.0.0.1:8000");
+
+  assert.equal(proxy.headers, undefined);
+  assert.equal(JSON.stringify(devServerOptions(proxy)).includes("Authorization"), false);
 });

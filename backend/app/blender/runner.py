@@ -27,7 +27,6 @@ from app.blender.cgroups import (
     ResourceIsolationStatus,
 )
 from app.blender.command import RenderCommand
-from app.blender.sandbox import SandboxPolicy
 
 LineCallback = Callable[[str], Awaitable[None]]
 StartedCallback = Callable[[int], Awaitable[None]]
@@ -71,11 +70,9 @@ class RunResult:
 class SandboxRunner:
     def __init__(
         self,
-        policy: SandboxPolicy,
         limits: RunnerLimits,
         resource_isolation: CgroupIsolation,
     ) -> None:
-        self._policy = policy
         self._limits = limits
         self._resource_isolation = resource_isolation
 
@@ -84,15 +81,15 @@ class SandboxRunner:
 
     @property
     def available(self) -> bool:
-        return self._policy.local_runner_allowed and self._resource_isolation.available
+        return self._resource_isolation.available
 
     @property
     def mode(self) -> str:
-        return self._policy.runner_mode.value
+        return "local"
 
     @property
     def unavailable_reason(self) -> str | None:
-        return self._policy.unavailable_reason or self._resource_isolation.unavailable_reason
+        return self._resource_isolation.unavailable_reason
 
     @property
     def isolation_status(self) -> ResourceIsolationStatus:
@@ -109,7 +106,6 @@ class SandboxRunner:
         on_line: LineCallback,
         on_output: OutputCallback | None = None,
     ) -> RunResult:
-        self._policy.ensure_local_runner_allowed()
         isolation_reason = self._resource_isolation.unavailable_reason
         if isolation_reason is not None:
             raise RunnerError(isolation_reason)

@@ -11,12 +11,10 @@ uv run alembic upgrade head
 uv run uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000
 ```
 
-Set `RENDER_NODE_RUNNER_MODE=local_trusted` only for trusted `.blend`/ZIP files.
-It is available in development and in an explicit production
-`RENDER_NODE_DEPLOYMENT_PROFILE=single_tenant`, where the entire rented VM or
-cloud Pod belongs to one operator. Production keeps the `isolated_worker`
-profile by default and fails closed there while no OS-isolated worker exists.
-Settings load from the repository-root `.env`.
+Blender execution belongs to the installed Render Node and has no separate
+runner trust/profile switch. Once a verified Blender version is installed and
+activated through the UI, the backend can run it inside the node's resource
+boundary. Settings load from the repository-root `.env`.
 
 Resource isolation is separate from the scene trust profile:
 
@@ -37,10 +35,30 @@ strict mode. `/api/v1/system/capabilities` exposes the selected backend and
 feature support.
 
 Production additionally requires a secret `RENDER_NODE_AUTH_TOKEN` with at least
-32 characters and exact HTTPS `RENDER_NODE_ALLOWED_ORIGINS`. `/health` and
-`/ready` are public probes; every REST and WebSocket route below `/api/v1`
-requires the Bearer token. Keep the backend private behind an HTTPS reverse proxy
-that injects the credential for the browser frontend and WebSocket upgrades.
+32 characters. `/health` and `/ready` are public probes. Origin-less
+CLI/server clients authenticate with this private Bearer; public browser
+requests do not receive it and cannot use it to bypass pairing. Keep port 8000
+loopback-only.
+
+The first deliberate browser `POST /api/v1/access/claim` creates an in-memory
+session and an opaque `HttpOnly`, `SameSite=Strict` cookie (`Secure` and
+`__Host-` in production). Later browsers use `POST /api/v1/access/pair` with a
+one-time 256-bit invitation created by `POST /api/v1/access/invitations`.
+Invitations expire after five minutes and at most five browser sessions exist.
+Sessions and invitations are deliberately process-local: production must run
+one Uvicorn worker, and restart resets access without changing persistent jobs.
+`POST /api/v1/access/reset` accepts only an origin-less service Bearer and is
+used by the local `render-node reset-access` command.
+
+Browser REST requires `Sec-Fetch-Site: same-origin`; mutations additionally
+require `X-Render-Node-Request: 1`. Browser WebSocket requires a valid session
+cookie, one strictly parsed HTTPS `Origin` in production, and the fixed
+`render-node-browser-v1` subprotocol. Present Fetch Metadata must be
+`same-origin`; the subprotocol provides explicit context for real Chromium
+handshakes that omit those headers. A valid origin is not compared with
+backend-visible `Host`, so a gateway may rewrite upstream `Host`; forwarded
+headers are ignored. CORS is not enabled, and frontend/API must remain on one
+browser-visible HTTPS origin.
 
 Development checks:
 

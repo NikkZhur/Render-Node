@@ -32,7 +32,7 @@ Commands:
   restart      Restart Render Node
   status       Show process and readiness status
   logs         Follow bounded service/error logs
-  credentials  Show the saved panel URL and credentials
+  reset-access Invalidate browser sessions and let the next browser claim the node
   uninstall    Remove the app; preserve database, jobs and extra Blender versions
 EOF
 }
@@ -172,6 +172,26 @@ stop_service() {
   [[ "$quiet" == true ]] || printf '[render-node] Stopped.\n'
 }
 
+reset_access() {
+  [[ -r "$CONFIG_FILE" ]] || die "Render Node config is unavailable."
+  local auth_token
+  auth_token="$(sed -n 's/^RENDER_NODE_AUTH_TOKEN=//p' "$CONFIG_FILE" | head -n 1)"
+  [[ "$auth_token" =~ ^[A-Za-z0-9_-]{32,128}$ ]] \
+    || die "Render Node internal token is invalid."
+
+  if ! printf '%s\n' \
+    'url = "http://127.0.0.1:8000/api/v1/access/reset"' \
+    'request = "POST"' \
+    "header = \"Authorization: Bearer ${auth_token}\"" \
+    'fail' \
+    'silent' \
+    'show-error' \
+    | PATH="$SYSTEM_PATH" curl --config - >/dev/null; then
+    die "Access reset failed; verify that Render Node is running."
+  fi
+  printf 'Access reset; the next browser can claim this node.\n'
+}
+
 command_name="${1:-}"
 [[ -n "$command_name" ]] || { usage; exit 1; }
 shift
@@ -206,11 +226,7 @@ case "$command_name" in
     ensure_log_file "$STATE_ROOT/logs/nginx-error.log"
     tail -n 200 -F "$SERVICE_LOG" "$STATE_ROOT/logs/nginx-error.log"
     ;;
-  credentials)
-    [[ $# -eq 0 ]] || die "credentials takes no options"
-    [[ -r "$STATE_ROOT/credentials" ]] || die "Credentials are unavailable."
-    cat "$STATE_ROOT/credentials"
-    ;;
+  reset-access) [[ $# -eq 0 ]] || die "reset-access takes no options"; reset_access ;;
   uninstall)
     [[ $# -eq 0 ]] || die "uninstall takes no options"
     stop_service true

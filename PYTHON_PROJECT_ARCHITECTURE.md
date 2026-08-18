@@ -94,8 +94,10 @@ reverse proxy. В development Vite работает на `5173`, FastAPI — н�
 Основной one-command flow для Ubuntu Pod скачивает проверенный bundle последнего
 стабильного GitHub Release. Frontend уже собран; Node.js и исходники frontend на
 GPU Pod не нужны. Backend и внутренний Nginx запускаются нативными процессами без
-Docker и systemd. Nginx слушает `8080`, требует Basic Auth и подставляет закрытый
-Bearer token для REST, WebSocket и artifacts; platform proxy завершает HTTPS.
+Docker и systemd. Nginx слушает `8080`, обслуживает SPA и проксирует REST,
+WebSocket и artifacts без публичного Bearer injection; platform proxy завершает
+HTTPS. Browser boundary — first-browser pairing cookie, а закрытый Bearer
+остаётся только у loopback/service clients.
 Все долгоживущие процессы работают как UID 10001, backend port `8000` остаётся
 loopback-only.
 
@@ -192,7 +194,7 @@ Production layout не зависит от checkout репозитория:
 /opt/render-node/releases/<version>  immutable release и per-release .venv
 /opt/render-node/current             symlink на active release
 /opt/render-node/blender/<version>   bundled Blender 5.2.0/4.1.1
-/workspace/.render-node              persistent config, credentials, logs
+/workspace/.render-node              persistent private config and logs
 /workspace/database                  SQLite
 /workspace/jobs                      scenes и результаты
 /workspace/blender                   дополнительные Blender runtimes
@@ -650,21 +652,12 @@ Blender через единый `SandboxRunner`; прямой вызов subproc
 `trusted`. Локальный `trusted`-режим не создаёт per-job cgroup и явно полагается
 на внешний лимит контейнера/Pod, также без `RLIMIT_AS`.
 
-Trust boundary выбирается явным deployment profile:
-
-- `isolated_worker` — безопасное значение по умолчанию для shared deployment.
-  Production sandbox запрещает сеть и доступ к database, соседним jobs, Unix
-  sockets, container runtime socket, host devices кроме назначенных GPU и
-  секретам backend. Пока отдельный worker container/namespace не реализован,
-  scheduler в этом production-профиле не проходит readiness.
-- `single_tenant` — весь временно арендованный VM/Pod принадлежит одному
-  оператору и принимает только его собственные сцены. В production он разрешает
-  прямой `local_trusted` subprocess; границей изоляции является сам облачный
-  узел. Этот профиль не изолирует Blender от backend внутри узла и запрещён для
-  общей render farm или загрузок от несвязанных пользователей.
-
-Ни один production-профиль не выбирается неявно: прямой runner требует
-одновременно `deployment_profile=single_tenant` и `runner_mode=local_trusted`.
+Границей выполнения является установленный Render Node: VM, контейнер или
+облачный Pod. Отдельного operator-controlled trust profile и выключенного по
+умолчанию runner нет. После установки и активации версии Blender через UI
+scheduler может запускать её сразу. Browser pairing управляет доступом к узлу,
+а не выбором subprocess trust mode. Multi-tenant render farm потребует отдельной
+worker isolation architecture и не является режимом этого одноузлового продукта.
 
 Пример минимального окружения процесса:
 
@@ -870,16 +863,34 @@ Artifacts относятся к выбранному job. Последовате
 - Размер upload и количество chunks ограничены.
 - Blender всегда запускается с `--factory-startup`, `--disable-autoexec` и
   доверенным version-specific backend-скриптом.
-- Blender запускается через единый `SandboxRunner`; прямой production runner
-  разрешён только на однопользовательском арендованном узле с явным профилем
-  `single_tenant`, а shared deployment требует непривилегированного OS sandbox.
+- Blender запускается через единый `SandboxRunner` внутри границы установленного
+  Render Node; отдельного конфигурационного разрешения для runner нет.
 - Окружение subprocess строится по allowlist и не наследует backend secrets,
   `PYTHONPATH`, `PYTHONHOME` или пользовательские site-packages.
 - Jupyter не входит в публичный runtime-образ.
 - Порт SQLite и внутренние процессы наружу не публикуются.
-- API защищается session cookie или bearer token.
-- WebSocket проверяет ту же авторизацию, что REST API.
-- CORS принимает только настроенные origins.
+- Первый deliberate browser POST атомарно создаёт process-local session;
+  обычные page GET, probes, `HEAD` и `OPTIONS` access state не меняют. Session
+  token имеет не менее 256 бит энтропии, на сервере хранится только digest, а
+  production cookie использует `HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/`
+  и `__Host-` prefix.
+- Дополнительные браузеры получают session только по одноразовому 256-bit
+  fragment invitation со сроком пять минут. Одновременно допускается пять
+  sessions; restart одного Uvicorn worker или локальный `reset-access` очищает
+  sessions/invitations без изменения jobs.
+- Browser REST требует session cookie и `Sec-Fetch-Site: same-origin`; mutations
+  дополнительно требуют `X-Render-Node-Request: 1`. WebSocket требует session,
+  валидный HTTPS Origin и фиксированный `render-node-browser-v1` subprotocol;
+  присутствующий `Sec-Fetch-Site` обязан быть `same-origin`, а subprotocol
+  служит явным compatibility context для Chromium handshake без Fetch Metadata.
+- Browser `Origin` строго разбирается, но не сравнивается с backend-visible
+  `Host`, поэтому внешний proxy может переписать upstream Host. `Forwarded` и
+  `X-Forwarded-*` не участвуют в решении, CORS не включается, а cross-origin
+  frontend/API не поддерживается.
+- Закрытый bearer token обязателен в production только для origin-less
+  loopback/service clients и reset. Публичный gateway не подставляет его в
+  browser HTTP/WebSocket; Basic Auth, username/password и credentials state
+  отсутствуют.
 - Аддоны по умолчанию запрещены; доверенные аддоны устанавливает администратор.
 - Manual Blender archive хранится в quarantine и не распаковывается до точного
   совпадения SHA-256 с официальным checksum manifest для Linux x64.
@@ -888,12 +899,11 @@ Artifacts относятся к выбранному job. Последовате
 - После checksum match отдельно проверяются пути, symlinks, число файлов,
   суммарный распакованный размер и точная версия бинарника.
 
-`.blend` считается потенциально недоверенным файлом во всех режимах. Основной
-single-tenant сценарий принимает только сцены владельца временного узла и
-использует сам VM/Pod как внешнюю границу доверия. Для shared/public deployment,
-где сцены отправляют несвязанные пользователи, render worker дополнительно
-отделяется sandbox-границей без сети и с лимитами CPU, RAM, VRAM, pids, времени
-и размера результатов.
+`.blend` считается потенциально недоверенным файлом, поэтому сохраняются
+`--disable-autoexec`, allowlisted subprocess environment, безопасные пути и
+лимиты. VM/контейнер/Pod является внешней границей установленного узла. Для
+отдельного multi-tenant продукта понадобилась бы дополнительная worker sandbox
+без сети и с отдельными filesystem/device boundaries.
 
 ## 17. Конфигурация
 
@@ -901,8 +911,6 @@ single-tenant сценарий принимает только сцены вла
 
 ```text
 RENDER_NODE_ENV=production
-RENDER_NODE_DEPLOYMENT_PROFILE=single_tenant
-RENDER_NODE_RUNNER_MODE=local_trusted
 RENDER_NODE_RESOURCE_ISOLATION_MODE=strict
 # optional: pre-delegated child of the current cgroup
 RENDER_NODE_CGROUP_ROOT=/sys/fs/cgroup/render-node
@@ -922,14 +930,12 @@ RENDER_NODE_WORKER_MEMORY_GB=16
 RENDER_NODE_WORKER_SWAP_GB=0
 RENDER_NODE_WORKER_PIDS_LIMIT=128
 RENDER_NODE_MAX_ACTIVE_JOBS=1
-RENDER_NODE_ALLOWED_ORIGINS=https://example.runpod.net
 RENDER_NODE_AUTH_TOKEN=...
 ```
 
-Секреты не записываются в Dockerfile или git.
-`local_trusted` разрешён в production только вместе с явным
-`single_tenant`; Pydantic Settings отклоняет его с профилем
-`isolated_worker`. Production требует `resource_isolation_mode=strict`.
+Секреты не записываются в Dockerfile или git. Настроек trust profile/runner mode
+нет: установленный узел всегда может запускать активированный через UI Blender.
+Production требует `resource_isolation_mode=strict`.
 `WORKER_MEMORY_GB` означает фактический `memory.max`, а не виртуальное адресное
 пространство; `WORKER_SWAP_GB` и pids limit применяются только соответствующими
 cgroup v2 controllers. Readiness API остаётся доступным для диагностики, но

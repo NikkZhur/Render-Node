@@ -30,8 +30,6 @@ readonly RELEASES_ROOT="${INSTALL_ROOT}/releases"
 readonly BLENDER_ROOT="${INSTALL_ROOT}/blender"
 readonly CONFIG_FILE="${STATE_ROOT}/render-node.env"
 
-public_origin="${RENDER_NODE_PUBLIC_ORIGIN:-}"
-admin_username="${RENDER_NODE_ADMIN_USERNAME:-render}"
 requested_version="latest"
 
 usage() {
@@ -42,8 +40,6 @@ Usage:
   curl -fsSL https://raw.githubusercontent.com/NikkZhur/Render-Node/master/install.sh | bash
 
 Options:
-  --origin URL       Exact public HTTPS origin (required outside RunPod)
-  --username NAME    Panel username used only on first install (default: render)
   --version X.Y.Z    Install one explicit stable GitHub Release
   -h, --help         Show this help without changing the host
 
@@ -57,16 +53,6 @@ die() { printf '[render-node] ERROR: %s\n' "$*" >&2; exit 1; }
 
 while (($#)); do
   case "$1" in
-    --origin)
-      (($# >= 2)) || die "--origin requires a value"
-      public_origin="${2%/}"
-      shift 2
-      ;;
-    --username)
-      (($# >= 2)) || die "--username requires a value"
-      admin_username="$2"
-      shift 2
-      ;;
     --version)
       (($# >= 2)) || die "--version requires a value"
       requested_version="${2#v}"
@@ -79,9 +65,6 @@ done
 
 [[ "$requested_version" == "latest" || "$requested_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
   || die "--version must be a stable semantic version such as 1.2.3."
-[[ "$admin_username" =~ ^[A-Za-z0-9._-]{1,64}$ ]] \
-  || die "--username contains unsupported characters."
-
 if [[ "${RENDER_NODE_TEST_MODE:-}" != "1" ]]; then
   [[ "$(id -u)" == "0" ]] || die "Run this command as root inside the Pod."
   [[ "$(uname -m)" == "x86_64" ]] || die "Only x86_64/amd64 Pods are supported."
@@ -91,12 +74,6 @@ if [[ "${RENDER_NODE_TEST_MODE:-}" != "1" ]]; then
   [[ "${ID:-}" == "ubuntu" && ("${VERSION_ID:-}" == "22.04" || "${VERSION_ID:-}" == "24.04") ]] \
     || die "Only Ubuntu 22.04 and 24.04 x86_64 Pods are supported."
 fi
-
-if [[ -z "$public_origin" && -n "${RUNPOD_POD_ID:-}" ]]; then
-  public_origin="https://${RUNPOD_POD_ID}-8080.proxy.runpod.net"
-fi
-[[ "$public_origin" =~ ^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?$ ]] \
-  || die "Pass one exact HTTPS origin with --origin outside RunPod."
 
 command -v nvidia-smi >/dev/null 2>&1 \
   || die "The Pod does not expose nvidia-smi."
@@ -218,7 +195,7 @@ if [[ "${RENDER_NODE_SKIP_PACKAGES:-}" != "1" ]]; then
   fi
   apt-get update
   apt-get install -y --no-install-recommends \
-    apache2-utils ca-certificates curl gettext-base nginx-light openssl tar util-linux xz-utils \
+    ca-certificates curl gettext-base nginx-light openssl tar util-linux xz-utils \
     libdbus-1-3 libegl1 libfontconfig1 libfreetype6 libgl1 libice6 libpulse0 \
     libsm6 libwayland-client0 libx11-6 libxcursor1 libxfixes3 libxi6 \
     libxinerama1 libxkbcommon0 libxrandr2 libxrender1 libxxf86vm1
@@ -309,29 +286,16 @@ else
   ln -s "${INSTALL_ROOT}/current/scripts/render-node" "$MANAGEMENT_BIN"
 fi
 
-if [[ -r "$STATE_ROOT/credentials" && -r "$CONFIG_FILE" && -r "$STATE_ROOT/admin.htpasswd" ]]; then
-  saved_username="$(sed -n 's/^USERNAME=//p' "$STATE_ROOT/credentials" | head -n 1)"
-  saved_password="$(sed -n 's/^PASSWORD=//p' "$STATE_ROOT/credentials" | head -n 1)"
+if [[ -r "$CONFIG_FILE" ]]; then
   auth_token="$(sed -n 's/^RENDER_NODE_AUTH_TOKEN=//p' "$CONFIG_FILE" | head -n 1)"
-  [[ -n "$saved_username" && -n "$saved_password" && "$auth_token" =~ ^[A-Za-z0-9_-]{32,128}$ ]] \
-    || die "Persistent credentials are malformed; refusing to replace them."
-  admin_username="$saved_username"
-  admin_password="$saved_password"
+  [[ "$auth_token" =~ ^[A-Za-z0-9_-]{32,128}$ ]] \
+    || die "Persistent internal token is malformed; refusing to replace it."
 else
-  if [[ -e "$STATE_ROOT/credentials" || -e "$CONFIG_FILE" || -e "$STATE_ROOT/admin.htpasswd" ]]; then
-    die "Persistent credential state is incomplete; refusing to replace existing secrets."
-  fi
+  [[ ! -e "$CONFIG_FILE" ]] \
+    || die "Persistent config is unreadable; refusing to replace existing secrets."
   auth_token="$(openssl rand -hex 32)"
-  admin_password="$(openssl rand -hex 12)"
-  umask 077
-  printf '%s\n' "$admin_password" \
-    | htpasswd -iBC 12 -c "$STATE_ROOT/admin.htpasswd" "$admin_username" >/dev/null
 fi
-[[ "$(wc -l < "$STATE_ROOT/admin.htpasswd")" -eq 1 ]] \
-  && grep -Eq '^[A-Za-z0-9._-]{1,64}:\$2[aby]\$' "$STATE_ROOT/admin.htpasswd" \
-  || die "Persistent htpasswd must contain one bcrypt account."
 
-old_origin="$(sed -n 's/^RENDER_NODE_ALLOWED_ORIGINS=//p' "$CONFIG_FILE" 2>/dev/null | head -n 1 || true)"
 umask 077
 cat > "$CONFIG_FILE" <<EOF
 RENDER_NODE_RELEASE_ROOT=${INSTALL_ROOT}/current
@@ -339,12 +303,9 @@ RENDER_NODE_STATE_ROOT=${STATE_ROOT}
 RENDER_NODE_RUNTIME_ROOT=${RUNTIME_ROOT}
 RENDER_NODE_INSTALLED_VERSION=${release_version}
 RENDER_NODE_ENV=production
-RENDER_NODE_DEPLOYMENT_PROFILE=single_tenant
-RENDER_NODE_RUNNER_MODE=local_trusted
 RENDER_NODE_RESOURCE_ISOLATION_MODE=strict
 RENDER_NODE_RENDER_SCHEDULER_ENABLED=true
 RENDER_NODE_AUTH_TOKEN=${auth_token}
-RENDER_NODE_ALLOWED_ORIGINS=${public_origin}
 RENDER_NODE_WORKSPACE=${workspace_root}
 RENDER_NODE_DATABASE_URL=sqlite+aiosqlite:////${workspace_root#/}/database/render-node.sqlite3
 RENDER_NODE_BUNDLED_BLENDER_ROOT=${BLENDER_ROOT}
@@ -359,15 +320,9 @@ done < <(compgen -e)
 if [[ "${RENDER_NODE_TEST_MODE:-}" == "1" ]]; then
   printf 'RENDER_NODE_READY_ATTEMPTS=%s\n' "${RENDER_NODE_READY_ATTEMPTS:-2}" >> "$CONFIG_FILE"
 fi
-cat > "$STATE_ROOT/credentials" <<EOF
-URL=${public_origin}
-USERNAME=${admin_username}
-PASSWORD=${admin_password}
-EOF
-chmod 0640 "$CONFIG_FILE" "$STATE_ROOT/admin.htpasswd"
-chmod 0600 "$STATE_ROOT/credentials"
+chmod 0640 "$CONFIG_FILE"
 if [[ "${RENDER_NODE_TEST_MODE:-}" != "1" ]]; then
-  chown "$APP_UID:$APP_UID" "$CONFIG_FILE" "$STATE_ROOT/admin.htpasswd"
+  chown "$APP_UID:$APP_UID" "$CONFIG_FILE"
   chown -R "$APP_UID:$APP_UID" "$STATE_ROOT/home" "$STATE_ROOT/logs" "$RUNTIME_ROOT"
 fi
 
@@ -418,7 +373,7 @@ if [[ "$current_target" != "$release_dir" ]]; then
 fi
 
 start_failed=false
-if [[ "$switched" == true || "$old_origin" != "$public_origin" || -n "$broken_release" ]]; then
+if [[ "$switched" == true || -n "$broken_release" ]]; then
   env "${management_env[@]}" "$MANAGEMENT_BIN" restart || start_failed=true
 else
   env "${management_env[@]}" "$MANAGEMENT_BIN" start || start_failed=true
@@ -456,12 +411,11 @@ for candidate in "$RELEASES_ROOT"/*; do
 done
 
 log "Render Node ${release_version} is ready."
+rm -f -- "$STATE_ROOT/admin.htpasswd" "$STATE_ROOT/credentials"
 cat <<EOF
 
-  URL:      ${public_origin}
-  Username: ${admin_username}
-  Password: ${admin_password}
+  Panel:    use the HTTPS address assigned by your provider to exposed port 8080
 
-Credentials are stored root-only in ${STATE_ROOT}/credentials.
-Manage the service with: render-node status|logs|restart|stop|start|credentials|uninstall
+The first browser to open the panel claims this node automatically.
+Manage the service with: render-node status|logs|restart|stop|start|reset-access|uninstall
 EOF

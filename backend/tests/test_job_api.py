@@ -200,7 +200,7 @@ async def test_job_cannot_start_when_uploaded_scene_disappears(
     assert response.json()["error"]["code"] == "job_scene_unavailable"
 
 
-async def test_disabled_runner_rejects_start_without_changing_ready_job(
+async def test_disabled_scheduler_rejects_start_without_changing_ready_job(
     job_settings: Settings,
 ) -> None:
     app = create_app(job_settings)
@@ -231,7 +231,7 @@ async def test_disabled_runner_rejects_start_without_changing_ready_job(
     assert capabilities.status_code == 200
     runner_capability = capabilities.json()["runner"]
     assert runner_capability["available"] is False
-    assert runner_capability["mode"] == "disabled"
+    assert runner_capability["mode"] == "local"
     assert runner_capability["message"] == "Render scheduler is disabled"
     assert runner_capability["isolation"]["mode"] == "trusted"
     assert runner_capability["isolation"]["backend"] == "external"
@@ -241,6 +241,24 @@ async def test_disabled_runner_rejects_start_without_changing_ready_job(
     assert retry.status_code == 409
     assert retry.json()["error"]["code"] == "runner_unavailable"
     assert persisted_after_retry.json()["status"] == "cancelled"
+
+
+async def test_installed_node_runner_is_ready_without_a_trust_gate(
+    job_settings: Settings,
+) -> None:
+    settings = job_settings.model_copy(update={"render_scheduler_enabled": True})
+    app = create_app(settings)
+
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/api/v1/system/capabilities")
+
+    assert response.status_code == 200
+    runner = response.json()["runner"]
+    assert runner["available"] is True
+    assert runner["mode"] == "local"
+    assert runner["message"] == "Ready to render"
 
 
 async def test_strict_cgroup_failure_rejects_start_without_queueing(

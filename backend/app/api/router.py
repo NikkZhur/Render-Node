@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter
 
+from app.api.access import router as access_router
 from app.api.artifacts import router as artifacts_router
 from app.api.blender import router as blender_router
 from app.api.devices import router as devices_router
@@ -16,6 +17,7 @@ router.include_router(health_router)
 
 # Domain routers are added below this prefix in later phases.
 api_v1_router = APIRouter()
+api_v1_router.include_router(access_router)
 api_v1_router.include_router(jobs_router)
 api_v1_router.include_router(uploads_router)
 api_v1_router.include_router(blender_router)

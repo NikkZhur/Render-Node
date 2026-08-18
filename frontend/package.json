@@ -15,12 +15,15 @@
     "qa:versions": "node scripts/qa-versions.mjs",
     "qa:versions-empty": "node scripts/qa-versions-empty.mjs",
     "qa:api": "node scripts/qa-api-smoke.mjs",
+    "qa:pairing": "node scripts/qa-pairing.mjs",
+    "qa:same-origin": "node scripts/qa-same-origin.mjs",
     "qa:runner": "node scripts/qa-runner-smoke.mjs",
     "qa:capabilities": "node scripts/qa-runner-capabilities.mjs",
     "qa:job-delete": "node scripts/qa-job-delete.mjs",
     "qa:jobs-pagination": "node scripts/qa-jobs-pagination.mjs",
     "qa:sample-progress": "node scripts/qa-sample-progress.mjs",
     "test:render-progress": "node --test scripts/render-progress.test.mjs",
+    "test:access-security": "node --test scripts/access-security.test.mjs",
     "test:vite-config": "node --test scripts/vite-config.test.mjs"
   },
   "dependencies": {

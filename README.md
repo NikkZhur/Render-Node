@@ -44,7 +44,8 @@ isolated worker if a shared render service is needed later.
 - FastAPI application lifecycle and versioned API router;
 - async SQLite persistence with SQLAlchemy and Alembic migrations;
 - public health/readiness probes, shared error responses, bounded request bodies,
-  exact-origin CORS, and a production Bearer boundary for REST and WebSocket.
+  first-browser pairing sessions, and a private production Bearer boundary for
+  loopback/service clients;
 - support for verified bundled Blender 5.2.0 and 4.1.1 when their binaries are
   present in the runtime image;
 - interactive one-command installer and `render-node` management command.
@@ -96,8 +97,8 @@ Use this inside a fresh Ubuntu 22.04/24.04 x86_64 GPU Pod as root:
 curl -fsSL https://raw.githubusercontent.com/NikkZhur/Render-Node/master/install.sh | bash
 ```
 
-On RunPod the installer detects the public panel URL from `RUNPOD_POD_ID`.
-It checks the GPU, downloads the latest stable GitHub Release bundle and
+The installer does not require a public URL, Pod ID, or provider-specific
+variable. It checks the GPU, downloads the latest stable GitHub Release bundle and
 checksum, installs a pinned Python runtime and the verified Blender versions,
 then starts the already-built web interface as unprivileged Linux processes. It
 does not download Node.js, build frontend source, install Docker/Compose, or use
@@ -115,10 +116,19 @@ After installation:
 ```bash
 render-node status
 render-node logs
-render-node credentials
+render-node reset-access
 render-node restart
 render-node uninstall
 ```
+
+Opening the panel deliberately claims an unclaimed node for that browser. This
+is an explicit TOFU race, not identity verification: whoever completes the
+first browser claim gets access. Use **Pair another device** in the authorized
+panel to create a one-use fragment link that expires after five minutes. At most
+five browser sessions can exist. If every authorized browser is lost, run
+`render-node reset-access`; the next browser can then claim the running node
+without changing jobs or restarting the service. Backend restart also clears
+all ephemeral browser sessions and invitations.
 
 `uninstall` preserves the database, scenes, results and downloaded Blender
 versions under `/workspace`. Exact paths, update/rollback behavior, explicit
@@ -146,22 +156,22 @@ waits up to 60 seconds for its public `/ready` endpoint, and only then starts th
 frontend on port `5173`. If the backend exits or does not become ready, the frontend
 is not started. `Ctrl+C` stops both processes; if either running service exits
 unexpectedly, the other is stopped too.
-Environment variables such as `RENDER_NODE_WORKSPACE`,
-`RENDER_NODE_BACKEND_AUTH_TOKEN`, and the development runner settings are passed
-through unchanged. Settings are also loaded from the repository-root `.env`, so
-copy `.env.example` to `.env` once and set
-`RENDER_NODE_RUNNER_MODE=local_trusted` for persistent direct-on-host rendering.
-Development also uses the explicit
+Environment variables such as `RENDER_NODE_WORKSPACE` are passed through unchanged,
+and settings are also loaded from the repository-root `.env`. Rendering is ready
+without a separate trust/profile switch once a Blender version is installed and
+activated through the UI. Development uses the
 `RENDER_NODE_RESOURCE_ISOLATION_MODE=trusted` fallback unless a writable cgroup
 v2 subtree has been delegated to the current user. This fallback never applies
 `RLIMIT_AS`; it relies on the actual memory/pids boundary of the development
 container or machine and is reported by `/api/v1/system/capabilities`.
-This mode starts Blender as a subprocess of Render Node and must only receive
-trusted `.blend`/ZIP files. If it is disabled, the UI reports that the runner is
-unavailable and keeps a started job in `READY` instead of creating a failed job.
 Startup does not require Blender to exist. When no verified runtime is present,
 open **Blender versions** in the UI and explicitly download, install, and activate
 one before creating a render job.
+
+`make dev` uses the same automatic first-browser claim and shows no login form.
+It is a development server, not an anonymously safe Internet deployment. A
+backend restart clears access; an open tab will claim again when it reconnects
+if the node is still unclaimed.
 
 ## Quick Start: Frontend
 
@@ -175,31 +185,21 @@ npm run dev
 
 Open [http://localhost:5173](http://localhost:5173). Vite is configured to listen
 on `0.0.0.0:5173`, so the page is accessible from the host when the container port
-is forwarded. When `RENDER_NODE_ALLOWED_ORIGINS` contains exactly one
-non-loopback origin, Vite also uses that origin for HMR through an HTTPS Pod
-proxy. This keeps Vite's reconnect fallback on the remote Pod instead of asking
-the browser for access to `localhost` on the operator's device. If several
-external development origins are allowed, select one explicitly with
-`RENDER_NODE_DEV_PUBLIC_ORIGIN`; it must also be present in the allowlist.
+is forwarded. Vite uses the current browser host for HMR, including through an
+arbitrary HTTPS/WebSocket-capable reverse proxy; no public-origin variable or
+provider detection is needed.
 
 `npm run dev` uses the real Job API through Vite's `/api` proxy. Run
 `npm run dev:mock` only when the explicit legacy mock mode is needed. Set
 `RENDER_NODE_BACKEND_URL` when the backend is not available at
-`http://127.0.0.1:8000`. For a locally authenticated backend, the Vite server can
-inject `RENDER_NODE_BACKEND_AUTH_TOKEN` into proxied HTTP and WebSocket requests;
-this variable is server-side and must never use a `VITE_` prefix.
+`http://127.0.0.1:8000`. Vite does not inject the private backend Bearer into
+browser HTTP or WebSocket requests; browser access always uses pairing cookies.
 
-Vite preserves the browser's real `Origin`. If the development page is opened
-through port forwarding or a preview hostname, add that exact origin (scheme,
-host, and port) to `RENDER_NODE_ALLOWED_ORIGINS` before starting the backend, for
-example:
-
-```dotenv
-RENDER_NODE_ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173,https://exact-preview.example
-```
-
-Wildcards and implicit trust of forwarded hosts are intentionally unsupported;
-the same allowlist applies to HTTP and WebSocket requests.
+Vite keeps REST and application WebSocket traffic on the current browser host.
+The access boundary does not depend on the upstream `Host`, so another proxy may
+rewrite it without configuration. Frontend and API must remain on the same
+browser-visible HTTPS origin; cross-origin development is intentionally
+unsupported.
 
 ## Quick Start: Backend
 
@@ -212,12 +212,9 @@ uv run alembic upgrade head
 uv run uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000
 ```
 
-Local Blender execution is intentionally disabled by default. For an isolated
-development machine that receives only trusted scenes, set
-`RENDER_NODE_RUNNER_MODE=local_trusted` in the repository-root `.env`.
-An authenticated production node dedicated to one operator may use the explicit
-`single_tenant` deployment profile described below. A shared service that accepts
-scenes from unrelated users still requires a separate OS-isolated worker.
+Blender execution is part of the installed Render Node and has no separate
+trust/profile setting. Install and activate a Blender version through the UI;
+the backend then runs it inside the node's configured resource boundary.
 
 Open [http://localhost:8000/health](http://localhost:8000/health) for liveness,
 [http://localhost:8000/ready](http://localhost:8000/ready) for SQLite readiness,
@@ -226,47 +223,57 @@ Interactive API documentation is disabled when `RENDER_NODE_ENV=production`.
 
 ## Production Boundary
 
-Production startup requires both a secret `RENDER_NODE_AUTH_TOKEN` of at least
-32 characters and one or more exact HTTPS origins in
-`RENDER_NODE_ALLOWED_ORIGINS`. Keep the token outside git and frontend build
-variables. `/health` and `/ready` remain public for probes; every route under
-`/api/v1`, including `WS /api/v1/events`, requires the same
-`Authorization: Bearer ...` credential. Browser origins that are present but not
-allowlisted are rejected before the API handler runs.
+Production startup requires a secret `RENDER_NODE_AUTH_TOKEN` of at least 32
+characters. It is a private management/service credential for origin-less
+clients on loopback or another private backend path; it is never sent to the
+frontend, installed as a browser cookie, or injected into public Nginx requests.
+`/health` and `/ready` remain public probes. Keep port `8000` loopback-only.
 
-Browsers cannot attach a Bearer header to native WebSocket connections or plain
-artifact download links. Deploy the static frontend and API behind one HTTPS
-reverse proxy that injects the backend credential into both HTTP requests and
-WebSocket upgrades, and keep port 8000 private. The proxy-facing browser origin
-must be in `RENDER_NODE_ALLOWED_ORIGINS`. Do not expose the backend token to
-JavaScript or place it in a `VITE_*` variable.
+The first deliberate JavaScript `POST /api/v1/access/claim` atomically claims an
+unclaimed backend process and sets an opaque `HttpOnly`, `Secure`,
+`SameSite=Strict`, `__Host-` session cookie. A page GET, crawler preview, probe,
+`HEAD`, or `OPTIONS` never claims the node. Browser requests additionally require
+same-origin Fetch Metadata; unsafe methods carry `X-Render-Node-Request: 1`.
+Browser WebSockets require the session cookie, valid HTTPS `Origin`, and the
+fixed non-secret `render-node-browser-v1` subprotocol. When Fetch Metadata is
+present it must be `Sec-Fetch-Site: same-origin`; the subprotocol is the explicit
+compatibility context for Chromium WebSocket handshakes that omit Fetch Metadata.
+Malformed origins and cross-/same-site contexts are rejected, but a valid
+browser `Origin` is deliberately not compared with backend-visible `Host`.
+`Forwarded` and `X-Forwarded-*` are never trusted.
 
-Render Node has two explicit trust profiles:
+Additional browsers use one-time 256-bit invitation tokens created by an
+authorized browser. The frontend puts the token only in `#pair=...`, removes the
+fragment before sending it in a JSON body, and never stores session tokens in
+JavaScript storage. Invitations expire after five minutes; the total browser
+session limit is five. Sessions and invitations live only in the single Uvicorn
+worker and reset on backend restart. `render-node reset-access` performs the same
+reset locally without touching jobs or Blender operations.
 
-- `isolated_worker` is the default. Production rendering fails closed until a
-  separate OS-isolated worker is available. Use it for a shared service that
-  accepts scenes from unrelated users.
-- `single_tenant` treats the entire rented VM or cloud Pod as the isolation
-  boundary. It permits direct Blender execution in production only together
-  with `RENDER_NODE_RUNNER_MODE=local_trusted`. The node must belong to one
-  operator and accept only that operator's scenes.
+Deploy the static frontend and `/api` behind one HTTPS reverse proxy on one
+public origin. The proxy may rewrite upstream `Host`; no public URL or origin is
+configured. Separate cross-origin frontend/API hosting is unsupported. Do not
+expose port `8000`, the internal Bearer, or any `VITE_*` secret. Render Node no
+longer has Basic Auth, usernames, passwords, or a credentials command; provider
+authentication may still be added outside it.
 
-An authenticated temporary RunPod-style node therefore uses:
+Render Node treats the installed VM, container, or cloud Pod as its execution
+boundary. There is no runner trust toggle to enable after deployment: browser
+pairing grants access to the node, while Blender runtime download, installation,
+activation, upload, and render actions are managed through the interface.
+
+A production process uses:
 
 ```dotenv
 RENDER_NODE_ENV=production
-RENDER_NODE_DEPLOYMENT_PROFILE=single_tenant
-RENDER_NODE_RUNNER_MODE=local_trusted
 RENDER_NODE_RESOURCE_ISOLATION_MODE=strict
 RENDER_NODE_AUTH_TOKEN=<unique-secret-with-at-least-32-characters>
-RENDER_NODE_ALLOWED_ORIGINS=https://<public-panel-origin>
 ```
 
-The single-tenant profile does not sandbox Blender away from the backend inside
-the node. It is not suitable for a public render farm or any deployment where
-unrelated users can submit files. Automatic Python remains disabled, subprocess
-environment and paths remain constrained, and resource/time/output limits still
-apply.
+Pairing is an access boundary, not a sandbox between Blender and the backend.
+Automatic Python remains disabled, subprocess environment and paths remain
+constrained, and resource/time/output limits still apply. A multi-tenant render
+farm would require a separate worker isolation design outside this node product.
 
 Production resource isolation is always strict. Render Node detects the current
 cgroup hierarchy from `/proc/self/mountinfo` and `/proc/self/cgroup`; it does not

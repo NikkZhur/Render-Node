@@ -25,40 +25,48 @@ def receive_type(websocket: object, expected: str) -> dict[str, object]:
 
 
 def test_websocket_subscription_job_events_and_metrics(app: FastAPI) -> None:
-    with TestClient(app) as client, client.websocket_connect("/api/v1/events") as websocket:
-        activated = client.post("/api/v1/blender/versions/5.2.0/activate")
-        assert activated.status_code == 200
-        ready = receive_type(websocket, "connection.ready")
-        assert ready["resync"] == "/api/v1/jobs"
-        websocket.send_json({"action": "subscribe", "job_ids": []})
-        subscribed = receive_type(websocket, "subscription.updated")
-        assert subscribed["job_ids"] == []
+    browser_headers = {"origin": "http://testserver", "sec-fetch-site": "same-origin"}
+    mutation_headers = {**browser_headers, "x-render-node-request": "1"}
+    with TestClient(app) as client:
+        claimed = client.post("/api/v1/access/claim", headers=mutation_headers)
+        assert claimed.status_code == 200
+        with client.websocket_connect("/api/v1/events", headers=browser_headers) as websocket:
+            activated = client.post(
+                "/api/v1/blender/versions/5.2.0/activate", headers=mutation_headers
+            )
+            assert activated.status_code == 200
+            ready = receive_type(websocket, "connection.ready")
+            assert ready["resync"] == "/api/v1/jobs"
+            websocket.send_json({"action": "subscribe", "job_ids": []})
+            subscribed = receive_type(websocket, "subscription.updated")
+            assert subscribed["job_ids"] == []
 
-        created = client.post(
-            "/api/v1/jobs",
-            json={
-                "name": "Realtime",
-                "blender_version": "4.5.11",
-                "engine": "CYCLES",
-                "device": "CPU",
-                "gpu_ids": [],
-                "frame_mode": "SINGLE",
-                "frame_start": 1,
-                "frame_end": None,
-            },
-        )
-        assert created.status_code == 201
-        event = receive_type(websocket, "job.created")
-        assert event["job_id"] == created.json()["id"]
+            created = client.post(
+                "/api/v1/jobs",
+                headers=mutation_headers,
+                json={
+                    "name": "Realtime",
+                    "blender_version": "4.5.11",
+                    "engine": "CYCLES",
+                    "device": "CPU",
+                    "gpu_ids": [],
+                    "frame_mode": "SINGLE",
+                    "frame_start": 1,
+                    "frame_end": None,
+                },
+            )
+            assert created.status_code == 201
+            event = receive_type(websocket, "job.created")
+            assert event["job_id"] == created.json()["id"]
 
-        metrics = client.get("/api/v1/system/metrics")
-        assert metrics.status_code == 200
-        body = metrics.json()
-        assert body["cpus"]
-        assert isinstance(body["gpus"], list)
-        assert body["storages"]
-        assert body["websocket_clients"] == 1
-        assert body["storages"][0]["status"] in {"healthy", "low_space"}
+            metrics = client.get("/api/v1/system/metrics", headers=browser_headers)
+            assert metrics.status_code == 200
+            body = metrics.json()
+            assert body["cpus"]
+            assert isinstance(body["gpus"], list)
+            assert body["storages"]
+            assert body["websocket_clients"] == 1
+            assert body["storages"][0]["status"] in {"healthy", "low_space"}
 
 
 async def test_event_hub_filters_jobs_and_requests_rest_resync_on_overflow() -> None:

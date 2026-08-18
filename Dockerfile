@@ -52,7 +52,7 @@ LABEL org.opencontainers.image.title="Render Node" \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-      apache2-utils ca-certificates curl gettext-base gosu nginx-light \
+      ca-certificates curl gettext-base gosu nginx-light \
       libdbus-1-3 libegl1 libfontconfig1 libfreetype6 libgl1 libice6 libpulse0 \
       libsm6 libwayland-client0 libx11-6 libxcursor1 libxext6 libxfixes3 libxi6 \
       libxinerama1 libxkbcommon0 libxrandr2 libxrender1 libxxf86vm1 \

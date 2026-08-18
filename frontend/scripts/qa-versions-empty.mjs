@@ -70,7 +70,7 @@ const installApiRoutes = async (page) => {
     if (apiPath === "/api/v1/devices" && method === "GET") return json(route, []);
     if (apiPath === "/api/v1/system/capabilities" && method === "GET") {
       return json(route, {
-        runner: { available: true, mode: "local_trusted", message: "Ready to render trusted Blender scenes" },
+        runner: { available: true, mode: "local", message: "Ready to render" },
       });
     }
     if (apiPath === "/api/v1/system/metrics" && method === "GET") {

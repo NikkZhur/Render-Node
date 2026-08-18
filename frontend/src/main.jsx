@@ -1,6 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import AccessGate from "./AccessGate";
 import App from "./App";
 import "./styles.css";
 
@@ -22,7 +23,9 @@ async function bootstrap() {
   createRoot(document.getElementById("root")).render(
     <StrictMode>
       <QueryClientProvider client={queryClient}>
-        <App mockApi={mockApi} />
+        <AccessGate bypass={mockApi !== null}>
+          <App mockApi={mockApi} />
+        </AccessGate>
       </QueryClientProvider>
     </StrictMode>,
   );

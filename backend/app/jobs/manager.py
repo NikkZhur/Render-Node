@@ -14,7 +14,7 @@ from app.blender.devices import GpuAllocation, GpuReservationError, GpuScheduler
 from app.blender.progress import parse_progress
 from app.blender.repository import BlenderRepository
 from app.blender.runner import FailureKind, RunnerError, RunResult, SandboxRunner
-from app.blender.sandbox import SandboxUnavailableError, build_worker_environment
+from app.blender.sandbox import build_worker_environment
 from app.blender.types import RuntimeSource, RuntimeState
 from app.events.hub import EventHub
 from app.jobs.exceptions import JobConflictError, JobNotFoundError, ServiceError
@@ -198,7 +198,6 @@ class JobManager:
             await self._finish_from_result(job_id, result)
         except (
             RunnerError,
-            SandboxUnavailableError,
             GpuReservationError,
             ServiceError,
             ValueError,

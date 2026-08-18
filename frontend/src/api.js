@@ -1,3 +1,5 @@
+import { withBrowserRequestPolicy } from "./requestPolicy";
+
 const API_PREFIX = import.meta.env.VITE_RENDER_NODE_API_URL ?? "/api/v1";
 
 const engineLabels = {
@@ -38,18 +40,74 @@ export const presentJob = (job) => ({
   created: formatCreatedAt(job.created_at),
 });
 
-const request = async (path, options = {}) => {
-  const response = await fetch(`${API_PREFIX}${path}`, options);
+export class ApiError extends Error {
+  constructor(message, { code, details, status }) {
+    super(message);
+    this.name = "ApiError";
+    this.code = code;
+    this.details = details;
+    this.status = status;
+  }
+}
+
+let recoveryPromise = null;
+
+const request = async (path, options = {}, allowRecovery = true) => {
+  const response = await fetch(
+    `${API_PREFIX}${path}`,
+    withBrowserRequestPolicy(options),
+  );
   if (response.status === 204) return null;
 
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
-    throw new Error(payload?.error?.message ?? `Render Node API returned ${response.status}`);
+    const error = new ApiError(
+      payload?.error?.message ?? `Render Node API returned ${response.status}`,
+      {
+        code: payload?.error?.code ?? "api_request_failed",
+        details: payload?.error?.details ?? null,
+        status: response.status,
+      },
+    );
+    if (
+      allowRecovery
+      && error.code === "browser_session_required"
+      && !path.startsWith("/access/")
+    ) {
+      recoveryPromise ??= accessApi.claim().finally(() => {
+        recoveryPromise = null;
+      });
+      await recoveryPromise;
+      return request(path, options, false);
+    }
+    throw error;
   }
   return payload;
 };
 
 const apiUrl = (path) => `${API_PREFIX}${path}`;
+
+export const accessApi = {
+  claim() {
+    return request("/access/claim", { method: "POST" }, false);
+  },
+
+  pair(token) {
+    return request(
+      "/access/pair",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token }),
+      },
+      false,
+    );
+  },
+
+  createInvitation() {
+    return request("/access/invitations", { method: "POST" });
+  },
+};
 
 export const jobsApi = {
   async list({ signal } = {}) {

@@ -43,7 +43,7 @@ async def test_not_found_uses_error_envelope(client: AsyncClient) -> None:
     assert response.json()["error"]["code"] == "http_404"
 
 
-async def test_vite_origin_is_allowed_by_cors(client: AsyncClient) -> None:
+async def test_cross_origin_preflight_is_not_enabled(client: AsyncClient) -> None:
     response = await client.options(
         "/health",
         headers={
@@ -52,8 +52,8 @@ async def test_vite_origin_is_allowed_by_cors(client: AsyncClient) -> None:
         },
     )
 
-    assert response.status_code == 200
-    assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
+    assert response.status_code == 405
+    assert "access-control-allow-origin" not in response.headers
 
 
 async def test_validation_error_uses_safe_error_envelope(client: AsyncClient, app: FastAPI) -> None:

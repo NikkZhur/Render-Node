@@ -7,10 +7,10 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import FastAPI
-from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from app.access import AccessManager
 from app.api.errors import register_error_handlers
 from app.api.router import api_v1_router, router
 from app.config import Environment, Settings
@@ -129,7 +129,11 @@ class RequestIdMiddleware:
         await self.app(scope, receive, send_with_request_id)
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    access_manager: AccessManager | None = None,
+) -> FastAPI:
     resolved_settings = settings or Settings()
     app = FastAPI(
         title=resolved_settings.app_name,
@@ -141,6 +145,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = resolved_settings
     app.state.ready = False
+    resolved_access_manager = access_manager or AccessManager(
+        production=resolved_settings.env is Environment.PRODUCTION
+    )
+    app.state.access_manager = resolved_access_manager
 
     register_error_handlers(app)
     app.include_router(router)
@@ -153,15 +161,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if resolved_settings.auth_token is not None
             else None
         ),
-        allowed_origins=resolved_settings.cors_origins,
-    )
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=resolved_settings.cors_origins,
-        allow_credentials=False,
-        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type"],
-        expose_headers=["Content-Disposition", "X-Request-ID"],
+        access_manager=resolved_access_manager,
     )
     app.add_middleware(
         RequestBodyLimitMiddleware,

@@ -186,20 +186,6 @@ exec /usr/bin/sha256sum "$@"
 """,
     )
     executable(
-        fake_bin / "htpasswd",
-        f"""#!/usr/bin/env bash
-printf '%s\n' "$*" >> {control / "htpasswd-args.log"}
-IFS= read -r password
-printf '%s' "$password" > {control / "htpasswd-stdin.log"}
-target=""; username=""
-while (($#)); do
-  if [[ "$1" == "-c" ]]; then target="$2"; shift 2; continue; fi
-  username="$1"; shift
-done
-printf '%s:$2y$12$fixture\n' "$username" > "$target"
-""",
-    )
-    executable(
         fake_bin / "nginx",
         "#!/usr/bin/env bash\ntrap 'exit 0' INT TERM\nwhile :; do sleep 1; done\n",
     )
@@ -207,6 +193,15 @@ printf '%s:$2y$12$fixture\n' "$username" > "$target"
         fake_bin / "curl",
         f"""#!/usr/bin/env bash
 set -Eeuo pipefail
+printf '%s\n' "$*" >> {control / "curl-args.log"}
+if [[ "${{1:-}}" == "--config" && "${{2:-}}" == "-" ]]; then
+  payload="$(cat)"
+  expected="$(sed -n 's/^RENDER_NODE_AUTH_TOKEN=//p' {state / "render-node.env"} | head -n 1)"
+  [[ "$payload" == *'http://127.0.0.1:8000/api/v1/access/reset'* ]]
+  [[ "$payload" == *"Authorization: Bearer $expected"* ]]
+  printf 'reset\n' >> {control / "reset.log"}
+  exit 0
+fi
 url=""; output=""
 while (($#)); do
   case "$1" in
@@ -249,11 +244,19 @@ cp {releases}/"$version"/"${{url##*/}}" "$output"
         "RENDER_NODE_SKIP_PACKAGES": "1",
         "RENDER_NODE_READY_ATTEMPTS": "2",
         "RENDER_NODE_STOP_ATTEMPTS": "20",
-        "RUNPOD_POD_ID": "pod-a",
         "RUNPOD_API_KEY": "must-not-leak",
         "CUDA_VISIBLE_DEVICES": "0",
         "FAKE_UV_SOURCE": str(uv_source),
     }
+    for obsolete_name in (
+        "RENDER_NODE_ALLOWED_ORIGINS",
+        "RENDER_NODE_PUBLIC_ORIGIN",
+        "RUNPOD_POD_ID",
+        "RENDER_NODE_ADMIN_USERNAME",
+        "RENDER_NODE_ADMIN_PASSWORD",
+        "RENDER_NODE_ADMIN_HTPASSWD_B64",
+    ):
+        env.pop(obsolete_name, None)
     result = Harness(
         root=tmp_path,
         install=install,
@@ -347,35 +350,59 @@ def test_bundle_manifest_is_explicit_and_clean(tmp_path: Path) -> None:
     assert archive.read_bytes() == (second / archive.name).read_bytes()
 
 
-def test_fresh_noop_repair_and_origin_update_preserve_state(harness: Harness) -> None:
-    harness.install_release()
-    credentials = (harness.state / "credentials").read_text()
-    password = next(line for line in credentials.splitlines() if line.startswith("PASSWORD="))
+def test_fresh_noop_update_and_repair_preserve_data_and_internal_token(
+    harness: Harness,
+) -> None:
+    fresh = harness.install_release()
+    assert "HTTPS address assigned by your provider" in fresh.stdout
+    assert "first browser" in fresh.stdout
+    assert not (harness.state / "credentials").exists()
+    assert not (harness.state / "admin.htpasswd").exists()
     token = next(
         line
         for line in (harness.state / "render-node.env").read_text().splitlines()
         if line.startswith("RENDER_NODE_AUTH_TOKEN=")
     )
+    environment = (harness.state / "render-node.env").read_text()
+    assert "RENDER_NODE_ALLOWED_ORIGINS" not in environment
+    assert "RENDER_NODE_ADMIN_" not in environment
     job = harness.workspace / "jobs" / "kept.txt"
+    database = harness.workspace / "database" / "kept.sqlite3"
+    runtime = harness.workspace / "blender" / "versions" / "custom" / "kept.txt"
+    runtime.parent.mkdir(parents=True)
     job.write_text("kept")
+    database.write_text("kept")
+    runtime.write_text("kept")
+    (harness.state / "credentials").write_text("USERNAME=legacy\nPASSWORD=legacy\n")
+    (harness.state / "admin.htpasswd").write_text("legacy:$2y$fixture\n")
+    unrelated = harness.state / "credentials.backup"
+    unrelated.write_text("unrelated")
     uv_calls = (harness.control / "uv.log").read_text()
 
     harness.install_release()
     assert (harness.control / "uv.log").read_text() == uv_calls
     assert job.read_text() == "kept"
+    assert database.read_text() == "kept"
+    assert runtime.read_text() == "kept"
+    assert not (harness.state / "credentials").exists()
+    assert not (harness.state / "admin.htpasswd").exists()
+    assert unrelated.read_text() == "unrelated"
 
-    harness.install_release("--origin", "https://new.example.com")
-    updated_credentials = (harness.state / "credentials").read_text()
-    assert "URL=https://new.example.com" in updated_credentials
-    assert password in updated_credentials
+    harness.create_release("2.0.0")
+    (harness.control / "latest").write_text("2.0.0")
+    harness.install_release()
     assert token in (harness.state / "render-node.env").read_text()
+    assert job.read_text() == "kept"
+    assert database.read_text() == "kept"
+    assert runtime.read_text() == "kept"
 
     harness.manage("stop")
     shutil.rmtree(harness.install)
-    harness.install_release("--origin", "https://new.example.com")
-    assert password in (harness.state / "credentials").read_text()
+    harness.install_release()
     assert token in (harness.state / "render-node.env").read_text()
     assert job.read_text() == "kept"
+    assert database.read_text() == "kept"
+    assert runtime.read_text() == "kept"
 
 
 def test_atomic_update_and_readiness_rollback(harness: Harness) -> None:
@@ -386,6 +413,10 @@ def test_atomic_update_and_readiness_rollback(harness: Harness) -> None:
     assert harness.current_version == "2.0.0"
     assert {path.name for path in (harness.install / "releases").iterdir()} == {"1.0.0", "2.0.0"}
 
+    legacy_credentials = harness.state / "credentials"
+    legacy_htpasswd = harness.state / "admin.htpasswd"
+    legacy_credentials.write_text("legacy credentials needed by rollback")
+    legacy_htpasswd.write_text("legacy htpasswd needed by rollback")
     harness.create_release("3.0.0")
     (harness.control / "latest").write_text("3.0.0")
     (harness.control / "fail-version").write_text("3.0.0")
@@ -395,6 +426,8 @@ def test_atomic_update_and_readiness_rollback(harness: Harness) -> None:
     assert harness.current_version == "2.0.0"
     assert "RENDER_NODE_INSTALLED_VERSION=2.0.0" in (harness.state / "render-node.env").read_text()
     assert not (harness.install / "releases" / "3.0.0").exists()
+    assert legacy_credentials.exists()
+    assert legacy_htpasswd.exists()
     assert harness.manage("status").returncode == 0
 
 
@@ -440,21 +473,41 @@ def test_management_rejects_foreign_and_reused_pid_and_manages_group(harness: Ha
     assert not (harness.runtime / "service.pid").exists()
 
 
-def test_password_uses_stdin_and_cloud_secrets_are_removed(harness: Harness) -> None:
+def test_reset_access_uses_private_backend_without_restart_or_token_leak(
+    harness: Harness,
+) -> None:
     harness.install_release()
-    credentials = (harness.state / "credentials").read_text()
-    password = next(
-        line.split("=", 1)[1] for line in credentials.splitlines() if line.startswith("PASSWORD=")
+    identity_before = (harness.runtime / "service.pid").read_text()
+    token = next(
+        line.split("=", 1)[1]
+        for line in (harness.state / "render-node.env").read_text().splitlines()
+        if line.startswith("RENDER_NODE_AUTH_TOKEN=")
     )
-    assert password == (harness.control / "htpasswd-stdin.log").read_text()
-    assert password not in (harness.control / "htpasswd-args.log").read_text()
 
-    for _ in range(20):
+    reset = harness.manage("reset-access")
+
+    assert reset.stdout == "Access reset; the next browser can claim this node.\n"
+    assert token not in reset.stdout
+    assert token not in reset.stderr
+    assert (harness.runtime / "service.pid").read_text() == identity_before
+    assert (harness.control / "reset.log").read_text() == "reset\n"
+    assert token not in (harness.control / "curl-args.log").read_text()
+    assert harness.manage("status").returncode == 0
+
+
+def test_internal_token_is_private_and_cloud_secrets_are_removed(harness: Harness) -> None:
+    harness.install_release()
+    assert not (harness.state / "credentials").exists()
+    assert not (harness.state / "admin.htpasswd").exists()
+
+    environment = ""
+    for _ in range(50):
         child_env = harness.control / "child.env"
         if child_env.exists():
-            break
-        time.sleep(0.05)
-    environment = child_env.read_text()
+            environment = child_env.read_text()
+            if "RENDER_NODE_AUTH_TOKEN=" in environment:
+                break
+        time.sleep(0.02)
     assert "RUNPOD_API_KEY" not in environment
     assert "must-not-leak" not in environment
     assert "RENDER_NODE_AUTH_TOKEN=" in environment
@@ -469,8 +522,7 @@ def test_nginx_substitution_keeps_runtime_variables() -> None:
     result = subprocess.run(  # noqa: S603
         [
             envsubst,
-            "${RENDER_NODE_AUTH_TOKEN} ${RENDER_NODE_FRONTEND_ROOT} "
-            "${RENDER_NODE_STATE_ROOT} ${RENDER_NODE_RUNTIME_ROOT}",
+            "${RENDER_NODE_FRONTEND_ROOT} ${RENDER_NODE_STATE_ROOT} ${RENDER_NODE_RUNTIME_ROOT}",
         ],
         input=template,
         check=True,
@@ -478,14 +530,14 @@ def test_nginx_substitution_keeps_runtime_variables() -> None:
         text=True,
         env={
             **os.environ,
-            "RENDER_NODE_AUTH_TOKEN": "a" * 64,
             "RENDER_NODE_FRONTEND_ROOT": "/release/frontend/dist",
             "RENDER_NODE_STATE_ROOT": "/state",
             "RENDER_NODE_RUNTIME_ROOT": "/run/render-node",
         },
     )
-    assert f"Bearer {'a' * 64}" in result.stdout
-    assert "$host" in result.stdout
+    assert "auth_basic" not in result.stdout
+    assert "proxy_set_header Authorization" not in result.stdout
+    assert "proxy_set_header Host $http_host;" in result.stdout
     assert "$http_upgrade" in result.stdout
     assert "access_log off" in result.stdout
 
@@ -500,14 +552,13 @@ def test_nginx_config_when_binary_is_available(tmp_path: Path) -> None:
     frontend = tmp_path / "frontend"
     for path in (state / "logs", runtime, frontend):
         path.mkdir(parents=True)
-    (state / "admin.htpasswd").write_text("render:$2y$12$fixture\n")
     config = runtime / "nginx.conf"
     with config.open("w") as output:
         subprocess.run(  # noqa: S603
             [
                 envsubst,
-                "${RENDER_NODE_AUTH_TOKEN} ${RENDER_NODE_FRONTEND_ROOT} "
-                "${RENDER_NODE_STATE_ROOT} ${RENDER_NODE_RUNTIME_ROOT}",
+                "${RENDER_NODE_FRONTEND_ROOT} ${RENDER_NODE_STATE_ROOT} "
+                "${RENDER_NODE_RUNTIME_ROOT}",
             ],
             stdin=(ROOT / "deploy/nginx.conf.template").open(),
             stdout=output,
@@ -515,7 +566,6 @@ def test_nginx_config_when_binary_is_available(tmp_path: Path) -> None:
             text=True,
             env={
                 **os.environ,
-                "RENDER_NODE_AUTH_TOKEN": "a" * 64,
                 "RENDER_NODE_FRONTEND_ROOT": str(frontend),
                 "RENDER_NODE_STATE_ROOT": str(state),
                 "RENDER_NODE_RUNTIME_ROOT": str(runtime),
@@ -533,17 +583,36 @@ def test_native_flow_has_no_node_docker_systemd_and_image_is_pinned() -> None:
     assert "npm " not in installer
     assert "docker " not in installer
     assert "systemctl" not in installer
+    assert "apache2-utils" not in installer
+    assert "--username" not in installer
+    assert "render_node_admin_" not in installer
     dockerfile = (ROOT / "Dockerfile").read_text()
     for version, checksum in BLENDER_CHECKSUMS.items():
         assert version in dockerfile
         assert checksum in dockerfile
     assert "python:3.13.7-slim-bookworm" in dockerfile
+    assert "apache2-utils" not in dockerfile
     entrypoint = (ROOT / "deploy/container-entrypoint.sh").read_text()
-    assert "| htpasswd -iBC" in entrypoint
-    assert "unset RENDER_NODE_ADMIN_PASSWORD" in entrypoint
+    assert "RENDER_NODE_ALLOWED_ORIGINS" not in entrypoint
+    assert "RENDER_NODE_ADMIN_" not in entrypoint
+    assert "htpasswd -" not in entrypoint
     assert "exec env -i" in entrypoint
     assert "RENDER_NODE_RESOURCE_ISOLATION_MODE=strict" in entrypoint
     assert "prepare_render_node_cgroup" in entrypoint
+
+    management = (ROOT / "scripts/render-node").read_text()
+    assert "credentials)" not in management
+    assert "reset-access" in management
+    assert "http://127.0.0.1:8000/api/v1/access/reset" in management
+
+    supervisor = (ROOT / "deploy/supervisor.sh").read_text()
+    assert "app.main:create_app --factory --host 127.0.0.1 --port 8000" in supervisor
+    nginx = (ROOT / "deploy/nginx.conf.template").read_text()
+    assert "auth_basic" not in nginx
+    assert "proxy_set_header Authorization" not in nginx
+    assert "proxy_set_header Host $http_host;" in nginx
+    assert "proxy_set_header Upgrade $http_upgrade;" in nginx
+    assert "proxy_set_header Connection $connection_upgrade;" in nginx
 
 
 def test_publish_job_is_gated_by_all_checks() -> None:

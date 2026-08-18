@@ -347,9 +347,22 @@ export const mockApi = {
     return {
       runner: {
         available: true,
-        mode: "local_trusted",
-        message: "Ready to render trusted Blender scenes",
+        mode: "local",
+        message: "Ready to render",
       },
+    };
+  },
+
+  async createInvitation() {
+    await wait(180);
+    const bytes = crypto.getRandomValues(new Uint8Array(32));
+    const token = btoa(String.fromCharCode(...bytes))
+      .replaceAll("+", "-")
+      .replaceAll("/", "_")
+      .replaceAll("=", "");
+    return {
+      token,
+      expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
     };
   },
 

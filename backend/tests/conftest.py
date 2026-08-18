@@ -10,7 +10,7 @@ from alembic.config import Config
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from app.config import Environment, RunnerMode, Settings
+from app.config import Environment, Settings
 from app.jobs.manager import JobManager
 from app.main import create_app
 
@@ -22,7 +22,6 @@ def settings(tmp_path: Path) -> Settings:
         workspace=tmp_path,
         database_url="",
         bundled_blender_root=tmp_path / "bundled",
-        runner_mode=RunnerMode.DISABLED,
     )
     for version in ("5.2.0", "4.1.1"):
         binary = configured.bundled_blender_root / version / "blender"
@@ -64,7 +63,6 @@ async def job_settings(tmp_path: Path) -> Settings:
         max_zip_files=2,
         max_zip_extracted_gb=0.000001,
         render_scheduler_enabled=False,
-        runner_mode=RunnerMode.DISABLED,
     )
     for version in ("5.2.0", "4.1.1"):
         binary = configured.bundled_blender_root / version / "blender"

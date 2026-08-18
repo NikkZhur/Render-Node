@@ -16,8 +16,7 @@ from app.blender.cgroups import (
 )
 from app.blender.command import RenderCommand
 from app.blender.runner import FailureKind, RunnerError, RunnerLimits, SandboxRunner
-from app.blender.sandbox import SandboxPolicy
-from app.config import DeploymentProfile, Environment, ResourceIsolationMode, RunnerMode
+from app.config import ResourceIsolationMode
 
 
 class FakeCgroupFileSystem(LocalCgroupFileSystem):
@@ -222,11 +221,6 @@ def render_command(tmp_path: Path, binary: Path) -> RenderCommand:
 
 def strict_runner(isolation: CgroupIsolation, *, timeout: float = 2) -> SandboxRunner:
     return SandboxRunner(
-        SandboxPolicy(
-            environment=Environment.TEST,
-            deployment_profile=DeploymentProfile.ISOLATED_WORKER,
-            runner_mode=RunnerMode.DISABLED,
-        ),
         RunnerLimits(
             timeout_seconds=timeout,
             terminate_grace_seconds=0.1,

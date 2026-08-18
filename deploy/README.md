@@ -23,10 +23,11 @@ curl -fsSL https://raw.githubusercontent.com/NikkZhur/Render-Node/master/install
   | bash -s -- --version 1.2.3
 ```
 
-RunPod origin is derived from `RUNPOD_POD_ID`. Outside RunPod, pass one exact
-HTTPS origin with `--origin https://pod.example.com`. Only Ubuntu 22.04/24.04,
-x86_64, root, and a working `nvidia-smi` are accepted. Debian, ordinary VM,
-Compose, Caddy, nested Docker, and systemd flows are intentionally unsupported.
+No public URL or provider-specific variable is required. Open the panel through
+the HTTPS address that the provider assigns to exposed port 8080. The same
+installer works when a Pod ID or hosting domain changes. Only Ubuntu
+22.04/24.04, x86_64, root, and a working `nvidia-smi` are accepted. Debian,
+Compose, nested Docker, and systemd flows are intentionally unsupported.
 
 The installer creates a frozen per-release Python 3.13.7 environment with
 pinned `uv`, installs verified Blender 5.2.0 and 4.1.1 from the official Blender
@@ -50,18 +51,27 @@ Paths:
 | `/opt/render-node/releases/<version>` | Immutable application and per-release Python environment |
 | `/opt/render-node/current` | Symlink to the active release |
 | `/opt/render-node/blender/<version>` | Bundled Blender 5.2.0 and 4.1.1 |
-| `/workspace/.render-node` | Persistent private config, credentials and bounded logs |
+| `/workspace/.render-node` | Persistent private config and bounded logs |
 | `/workspace/database` | Persistent SQLite database |
 | `/workspace/jobs` | Scenes, raw render logs and results |
 | `/workspace/blender` | Additional user-installed Blender runtimes |
 | `/run/render-node` | Ephemeral PID and generated Nginx runtime files |
 
-Credentials are generated only on the first install. Reinstall, repair, update,
-Pod-ID changes, and loss of `/opt/render-node` preserve the password, backend
-token, database, jobs, and additional Blender runtimes. A changed Pod ID updates
-the saved URL and backend allowed origin. The password is passed to `htpasswd`
-on stdin; cloud secrets and the plaintext password are absent from backend child
-environments.
+The internal Bearer token is generated only on first install. Reinstall, repair,
+update, hosting changes, and loss of `/opt/render-node` preserve that token,
+database, jobs, and additional Blender runtimes. No public URL, username, or
+password is deployment state. A successful update removes only the exact legacy
+`/workspace/.render-node/credentials` and `admin.htpasswd` files; it waits until
+readiness succeeds so an older release can still be rolled back safely.
+
+The first browser to open the panel claims the backend process automatically.
+This is a deliberate TOFU race, not identity verification. Additional devices
+use the five-minute, one-use fragment link created by **Pair another device**;
+five browser sessions are allowed. Browser sessions are in memory and disappear
+on backend restart. If no paired browser remains, run `render-node reset-access`.
+It calls the loopback backend with the private Bearer through curl stdin, does
+not expose the token in argv/output, does not restart the service, and does not
+change jobs or Blender operations.
 
 Manage the native processes without systemd:
 
@@ -71,7 +81,7 @@ render-node stop
 render-node restart
 render-node status
 render-node logs
-render-node credentials
+render-node reset-access
 render-node uninstall
 ```
 
@@ -89,16 +99,18 @@ set:
 
 ```dotenv
 RENDER_NODE_AUTH_TOKEN=<32-128 URL-safe random characters>
-RENDER_NODE_ALLOWED_ORIGINS=https://<exact-platform-proxy-origin>
-RENDER_NODE_ADMIN_USERNAME=render
-RENDER_NODE_ADMIN_PASSWORD=<unique-password-with-at-least-12-characters>
 ```
 
 The image uses the same Nginx template and supervisor as the native release.
-Its short entrypoint prepares writable state, converts the password to bcrypt,
-clears the inherited environment, and starts all long-lived processes as UID
-10001. Port 8000 remains loopback-only; Nginx requires Basic Auth and replaces
-it with the private Bearer token for API, WebSocket, and download requests.
+Its short entrypoint prepares writable state, removes the two known legacy Basic
+Auth files, clears the inherited environment, and starts all long-lived
+processes as UID 10001. Port 8000 remains loopback-only. Public Nginx serves the
+SPA and proxies API/WebSocket without Basic Auth or Bearer injection. Browser
+access uses the same first-browser pairing cookie contract as native install.
+A valid browser `Origin` is strictly parsed but not compared with upstream
+`Host`, so an outer provider proxy may rewrite `Host`; forwarded headers are not
+trusted. No provider/domain configuration is needed. Frontend and API must share
+one public HTTPS origin, and port 8000 must never be published.
 
 Production configuration sets
 `RENDER_NODE_RESOURCE_ISOLATION_MODE=strict`. A root-started image entrypoint

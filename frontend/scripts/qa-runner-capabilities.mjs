@@ -72,7 +72,7 @@ try {
   }));
   await availablePage.goto(targetUrl, { waitUntil: "networkidle" });
   const availableSetup = availablePage.locator(".setup-panel");
-  await availableSetup.getByText("Ready to render trusted Blender scenes", { exact: true }).waitFor();
+  await availableSetup.getByText("Ready to render", { exact: true }).waitFor();
   const startButton = availableSetup.getByRole("button", { name: "Start render" });
   assert(await startButton.isEnabled(), "Available runner did not enable Start render");
   const panelBeforeError = await availableSetup.boundingBox();
@@ -101,14 +101,14 @@ try {
     json: {
       runner: {
         available: false,
-        mode: "disabled",
-        message: "Local trusted runner is disabled in configuration",
+        mode: "local",
+        message: "Render resource isolation is unavailable",
       },
     },
   }));
   await unavailablePage.goto(targetUrl, { waitUntil: "networkidle" });
   const unavailableSetup = unavailablePage.locator(".setup-panel");
-  await unavailableSetup.getByText("Local trusted runner is disabled in configuration", { exact: true }).waitFor();
+  await unavailableSetup.getByText("Render resource isolation is unavailable", { exact: true }).waitFor();
   assert(await unavailableSetup.getByRole("button", { name: "Start render" }).isDisabled(), "Unavailable runner left Start render enabled");
   await assertFit(unavailablePage, "Unavailable runner desktop");
   await unavailablePage.screenshot({ path: path.join(outputDirectory, "runner-unavailable-desktop.png"), scale: "css" });
@@ -119,10 +119,10 @@ try {
   await routeReadyJob(mobilePage);
   await mobilePage.route("**/api/v1/system/capabilities", (route) => route.fulfill({
     contentType: "application/json",
-    json: { runner: { available: false, mode: "disabled", message: "Local trusted runner is disabled in configuration" } },
+    json: { runner: { available: false, mode: "local", message: "Render resource isolation is unavailable" } },
   }));
   await mobilePage.goto(targetUrl, { waitUntil: "networkidle" });
-  await mobilePage.locator(".setup-panel").getByText("Local trusted runner is disabled in configuration", { exact: true }).waitFor();
+  await mobilePage.locator(".setup-panel").getByText("Render resource isolation is unavailable", { exact: true }).waitFor();
   await assertFit(mobilePage, "Unavailable runner mobile");
   await mobilePage.screenshot({ path: path.join(outputDirectory, "runner-unavailable-mobile.png"), fullPage: true, scale: "css" });
   await mobileContext.close();

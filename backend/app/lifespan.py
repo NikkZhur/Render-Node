@@ -14,7 +14,6 @@ from app.blender.command import BlenderExecutableResolver
 from app.blender.devices import GpuDiscovery, GpuScheduler
 from app.blender.official import OfficialCatalog
 from app.blender.runner import RunnerLimits, SandboxRunner
-from app.blender.sandbox import SandboxPolicy
 from app.blender.service import BlenderService
 from app.blender.storage import BlenderStorage
 from app.config import Settings
@@ -80,13 +79,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.database_health_repository = repository
     app.state.event_hub = event_hub
     app.state.artifact_service = artifact_service
-    sandbox_policy = SandboxPolicy(
-        environment=settings.env,
-        deployment_profile=settings.deployment_profile,
-        runner_mode=settings.runner_mode,
-    )
     runner = SandboxRunner(
-        sandbox_policy,
         RunnerLimits(
             timeout_seconds=settings.render_timeout_seconds,
             terminate_grace_seconds=settings.render_terminate_grace_seconds,
@@ -162,7 +155,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 "Database migration required: run `uv run alembic upgrade head` "
                 f"(current={revision or 'none'}, expected={EXPECTED_DATABASE_REVISION})"
             )
-        sandbox_policy.ensure_startup_ready(scheduler_enabled=settings.render_scheduler_enabled)
         await job_upload_service.recover_incomplete_uploads()
         await blender_service.initialize()
         await job_manager.start()

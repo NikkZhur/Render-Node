@@ -10,6 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.events.hub import EventHub, EventSubscription
+from app.security import BROWSER_WEBSOCKET_PROTOCOL
 
 router = APIRouter(tags=["events"])
 MAX_SUBSCRIBED_JOBS = 1000
@@ -39,7 +40,11 @@ def _parse_subscription(message: dict[str, Any]) -> set[UUID] | None:
 @router.websocket("/events")
 async def events(websocket: WebSocket) -> None:
     hub = cast(EventHub, websocket.app.state.event_hub)
-    await websocket.accept()
+    requested_protocol = websocket.headers.get("sec-websocket-protocol")
+    subprotocol = (
+        BROWSER_WEBSOCKET_PROTOCOL if requested_protocol == BROWSER_WEBSOCKET_PROTOCOL else None
+    )
+    await websocket.accept(subprotocol=subprotocol)
     subscription = await hub.connect()
     await websocket.send_json(
         {

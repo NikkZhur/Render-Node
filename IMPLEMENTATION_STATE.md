@@ -5,9 +5,8 @@
 
 ## Текущее состояние
 
-- Обновлено: 2026-08-17 после замены `RLIMIT_AS` на per-job cgroup v2,
-  перевода GPU reservations на стабильные NVML UUID и исправления live
-  sample progress для фактических логов Blender 4.1.
+- Обновлено: 2026-08-18 после реализации provider-independent first-browser
+  pairing и удаления конфигурационного trust-gate для локального Blender runner.
 - Фазы 1–6 из `BACKEND_IMPLEMENTATION_MASTER_PROMPT.md` завершены.
 - Следующей фазы в master prompt нет; дальнейшая работа — отдельные deployment
   задачи, перечисленные ниже.
@@ -53,37 +52,49 @@
   фон при hover, поэтому скрытое действие удаления не просвечивает.
 - Адаптер Blender 4.5 преобразует стабильное API-значение `BLENDER_EEVEE` в
   фактический идентификатор Blender 4.5 `BLENDER_EEVEE_NEXT`.
-- Единая security boundary для REST и WebSocket: production требует Bearer
-  token длиной 32+ символа и точные HTTPS origins; `/health` и `/ready` публичны.
-  Origin проверяется до API handler, Swagger/OpenAPI в production отключены.
-- CORS ограничен настроенными origins, методами и заголовками; добавлены HSTS в
-  production и общие browser security headers. JSON mutation body по умолчанию
-  ограничен 1 MiB, клиентское WS-сообщение — 64 KiB; upload/archive limits
-  остаются отдельными.
-- Добавлен явный `deployment_profile`: безопасный default `isolated_worker`
-  сохраняет production fail-closed без OS sandbox, а `single_tenant` разрешает
-  прямой `local_trusted` runner в production на целиком арендованном одним
-  оператором VM/Pod с собственными доверенными сценами.
-- Для прямого запуска используется `runner_mode=local_trusted`. Корневой `.env`
-  загружается автоматически, старый boolean-флаг мигрирует в новый режим.
-  Production принимает его только вместе с `single_tenant`; локальный `.env`
-  остаётся вне git.
+- Первый браузер атомарно получает защищённую семидневную cookie-сессию. До
+  пяти устройств подключаются через одноразовую pairing-ссылку с пятиминутным
+  TTL; токен передаётся только во fragment, удаляется до API-запроса и хранится
+  backend только как SHA-256 digest. In-memory access state требует одного
+  Uvicorn worker и намеренно сбрасывается при рестарте процесса.
+- Browser boundary распознаёт `Origin`, Fetch Metadata, cookie и явный marker:
+  требует валидный HTTPS Origin в production, `Sec-Fetch-Site: same-origin`,
+  `X-Render-Node-Request: 1` для unsafe HTTP и paired cookie для остальных
+  REST routes. WebSocket дополнительно использует фиксированный
+  `render-node-browser-v1` subprotocol как compatibility context, когда реальный
+  Chromium не присылает Fetch Metadata; присутствующий Fetch Metadata всё равно
+  обязан быть `same-origin`. `Host` и forwarded-заголовки не участвуют в решении,
+  поэтому внешний gateway может безопасно переписывать Host. Origin-less
+  service clients по-прежнему используют внутренний Bearer token длиной 32+
+  символа. `/health` и `/ready` публичны, Swagger/OpenAPI в production отключены.
+- `CORSMiddleware` и статическая origin allowlist удалены: frontend и API
+  поддерживаются только на одном публичном host. HSTS и общие browser security
+  headers сохранены. JSON mutation body по умолчанию ограничен 1 MiB,
+  клиентское WS-сообщение — 64 KiB; upload/archive limits остаются отдельными.
+- Установленный Render Node всегда может запускать активированную через UI
+  версию Blender: `deployment_profile`, `runner_mode` и legacy
+  `allow_unsandboxed_runner` удалены. Старые environment variables игнорируются,
+  поэтому после установки не требуется shell-команда или ручное редактирование
+  `.env`. Pairing управляет доступом, а cgroup/external resource boundary —
+  фактической доступностью runner.
 - Добавлен production `linux/amd64` image: он потребляет тот же собранный Release
   bundle, скачивает Blender 5.2.0/4.1.1 только из официального архива и проверяет
-  закреплённые SHA-256. Короткий entrypoint готовит volume и credentials, затем
+  закреплённые SHA-256. Короткий entrypoint готовит volume и runtime state, затем
   единый supervisor запускает долгоживущие процессы как UID 10001.
-- Внутренний Nginx обслуживает SPA на 8080, требует Basic Auth и заменяет
-  browser credential на закрытый Bearer для REST/WebSocket/download. Backend
-  слушает только loopback; RunPod platform proxy завершает HTTPS.
+- Внутренний Nginx обслуживает SPA на 8080 без Basic Auth и без подстановки
+  Bearer для браузера. Он передаёт REST/WebSocket/download на loopback backend;
+  внешний platform proxy завершает HTTPS, а first-browser pairing остаётся
+  одинаковым у всех провайдеров.
 - Основной `install.sh` поддерживает только Ubuntu 22.04/24.04 x86_64 GPU Pod.
   Он всегда скачивает latest stable Release bundle и `.sha256` либо explicit
   `vX.Y.Z`, безопасно проверяет tar paths/links, создаёт frozen per-release
-  Python 3.13.7 `.venv` и не устанавливает Node.js/Docker/systemd. RunPod origin
-  определяется по `RUNPOD_POD_ID`.
+  Python 3.13.7 `.venv` и не устанавливает Node.js/Docker/systemd. Public URL,
+  Pod ID и `--origin` для установки не нужны.
 - `/opt/render-node/current` переключается атомарно только после полной подготовки
   release; failed readiness восстанавливает предыдущий release. No-op, repair
-  после потери `/opt`, credentials/jobs persistence и смена Pod origin покрыты
-  fake-command harness.
+  после потери `/opt`, update и jobs/internal-token persistence покрыты
+  fake-command harness. Точные legacy-файлы `admin.htpasswd` и `credentials`
+  удаляются только после успешной readiness, не затрагивая похожие файлы.
 - `render-node` управляет process group без systemd. PID хранится только в
   `/run/render-node`; identity проверяет start time и ожидаемый supervisor
   command, поэтому stale/reused/foreign PID не принимается. Uninstall сохраняет
@@ -97,11 +108,10 @@
 - Корневой development launcher после миграций запускает backend, ожидает его
   публичный `/ready` до 60 секунд и только затем запускает frontend. При раннем
   завершении или неготовности backend frontend не запускается.
-- Vite читает server-only development settings из корневого `.env`. Если
-  allowlist содержит один внешний browser origin (или выбран
-  `RENDER_NODE_DEV_PUBLIC_ORIGIN`), HMR primary/fallback используют этот
-  публичный host. Остановка dev-server больше не заставляет browser обращаться
-  к `localhost` оператора и запрашивать Local Network Access.
+- Vite читает только server-side backend URL из корневого `.env`, использует
+  текущий browser host для HMR и не определяет provider/domain. API/WS proxy не
+  подставляет Bearer; browser Origin и Fetch Metadata доходят до backend даже
+  при переписанном gateway Host.
 - Start/retry выполняют runner preflight до перехода в `QUEUED`; недоступный
   scheduler/runner возвращает `runner_unavailable`, сохраняя исходный статус.
   Frontend показывает capability runner и блокирует Start при недоступности.
@@ -110,10 +120,13 @@
   output/preview/log/temp и artifact metadata, сохраняя input; delete освобождает
   runtime locks.
 - Frontend mock API загружается только по `VITE_RENDER_NODE_MOCK=true`; mock
-  fixtures/chunk отсутствуют в production bundle. Vite proxy умеет server-side
-  Bearer injection для HTTP и WebSocket без передачи секрета в browser bundle.
-  Proxy сохраняет настоящий browser Origin; внешний dev/preview origin должен
-  быть точно перечислен в `RENDER_NODE_ALLOWED_ORIGINS`.
+  fixtures/chunk отсутствуют в production bundle. Access Gate до монтирования
+  приложения выполняет claim либо redeem из `#pair=...`, показывает locked
+  recovery UI, а REST/WS делают ограниченный повторный claim после backend
+  restart. `Pair another device` создаёт ссылку только по явному действию,
+  поддерживает keyboard/focus trap/copy и не сохраняет секрет после закрытия.
+  Относительные `/api` URL и `window.location` сохраняют REST и application
+  WebSocket на текущем browser host.
 - В real API mode frontend не подставляет фиктивную Blender 5.2.0. При пустом
   registry Header и Job Setup показывают `No active Blender version`, manager
   ведёт через `Download → Install → Activate`, а create/upload/start/rerender
@@ -173,8 +186,15 @@
 - Существующий `DELETE /api/v1/jobs/{job_id}` используется frontend: он удаляет
   job directory и artifact metadata, но возвращает
   `409 active_job_cannot_be_deleted` для `QUEUED`/`RENDERING`.
-- Все `/api/v1/**` REST/WS routes используют один Bearer contract, если настроен
-  `RENDER_NODE_AUTH_TOKEN`; production без token или HTTPS allowlist не стартует.
+- `POST /api/v1/access/claim` атомарно выдаёт или восстанавливает browser session;
+  `POST /api/v1/access/invitations` создаёт одноразовую pairing-ссылку,
+  `POST /api/v1/access/pair` обменивает её на session, а origin-less
+  `POST /api/v1/access/reset` требует internal Bearer и сбрасывает access state.
+  Лимиты: session TTL 7 дней, invitation TTL 5 минут, максимум 5 sessions.
+- Browser `/api/v1/**` REST/WS routes требуют paired cookie и проверенный browser
+  context; cookie не заменяется Bearer. Origin-less service clients используют
+  `RENDER_NODE_AUTH_TOKEN`, без которого production не стартует. WS browser
+  handshake без сессии закрывается 4401; service WS без Origin требует Bearer.
 - `WS /api/v1/events` закрывает unauthorized/forbidden handshake кодами 4401/4403
   и oversized client message кодом 1009.
 - `GET /api/v1/system/capabilities` возвращает `runner.available`, `mode` и
@@ -183,30 +203,54 @@
   схемы БД не потребовалось.
 - Схема `render.progress` не менялась: frontend начал использовать уже
   существующие optional поля `frame`, `sample`, `total_samples` и `progress`.
-- Настройки deployment boundary: `RENDER_NODE_DEPLOYMENT_PROFILE` принимает
-  `isolated_worker` или `single_tenant`; `RENDER_NODE_RUNNER_MODE=local_trusted`
-  в production валиден только со вторым профилем. Миграция БД не требуется.
+- Конфигурационного scene-trust gate больше нет; capability mode всегда `local`,
+  а `available=false` означает реальную недоступность scheduler/resource
+  isolation, не необходимость ручного включения. Миграция БД не требуется.
 - Остальные security-настройки: `RENDER_NODE_AUTH_TOKEN`,
   `RENDER_NODE_MAX_API_REQUEST_MB`, `RENDER_NODE_WEBSOCKET_MESSAGE_MAX_KB`.
 - Resource settings: `RENDER_NODE_RESOURCE_ISOLATION_MODE=strict|trusted`,
   optional `RENDER_NODE_CGROUP_ROOT`, `RENDER_NODE_WORKER_MEMORY_GB` как
   `memory.max`, `RENDER_NODE_WORKER_SWAP_GB` как optional `memory.swap.max` и
   `RENDER_NODE_WORKER_PIDS_LIMIT` как `pids.max`. Production требует `strict`.
-- Deployment contract не меняет REST API или БД. Для прямого image остаются
-  container-only границы: `RENDER_NODE_ADMIN_HTPASSWD_B64` либо
-  `RENDER_NODE_ADMIN_USERNAME` + `RENDER_NODE_ADMIN_PASSWORD` для прямого image;
-  plaintext password удаляется из environment до запуска backend.
+- Deployment contract не меняет БД и не требует username/password. Image и
+  native install сохраняют только внутренний `RENDER_NODE_AUTH_TOKEN`; публичный
+  Nginx не знает этот секрет. `render-node reset-access` отправляет токен backend
+  через stdin curl config, не показывает его в argv/output и не перезапускает
+  сервис.
 
 ## Последняя проверка
 
-- Backend: Ruff format/check и strict mypy `app tests` — успешно. Полный pytest:
-  190 passed, 1 skipped из-за отсутствующих system `nginx/envsubst`, одно
-  upstream Starlette warning. Новые cgroup/GPU тесты покрывают отсутствие
-  `RLIMIT_AS`, fake cgroup v2 setup/attach/OOM/cleanup, read-only и v1
-  detection, strict/trusted modes, success/failure/cancel/timeout/setup error,
-  VRAM-vs-RAM-vs-SIGABRT diagnostics, UUID stability при перестановке NVML
-  indices, one/multi-GPU visibility и release в `finally`. `bash -n` для
-  deployment scripts и `git diff --check` успешны.
+- Always-local runner follow-up и first-browser pairing: backend Ruff
+  format/check, strict mypy `app tests`, Alembic check и полный pytest успешны —
+  223 passed, 1 skipped из-за
+  отсутствующих system `nginx/envsubst`, одно upstream Starlette warning.
+  47 security tests покрывают atomic claim, sessions/cookies, Fetch Metadata,
+  marker, произвольный Origin при переписанном Host, Bearer service clients,
+  invitation expiry/single-use/concurrency, пять sessions, reset и HTTP/WS
+  limits. Legacy runner trust variables игнорируются; реальный development
+  capability без `.env` вернул `local/available=true` и `Ready to render`.
+  Миграция БД не потребовалась.
+- Frontend: ESLint, production build, 6 access, 3 Vite config и 4 realtime
+  progress tests успешны. Production bundle содержит только основной JS/CSS и
+  не содержит internal Bearer, mock fixture/test bypass markers. Access Gate,
+  same-document fragment redeem, REST recovery и browser WebSocket compatibility
+  subprotocol проверены реальным Chromium. Runner-ready viewport screenshot
+  просмотрен; status зелёный, Start доступен, horizontal overflow отсутствует.
+- Целевой Playwright через произвольный внешний HTTPS hostname и намеренно
+  переписанный upstream Host проверил claim до queries/WS, locked+Retry без
+  фонового loop, REST mutation, Blender Download action, direct artifact route,
+  application WebSocket, одноразовый fragment redeem/replay, пять sessions,
+  device limit, Copy link, tooltip, focus trap/Escape и очистку modal state.
+  Desktop/mobile dashboard, tooltip и modal screenshots просмотрены; найденный
+  mobile header overflow исправлен, clipping/overflow/console errors нет.
+- Deployment: 18 behavioral tests прошли, один system Nginx/envsubst test
+  skipped. Fresh/no-op/update/repair сохраняют jobs/database/runtimes/internal
+  token, удаляют только точные legacy credential files и не требуют public URL,
+  username/password/origin. Reset не рестартует сервис и не раскрывает token.
+  Runtime-аудит не нашёл Basic Auth, admin env, static origin allowlist или
+  public Bearer injection; backend остаётся loopback-only. `bash -n`,
+  `git diff --check` и проверка свободных портов успешны. Реальный Blender/GPU
+  render не запускался.
 - Sample progress: 16 целевых backend-тестов parser/Job Manager и 4 frontend
   realtime contract-теста успешны. Сохранённый реальный Blender 4.1.1 log
   разобран без запуска Blender: 64 sample updates, для кадров 1 и 2 от `0/512`
@@ -243,10 +287,9 @@
   успешно. Desktop/mobile screenshots просмотрены; найденный тестом mobile
   header overflow исправлен, повторная проверка границ прошла. Регрессионный
   `qa:versions` для bundled/mock manager также успешно пройден.
-- Реальный `make dev` после изменений запустил backend и frontend: `/ready`
-  вернул `200`, а `GET /api/v1/blender/versions` — пустой список. Внешний
-  forwarded browser origin намеренно не принимается без его точного добавления
-  в `RENDER_NODE_ALLOWED_ORIGINS`; localhost/127.0.0.1 остаются разрешены.
+- Development same-origin не требует списка hostname: локальный и внешний
+  proxy передают browser `Origin` и исходный `Host`, а spoofed
+  `X-Forwarded-Host`/`X-Forwarded-Proto` не влияют на решение backend.
 - Целевой Playwright `qa:capabilities`: available/unavailable/API-error состояния,
   блокировка Start и desktop/mobile viewport fit — успешно; screenshots
   просмотрены. Появление job error отдельно проверено обычным кликом: высота
@@ -258,8 +301,8 @@
   Новый Node config-test (3 tests), frontend ESLint и production build успешны;
   desktop screenshot просмотрен, prompt, clipping и overflow не обнаружены.
 - После обычного перезапуска `make dev` реальные `/ready` и
-  `/api/v1/system/capabilities` вернули ready и `local_trusted/available=true`;
-  настройки процесса вручную через shell env больше не требуются. Порядок
+  `/api/v1/system/capabilities` вернули ready и `local/available=true` без `.env`;
+  настройки процесса вручную через shell env не требуются. Порядок
   запуска проверен по реальным логам: frontend стартовал только после успешного
   backend startup и ответа `200` от `/ready`; добавлены unit-тесты readiness-gate.
 - Целевой Playwright `qa:versions`: две bundled-версии, install, отмена и
@@ -289,14 +332,12 @@
   reload — успешно. Fake Blender runner smoke: WebSocket log/progress, HTTP
   preview/original/ZIP, reload recovery, metrics и process-group cancellation —
   успешно.
-- Deployment: 16 пройденных behavioral tests используют только временные install/state/run
-  roots и fake external commands. Покрыты bundle manifest, latest/explicit URL,
-  checksum/tar safety, fresh/no-op/repair, persistence/origin, update/rollback,
-  partial cleanup, PID identity/process group, stdin password, clean child env,
-  envsubst и workflow checks gate. `bash -n` пройден; workflow проверен
-  `@action-validator/cli`. ShellCheck, system Nginx и Docker engine недоступны.
-  Frontend lint и production build пройдены. Реальные Pod/image/GPU smoke ниже
-  остаются внешними проверками.
+- Deployment harness использует только временные install/state/run roots и fake
+  external commands. Дополнительно покрыты bundle manifest, latest/explicit
+  release URL, checksum/tar safety, rollback, partial cleanup, PID identity и
+  process group, stdin password, clean child env и workflow checks gate.
+  ShellCheck, system Nginx и Docker engine недоступны; реальные Pod/image/GPU
+  smoke ниже остаются внешними проверками.
 
 ## Известные ограничения и дальнейшая работа
 
@@ -305,16 +346,15 @@
   RunPod HTTPS/WebSocket proxy и CUDA/OptiX до публикации команды пользователям.
 - GHCR workflow ещё не выполнялся для альтернативного image deployment; готовый
   RunPod template ещё не создан.
-- Worker image/namespace с network/filesystem/device isolation и non-root
-  runtime ещё не реализован; поэтому shared production в профиле
-  `isolated_worker` не достигает readiness при включённом scheduler.
+- Отдельная multi-tenant worker architecture с network/filesystem/device
+  isolation не реализована и не является режимом текущего одноузлового продукта.
 - Текущее devcontainer-окружение использует cgroup v1 и не делегирует writable
   cgroup v2. Здесь проверены v1 detection/strict fail-closed и trusted fallback;
   реальный kernel cgroup v2 setup/attach/OOM/cleanup требует Ubuntu Pod с
   delegated `memory`/`pids`. Fake cgroup v2 покрывает эти lifecycle-контракты.
-- `local_trusted` запускает Blender subprocess напрямую и предназначен только для
-  доверенных сцен; он не является sandbox. В production он разрешён только для
-  явного `single_tenant`, где весь временный VM/Pod принадлежит одному оператору.
+- Blender subprocess запускается внутри VM/контейнера/Pod установленного узла;
+  pairing не изолирует его от backend. `--disable-autoexec`, allowlisted env,
+  path/resource/time/output limits остаются обязательными.
 - Production image может содержать bundled Blender binaries, но локально не
   собирался. Development CPU/Eevee для Blender 4.5.11 проверялся ранее; глобальный
   executable override удалён, поэтому повторная проверка должна использовать
@@ -326,9 +366,11 @@
   текущий GPU smoke относится только к trusted devcontainer без per-job cgroup.
   После просьбы пользователя дальнейшие render smoke не запускаются; целевой
   strict/GPU сценарий остаётся ручной внешней проверкой.
-- Для custom browser deployment вне поставляемого gateway backend также должен
-  оставаться приватным за HTTPS proxy, который подставляет Bearer в HTTP и
-  WebSocket upgrades. Токен нельзя помещать в `VITE_*` или JavaScript.
+- Для custom browser deployment backend должен оставаться приватным за HTTPS
+  proxy на том же public origin, что и frontend. Proxy не должен подставлять
+  internal Bearer в browser HTTP/WebSocket; переписывание `Host` допустимо.
+  In-memory access state требует одного backend worker и повторного claim после
+  рестарта. Internal token нельзя помещать в `VITE_*` или JavaScript.
 - Resumable upload и автоматическая retention policy не реализованы. Cleanup
   explicit; оператор удаляет jobs и выполняет согласованный backup SQLite/jobs.
 - TestClient выдаёт upstream Starlette deprecation warning о будущем `httpx2`;

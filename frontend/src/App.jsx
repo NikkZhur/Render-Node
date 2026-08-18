@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { artifactsApi, blenderApi, devicesApi, jobsApi, systemApi } from "./api";
+import { createPairingUrl } from "./accessBootstrap";
+import { accessApi, artifactsApi, blenderApi, devicesApi, jobsApi, systemApi } from "./api";
 import { getLogLevel } from "./logPresentation";
 import { useRenderEvents } from "./realtime";
 import { useUiStore } from "./store";
@@ -184,6 +185,14 @@ function Icon({ name, size = 18 }) {
     ),
     plus: <path d="M12 5v14M5 12h14" />,
     repeat: <path d="M20 7h-9a5 5 0 0 0-5 5v1m-2 4h9a5 5 0 0 0 5-5v-1m2-7v3h-3M4 20v-3h3" />,
+    share: (
+      <>
+        <circle cx="18" cy="5" r="2.5" />
+        <circle cx="6" cy="12" r="2.5" />
+        <circle cx="18" cy="19" r="2.5" />
+        <path d="m8.2 10.8 7.6-4.5m-7.6 6.9 7.6 4.5" />
+      </>
+    ),
     trash: (
       <>
         <path d="M4 7h16M9 7V4h6v3m3 0-1 14H7L6 7" />
@@ -220,7 +229,7 @@ function StatusBadge({ status }) {
   );
 }
 
-function Header({ activeVersion, connectionState, gpuCount, onThemeChange, onVersions, queuedCount, storageWarning, theme, versionsLoading }) {
+function Header({ activeVersion, connectionState, gpuCount, onPairDevice, onThemeChange, onVersions, queuedCount, storageWarning, theme, versionsLoading }) {
   return (
     <header className="app-header">
       <div className="brand-block">
@@ -236,6 +245,18 @@ function Header({ activeVersion, connectionState, gpuCount, onThemeChange, onVer
       </div>
 
       <div className="header-controls">
+        <button
+          aria-describedby="pair-device-tooltip"
+          aria-label="Pair another device"
+          className="icon-button pair-device-trigger"
+          onClick={onPairDevice}
+          type="button"
+        >
+          <Icon name="share" />
+          <span className="control-tooltip" id="pair-device-tooltip" role="tooltip">
+            Pair another device — create a one-time link that grants access to this Render Node.
+          </span>
+        </button>
         <nav className="header-summary" aria-label="Node summary">
           <span className="summary-pill summary-queue">
             <Icon name="layers" size={15} />
@@ -260,7 +281,13 @@ function Header({ activeVersion, connectionState, gpuCount, onThemeChange, onVer
         <div className="header-actions">
           <div className="connection-pill">
             <span className="connection-dot" />
-            {connectionState === "reconnecting" ? "Reconnecting" : connectionState === "connecting" ? "Connecting" : "Node online"}
+            {connectionState === "reconnecting"
+              ? "Reconnecting"
+              : connectionState === "connecting"
+                ? "Connecting"
+                : connectionState === "blocked"
+                  ? "Access lost"
+                  : "Node online"}
             <span className="latency">WS</span>
           </div>
           <button className="version-button" onClick={onVersions} type="button">
@@ -1418,6 +1445,106 @@ function useDialogBehavior(onClose, initialFocusRef) {
   return dialogRef;
 }
 
+async function copyPairingLink(link, input) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(link);
+    return;
+  }
+  input?.focus();
+  input?.select();
+  if (!document.execCommand("copy")) throw new Error("Copy is unavailable in this browser");
+}
+
+function PairDeviceDialog({ error, invitation, onClose, onRetry, pending }) {
+  const closeButton = useRef(null);
+  const linkInput = useRef(null);
+  const dialogRef = useDialogBehavior(onClose, closeButton);
+  const entered = useModalEntrance();
+  const [copyState, setCopyState] = useState("");
+  const link = invitation ? createPairingUrl(invitation.token) : "";
+  const deviceLimitReached = error?.code === "device_limit_reached";
+
+  const copyLink = async () => {
+    setCopyState("");
+    try {
+      await copyPairingLink(link, linkInput.current);
+      setCopyState("Link copied");
+    } catch (copyError) {
+      setCopyState(copyError instanceof Error ? copyError.message : "Could not copy link");
+    }
+  };
+
+  return (
+    <div className={`modal-backdrop ${entered ? "is-entered" : ""}`} role="presentation" onMouseDown={onClose}>
+      <section
+        aria-labelledby="pair-device-title"
+        aria-modal="true"
+        className="pair-device-modal"
+        onMouseDown={(event) => event.stopPropagation()}
+        ref={dialogRef}
+        role="dialog"
+      >
+        <div className="modal-header">
+          <div>
+            <h2 id="pair-device-title">Pair another device</h2>
+            <p>This one-time link grants full access to this Render Node and expires in 5 minutes.</p>
+          </div>
+          <button ref={closeButton} className="icon-button" onClick={onClose} type="button" aria-label="Close pairing dialog">
+            <Icon name="close" />
+          </button>
+        </div>
+        <div className="pair-device-content">
+          <div className="pair-device-warning">
+            <Icon name="lock" size={17} />
+            Share the link only with the device you want to authorize. It can be used once.
+          </div>
+          {pending && (
+            <div className="pair-device-loading" role="status">
+              <span className="access-spinner" aria-hidden="true" />
+              Creating a protected pairing link…
+            </div>
+          )}
+          {error && (
+            <div className="pair-device-error" role="alert">
+              <strong>{deviceLimitReached ? "Device limit reached" : "Could not create pairing link"}</strong>
+              <span>{deviceLimitReached ? "This Render Node already has five browser sessions." : error.message}</span>
+              {!deviceLimitReached && (
+                <button
+                  onClick={() => {
+                    setCopyState("");
+                    onRetry();
+                  }}
+                  type="button"
+                >
+                  Try again
+                </button>
+              )}
+            </div>
+          )}
+          {invitation && (
+            <>
+              <label className="pair-device-link">
+                <span>One-time pairing link</span>
+                <input aria-label="One-time pairing link" readOnly ref={linkInput} value={link} />
+              </label>
+              <div className="pair-device-actions">
+                <span>
+                  Expires {new Date(invitation.expires_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                </span>
+                <button className="primary-action" onClick={() => void copyLink()} type="button">
+                  <Icon name="share" size={16} />
+                  Copy link
+                </button>
+              </div>
+              <div className="pair-copy-status" aria-live="polite">{copyState}</div>
+            </>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function FrameSequencePanel({ jobId, mockApi, onClose }) {
   const isMockMode = mockApi !== null;
   const closeButton = useRef(null);
@@ -1811,6 +1938,7 @@ export default function App({ mockApi = null }) {
   const [deleteInspectionId, setDeleteInspectionId] = useState(null);
   const [deleteInspectionError, setDeleteInspectionError] = useState("");
   const [theme, setTheme] = useState(getInitialTheme);
+  const [pairPanelOpen, setPairPanelOpen] = useState(false);
   const realtime = useRenderEvents(queryClient, !isMockMode);
 
   const jobsQuery = useQuery({
@@ -1884,6 +2012,9 @@ export default function App({ mockApi = null }) {
       queryClient.invalidateQueries({ queryKey: ["versions"] });
       queryClient.invalidateQueries({ queryKey: ["official-versions"] });
     },
+  });
+  const pairingInvitationMutation = useMutation({
+    mutationFn: mockApi?.createInvitation ?? accessApi.createInvitation,
   });
 
   const queriedActiveVersion = versionsQuery.data?.find((version) => version.active)?.version;
@@ -1984,7 +2115,7 @@ export default function App({ mockApi = null }) {
   );
   const runner = capabilitiesQuery.data?.runner ?? {
     available: false,
-    mode: "disabled",
+    mode: "local",
     message: capabilitiesQuery.isError
       ? "Render runner status is unavailable"
       : "Checking render runner…",
@@ -2160,6 +2291,11 @@ export default function App({ mockApi = null }) {
         activeVersion={activeVersion}
         connectionState={realtime.connectionState}
         gpuCount={(devicesQuery.data ?? []).filter((device) => device.available).length}
+        onPairDevice={() => {
+          pairingInvitationMutation.reset();
+          setPairPanelOpen(true);
+          pairingInvitationMutation.mutate();
+        }}
         onThemeChange={setTheme}
         onVersions={() => setVersionPanelOpen(true)}
         queuedCount={jobs.filter((job) => job.status === "queued").length}
@@ -2280,6 +2416,21 @@ export default function App({ mockApi = null }) {
             setDeleteConfirmationJob(null);
           }}
           pending={deleteJobMutation.isPending}
+        />
+      )}
+      {pairPanelOpen && (
+        <PairDeviceDialog
+          error={pairingInvitationMutation.error}
+          invitation={pairingInvitationMutation.data}
+          onClose={() => {
+            setPairPanelOpen(false);
+            pairingInvitationMutation.reset();
+          }}
+          onRetry={() => {
+            pairingInvitationMutation.reset();
+            pairingInvitationMutation.mutate();
+          }}
+          pending={pairingInvitationMutation.isPending}
         />
       )}
     </div>

@@ -31,11 +31,7 @@ async def capabilities(request: Request) -> SystemCapabilitiesResponse:
             available=available,
             mode=manager.runner_mode,
             message=(
-                (
-                    "Ready to render trusted Blender scenes; per-job cgroup v2 isolation is active"
-                    if isolation.backend == "cgroup_v2"
-                    else "Ready to render trusted Blender scenes; using external resource limits"
-                )
+                "Ready to render"
                 if available
                 else manager.runner_unavailable_reason or "Render runner is unavailable"
             ),

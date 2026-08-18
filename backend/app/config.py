@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Self
+from typing import Self
 
-from pydantic import AnyHttpUrl, Field, SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
@@ -18,23 +17,11 @@ class Environment(StrEnum):
     PRODUCTION = "production"
 
 
-class RunnerMode(StrEnum):
-    DISABLED = "disabled"
-    LOCAL_TRUSTED = "local_trusted"
-
-
 class ResourceIsolationMode(StrEnum):
     """How Blender receives per-job process and system-memory limits."""
 
     STRICT = "strict"
     TRUSTED = "trusted"
-
-
-class DeploymentProfile(StrEnum):
-    """Trust boundary selected by the operator for render execution."""
-
-    ISOLATED_WORKER = "isolated_worker"
-    SINGLE_TENANT = "single_tenant"
 
 
 class Settings(BaseSettings):
@@ -67,11 +54,7 @@ class Settings(BaseSettings):
     blender_catalog_ttl_seconds: int = Field(default=3600, ge=60, le=86_400)
     blender_download_timeout_seconds: int = Field(default=3600, ge=30, le=86_400)
     render_scheduler_enabled: bool = True
-    deployment_profile: DeploymentProfile = DeploymentProfile.ISOLATED_WORKER
-    runner_mode: RunnerMode = RunnerMode.DISABLED
     bundled_blender_root: Path = Path("/opt/render-node/blender")
-    # Kept as a fail-closed migration path for existing local installations.
-    allow_unsandboxed_runner: bool = False
     render_timeout_seconds: int = Field(default=21_600, ge=1, le=604_800)
     render_terminate_grace_seconds: float = Field(default=5, ge=0.1, le=60)
     render_scheduler_poll_seconds: float = Field(default=0.5, ge=0.05, le=30)
@@ -89,25 +72,6 @@ class Settings(BaseSettings):
     metrics_interval_seconds: float = Field(default=1, ge=1, le=60)
     low_space_percent: float = Field(default=10, ge=1, le=99)
     low_space_gb: float = Field(default=50, ge=1, le=10_000)
-    allowed_origins: list[AnyHttpUrl] = Field(
-        default_factory=lambda: [
-            AnyHttpUrl("http://localhost:5173"),
-            AnyHttpUrl("http://127.0.0.1:5173"),
-        ]
-    )
-
-    @field_validator("allowed_origins", mode="before")
-    @classmethod
-    def parse_allowed_origins(cls, value: Any) -> Any:
-        if not isinstance(value, str):
-            return value
-
-        raw_value = value.strip()
-        if not raw_value:
-            return []
-        if raw_value.startswith("["):
-            return json.loads(raw_value)
-        return [origin.strip() for origin in raw_value.split(",") if origin.strip()]
 
     @field_validator("api_prefix")
     @classmethod
@@ -133,36 +97,10 @@ class Settings(BaseSettings):
             if database.database is None or not Path(database.database).is_absolute():
                 raise ValueError("database_url must reference an absolute SQLite path")
 
-        if any(str(origin) == "*" for origin in self.allowed_origins):
-            raise ValueError("allowed_origins cannot contain a wildcard")
-        if self.env is Environment.PRODUCTION and not self.allowed_origins:
-            raise ValueError("allowed_origins must contain an HTTPS origin in production")
-        for origin in self.allowed_origins:
-            if (
-                origin.path not in {"", "/"}
-                or origin.query is not None
-                or origin.fragment is not None
-                or origin.username is not None
-                or origin.password is not None
-            ):
-                raise ValueError("allowed_origins entries must be bare origins")
-            if self.env is Environment.PRODUCTION and origin.scheme != "https":
-                raise ValueError("production allowed_origins must use HTTPS")
         if self.auth_token is not None and len(self.auth_token.get_secret_value()) < 32:
             raise ValueError("auth_token must contain at least 32 characters")
         if self.env is Environment.PRODUCTION and self.auth_token is None:
             raise ValueError("auth_token is required in production")
-        if self.allow_unsandboxed_runner and self.runner_mode is RunnerMode.DISABLED:
-            self.runner_mode = RunnerMode.LOCAL_TRUSTED
-        if (
-            self.env is Environment.PRODUCTION
-            and self.runner_mode is RunnerMode.LOCAL_TRUSTED
-            and self.deployment_profile is not DeploymentProfile.SINGLE_TENANT
-        ):
-            raise ValueError(
-                "local_trusted runner_mode in production requires the explicit "
-                "single_tenant deployment_profile"
-            )
         if (
             self.env is Environment.PRODUCTION
             and self.resource_isolation_mode is not ResourceIsolationMode.STRICT
@@ -172,10 +110,6 @@ class Settings(BaseSettings):
                 "fallback is limited to local/test environments"
             )
         return self
-
-    @property
-    def cors_origins(self) -> list[str]:
-        return [str(origin).rstrip("/") for origin in self.allowed_origins]
 
     @property
     def database_path(self) -> Path | None:

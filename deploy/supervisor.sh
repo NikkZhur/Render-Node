@@ -40,7 +40,7 @@ mkdir -p \
   "${RENDER_NODE_RUNTIME_ROOT}/nginx-proxy"
 
 export RENDER_NODE_FRONTEND_ROOT="$FRONTEND_ROOT"
-envsubst '${RENDER_NODE_AUTH_TOKEN} ${RENDER_NODE_FRONTEND_ROOT} ${RENDER_NODE_STATE_ROOT} ${RENDER_NODE_RUNTIME_ROOT}' \
+envsubst '${RENDER_NODE_FRONTEND_ROOT} ${RENDER_NODE_STATE_ROOT} ${RENDER_NODE_RUNTIME_ROOT}' \
   < "${RENDER_NODE_RELEASE_ROOT}/deploy/nginx.conf.template" \
   > "$NGINX_CONFIG"
 chmod 0600 "$NGINX_CONFIG"
@@ -62,7 +62,7 @@ while IFS= read -r name; do
   case "$name" in
     RENDER_NODE_*|CUDA_*|NVIDIA_*|LD_LIBRARY_PATH)
       case "$name" in
-        RENDER_NODE_ADMIN_PASSWORD|RENDER_NODE_ADMIN_HTPASSWD_B64|RENDER_NODE_TEST_BIN|RENDER_NODE_TEST_MODE)
+        RENDER_NODE_TEST_BIN|RENDER_NODE_TEST_MODE)
           ;;
         *) runtime_env+=("${name}=${!name}") ;;
       esac
