@@ -42,6 +42,12 @@ class RunnerError(RuntimeError):
     pass
 
 
+class WorkerRunnerError(RunnerError):
+    def __init__(self, worker_id: str, message: str) -> None:
+        self.worker_id = worker_id
+        super().__init__(f"Blender worker {worker_id} failed: {message}")
+
+
 class FailureKind(StrEnum):
     SYSTEM_MEMORY_OOM = "system_memory_oom"
     GPU_MEMORY_OOM = "gpu_memory_oom"
@@ -65,6 +71,34 @@ class RunResult:
     limit_exceeded: bool = False
     failure_kind: FailureKind | None = None
     memory_events: MemoryEvents = field(default_factory=MemoryEvents)
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerRunSpec:
+    worker_id: str
+    command: RenderCommand
+    environment: dict[str, str]
+    on_started: StartedCallback
+    on_line: LineCallback
+    on_output: OutputCallback | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerRunResult:
+    worker_id: str
+    result: RunResult
+
+
+class _LogBudget:
+    def __init__(self, maximum_bytes: int) -> None:
+        self._remaining = maximum_bytes
+        self._lock = asyncio.Lock()
+
+    async def take(self, chunk: bytes) -> tuple[bytes, bool]:
+        async with self._lock:
+            accepted = chunk[: self._remaining]
+            self._remaining -= len(accepted)
+            return accepted, len(accepted) < len(chunk)
 
 
 class SandboxRunner:
@@ -125,6 +159,7 @@ class SandboxRunner:
                 on_started=on_started,
                 on_line=on_line,
                 on_output=on_output,
+                log_budget=_LogBudget(self._limits.max_log_bytes),
             )
         finally:
             if cgroup is not None:
@@ -137,6 +172,122 @@ class SandboxRunner:
                 except CgroupIsolationError as exc:
                     raise RunnerError(str(exc)) from exc
 
+    async def run_workers(
+        self,
+        workers: tuple[WorkerRunSpec, ...],
+        *,
+        job_id: UUID,
+        cancellation: asyncio.Event,
+    ) -> tuple[WorkerRunResult, ...]:
+        if not workers:
+            raise RunnerError("A render worker group cannot be empty")
+        isolation_reason = self._resource_isolation.unavailable_reason
+        if isolation_reason is not None:
+            raise RunnerError(isolation_reason)
+        for worker in workers:
+            binary = Path(worker.command.arguments[0])
+            if not await asyncio.to_thread(self._is_executable, binary):
+                raise WorkerRunnerError(
+                    worker.worker_id, f"Blender executable is unavailable: {binary}"
+                )
+        try:
+            cgroup = await self._resource_isolation.create(job_id)
+        except CgroupIsolationError as exc:
+            raise RunnerError(str(exc)) from exc
+        try:
+            return await self._run_worker_group(
+                workers,
+                cgroup=cgroup,
+                cancellation=cancellation,
+            )
+        finally:
+            if cgroup is not None:
+                cleanup_task = asyncio.create_task(cgroup.cleanup())
+                try:
+                    await asyncio.shield(cleanup_task)
+                except asyncio.CancelledError:
+                    await cleanup_task
+                    raise
+                except CgroupIsolationError as exc:
+                    raise RunnerError(str(exc)) from exc
+
+    async def _run_worker_group(
+        self,
+        workers: tuple[WorkerRunSpec, ...],
+        *,
+        cgroup: CgroupHandle | None,
+        cancellation: asyncio.Event,
+    ) -> tuple[WorkerRunResult, ...]:
+        group_cancellation = asyncio.Event()
+        limit_event = asyncio.Event()
+        log_budget = _LogBudget(self._limits.max_log_bytes)
+        deadline = asyncio.get_running_loop().time() + self._limits.timeout_seconds
+
+        async def forward_cancellation() -> None:
+            await cancellation.wait()
+            group_cancellation.set()
+
+        cancellation_task = asyncio.create_task(forward_cancellation())
+        tasks = {
+            asyncio.create_task(
+                self._run_process(
+                    worker.command,
+                    cgroup=cgroup,
+                    environment=worker.environment,
+                    cancellation=group_cancellation,
+                    on_started=worker.on_started,
+                    on_line=worker.on_line,
+                    on_output=worker.on_output,
+                    deadline=deadline,
+                    limit_event=limit_event,
+                    log_budget=log_budget,
+                )
+            ): worker
+            for worker in workers
+        }
+        results: dict[str, RunResult] = {}
+        first_error: tuple[str, BaseException] | None = None
+        pending = set(tasks)
+        try:
+            while pending:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    worker = tasks[task]
+                    try:
+                        result = task.result()
+                    except asyncio.CancelledError:
+                        raise
+                    except BaseException as exc:
+                        if first_error is None:
+                            first_error = (worker.worker_id, exc)
+                        group_cancellation.set()
+                        continue
+                    results[worker.worker_id] = result
+                    if self._worker_failed(result):
+                        group_cancellation.set()
+        finally:
+            if pending:
+                group_cancellation.set()
+                await asyncio.gather(*pending, return_exceptions=True)
+            cancellation_task.cancel()
+            await asyncio.gather(cancellation_task, return_exceptions=True)
+
+        if first_error is not None:
+            worker_id, error = first_error
+            raise WorkerRunnerError(worker_id, str(error)) from error
+        return tuple(
+            WorkerRunResult(worker.worker_id, results[worker.worker_id]) for worker in workers
+        )
+
+    @staticmethod
+    def _worker_failed(result: RunResult) -> bool:
+        return not result.cancelled and (
+            result.timed_out
+            or result.limit_exceeded
+            or result.failure_kind is not None
+            or result.exit_code != 0
+        )
+
     async def _run_process(
         self,
         command: RenderCommand,
@@ -147,8 +298,12 @@ class SandboxRunner:
         on_started: StartedCallback,
         on_line: LineCallback,
         on_output: OutputCallback | None,
+        deadline: float | None = None,
+        limit_event: asyncio.Event | None = None,
+        log_budget: _LogBudget | None = None,
     ) -> RunResult:
-        limit_event = asyncio.Event()
+        limit_event = limit_event or asyncio.Event()
+        log_budget = log_budget or _LogBudget(self._limits.max_log_bytes)
         gpu_memory_event = asyncio.Event()
         try:
             process = await asyncio.create_subprocess_exec(
@@ -178,6 +333,7 @@ class SandboxRunner:
                     on_line,
                     limit_event,
                     gpu_memory_event,
+                    log_budget,
                 )
             )
             process_task = asyncio.create_task(process.wait())
@@ -192,7 +348,11 @@ class SandboxRunner:
             )
             done, _ = await asyncio.wait(
                 {process_task, cancellation_task, output_task},
-                timeout=self._limits.timeout_seconds,
+                timeout=(
+                    self._limits.timeout_seconds
+                    if deadline is None
+                    else max(deadline - asyncio.get_running_loop().time(), 0)
+                ),
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if not done:
@@ -271,6 +431,7 @@ class SandboxRunner:
         on_line: LineCallback,
         limit_event: asyncio.Event,
         gpu_memory_event: asyncio.Event,
+        log_budget: _LogBudget,
     ) -> None:
         if process.stdout is None:
             return
@@ -278,14 +439,13 @@ class SandboxRunner:
         pending = b""
         async with aiofiles.open(log_path, "wb") as log:
             while chunk := await process.stdout.read(64 * 1024):
-                remaining = max(self._limits.max_log_bytes - written, 0)
-                if remaining:
-                    saved = chunk[:remaining]
+                saved, exceeded = await log_budget.take(chunk)
+                if saved:
                     await log.write(saved)
                     written += len(saved)
-                if len(chunk) > remaining:
+                if exceeded:
                     limit_event.set()
-                pending += chunk
+                pending += saved
                 while b"\n" in pending:
                     raw_line, pending = pending.split(b"\n", maxsplit=1)
                     line = raw_line.decode("utf-8", errors="replace").rstrip("\r")

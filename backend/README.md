@@ -2,8 +2,9 @@
 
 The backend currently provides the FastAPI lifecycle, async SQLite, Alembic,
 health/readiness, persistent Job CRUD/actions, bounded `.blend`/ZIP uploads, the
-bundled/official/manual Blender runtime registry, and a single-process Job
-Manager using `SandboxRunner` as its only subprocess boundary.
+bundled/official/manual Blender runtime registry, and a logical-job Manager that
+uses `SandboxRunner` as its only subprocess boundary and can supervise parallel
+per-GPU Blender workers.
 
 ```bash
 uv sync
@@ -87,12 +88,35 @@ Render lifecycle:
 - one scheduler task starts the oldest queued job;
 - NVML inventory is captured at startup; scheduler reservations and
   `CUDA_VISIBLE_DEVICES` use stable GPU UUIDs even if runtime indices reorder;
+- Job create/update/response models persist `gpu_render_mode` as
+  `FRAME_PER_GPU` or `ALL_GPUS_PER_FRAME`. Omitted create requests choose frame
+  distribution for CUDA/OptiX with two or more GPUs; CPU and one-GPU jobs use
+  `ALL_GPUS_PER_FRAME`. Omitted updates preserve a compatible saved value, while
+  incompatible updates normalize it to `ALL_GPUS_PER_FRAME`;
+- `ALL_GPUS_PER_FRAME` retains one Blender process with every reserved UUID.
+  `FRAME_PER_GPU` uses one process and one UUID per worker, except that `SINGLE`
+  runs only on the first GPU and RANGE is bounded by its inclusive API span;
+- RANGE and ALL workers are partitioned deterministically round-robin by a
+  trusted Blender adapter after the scene loads, so the actual scene
+  `frame_step` is respected;
+- a distributed run has one job cgroup, absolute deadline, output limit and
+  shared log budget. Startup failure, non-zero exit, cancellation, timeout, or a
+  shared limit terminates every worker process group before releasing all GPUs;
+- raw logs are stored as `logs/blender-gpu-{worker}.log`; the compatible
+  `logs/blender.log` aggregate prefixes each line with its stable GPU UUID, as do
+  live log events;
 - `GET /api/v1/jobs/{id}` exposes persisted progress and process state;
 - Blender 4.1 progress lines such as `Fra:1 ... | Sample 48/512` update both
   persisted overall frame-range progress and the existing WebSocket
   `sample`/`total_samples` fields; unrecognized log lines remain non-fatal;
+- concurrent worker progress is serialized into one monotonic job value.
+  Output paths are de-duplicated so a frame artifact, preview event, and
+  `render.frame_ready` event are emitted once;
 - `POST /api/v1/jobs/{id}/cancel` stops the whole process group before persisting
   `cancelled`;
 - cgroup `memory.events` distinguishes actual system-RAM OOM from Blender/CUDA
   VRAM exhaustion and a plain `SIGABRT`; cgroups do not limit VRAM;
 - `GET /api/v1/devices` returns an empty list safely when NVIDIA NVML is unavailable.
+
+Alembic head `20260818_0005` adds the non-null Job strategy column with
+`ALL_GPUS_PER_FRAME` as the server default for legacy rows.

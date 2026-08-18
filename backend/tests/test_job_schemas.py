@@ -2,7 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.jobs.schemas import JobCreate, JobUpdate
-from app.jobs.types import ComputeDevice, FrameMode, RenderEngine
+from app.jobs.types import ComputeDevice, FrameMode, GpuRenderMode, RenderEngine
 
 
 def valid_payload() -> dict[str, object]:
@@ -22,7 +22,20 @@ def test_job_create_normalizes_name() -> None:
     payload = valid_payload()
     payload["name"] = "  Studio scene  "
 
-    assert JobCreate.model_validate(payload).name == "Studio scene"
+    job = JobCreate.model_validate(payload)
+
+    assert job.name == "Studio scene"
+    assert job.gpu_render_mode is GpuRenderMode.FRAME_PER_GPU
+
+
+def test_job_create_defaults_cpu_and_one_gpu_to_all_gpus_per_frame() -> None:
+    cpu = valid_payload()
+    cpu.update({"device": "CPU", "gpu_ids": []})
+    one_gpu = valid_payload()
+    one_gpu["gpu_ids"] = [0]
+
+    assert JobCreate.model_validate(cpu).gpu_render_mode is GpuRenderMode.ALL_GPUS_PER_FRAME
+    assert JobCreate.model_validate(one_gpu).gpu_render_mode is GpuRenderMode.ALL_GPUS_PER_FRAME
 
 
 def test_job_update_uses_the_same_configuration_validation() -> None:
@@ -50,6 +63,8 @@ def test_job_update_uses_the_same_configuration_validation() -> None:
     [
         {"device": "CPU", "gpu_ids": [0]},
         {"device": "OPTIX", "gpu_ids": []},
+        {"device": "CPU", "gpu_ids": [], "gpu_render_mode": "FRAME_PER_GPU"},
+        {"gpu_ids": [0], "gpu_render_mode": "FRAME_PER_GPU"},
         {"gpu_ids": [0, 0]},
         {"frame_mode": "RANGE", "frame_start": 10, "frame_end": 1},
         {"frame_mode": "SINGLE", "frame_start": None, "frame_end": None},

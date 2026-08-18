@@ -26,8 +26,14 @@ const uploadScene = async (marker) => {
 
 try {
   await page.goto(targetUrl, { waitUntil: "networkidle" });
-  await page.getByText("No NVIDIA GPUs discovered · CPU mode", { exact: true }).waitFor();
-  await page.getByRole("button", { name: "Compute device: CPU" }).waitFor();
+  const deviceButton = page.getByRole("button", { name: /Compute device:/ });
+  await deviceButton.waitFor();
+  if ((await deviceButton.getAttribute("aria-label")) !== "Compute device: CPU") {
+    await deviceButton.click();
+    await page.getByRole("listbox", { name: "Compute device" })
+      .getByRole("option", { name: "CPU" })
+      .click();
+  }
   await page.getByRole("button", { name: "Single", exact: true }).click();
 
   const completedRow = await uploadScene("BROWSER");
@@ -117,6 +123,14 @@ try {
   await completedRow.click();
   await page.getByAltText("Preview frame 1").waitFor({ timeout: 10_000 });
 
+  await page.getByRole("button", { name: "New job", exact: true }).click();
+  const newJobDeviceButton = page.getByRole("button", { name: /Compute device:/ });
+  if ((await newJobDeviceButton.getAttribute("aria-label")) !== "Compute device: CPU") {
+    await newJobDeviceButton.click();
+    await page.getByRole("listbox", { name: "Compute device" })
+      .getByRole("option", { name: "CPU" })
+      .click();
+  }
   const cancelledRow = await uploadScene("SLOW");
   await page.getByText("No artifacts yet", { exact: true }).waitFor();
   await page.getByRole("button", { name: "Start render" }).click();

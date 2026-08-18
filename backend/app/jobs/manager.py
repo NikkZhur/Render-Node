@@ -4,16 +4,26 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import UUID
 
-from app.artifacts.service import ArtifactService
+import aiofiles
+
+from app.artifacts.service import ArtifactService, frame_number_from_output
 from app.blender.cgroups import ResourceIsolationStatus
-from app.blender.command import BlenderExecutableResolver, build_render_command
+from app.blender.command import BlenderExecutableResolver, FrameWorker, build_render_command
 from app.blender.devices import GpuAllocation, GpuReservationError, GpuScheduler
-from app.blender.progress import parse_progress
+from app.blender.progress import parse_frame_plan, parse_progress
 from app.blender.repository import BlenderRepository
-from app.blender.runner import FailureKind, RunnerError, RunResult, SandboxRunner
+from app.blender.runner import (
+    FailureKind,
+    RunnerError,
+    RunResult,
+    SandboxRunner,
+    WorkerRunResult,
+    WorkerRunSpec,
+)
 from app.blender.sandbox import build_worker_environment
 from app.blender.types import RuntimeSource, RuntimeState
 from app.events.hub import EventHub
@@ -21,8 +31,43 @@ from app.jobs.exceptions import JobConflictError, JobNotFoundError, ServiceError
 from app.jobs.models import Job, utc_now
 from app.jobs.repository import JobRepository
 from app.jobs.state_machine import transition_job
-from app.jobs.types import ComputeDevice, FrameMode, JobStatus
+from app.jobs.types import ComputeDevice, FrameMode, GpuRenderMode, JobStatus
 from app.storage.database import Database
+
+
+@dataclass(slots=True)
+class _DistributedProgress:
+    total_frames: int | None = None
+    completed_frames: set[int] = field(default_factory=set)
+    active_frames: dict[str, tuple[int, float]] = field(default_factory=dict)
+    registered_outputs: set[Path] = field(default_factory=set)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    def overall(self) -> float | None:
+        if not self.total_frames:
+            return None
+        partial_by_frame: dict[int, float] = {}
+        for frame_number, frame_progress in self.active_frames.values():
+            if frame_number not in self.completed_frames:
+                partial_by_frame[frame_number] = max(
+                    partial_by_frame.get(frame_number, 0.0), frame_progress
+                )
+        completed = min(len(self.completed_frames), self.total_frames)
+        return min((completed + sum(partial_by_frame.values())) / self.total_frames, 1.0)
+
+
+class _AggregateLog:
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._lock = asyncio.Lock()
+
+    async def reset(self) -> None:
+        async with aiofiles.open(self._path, "wb"):
+            pass
+
+    async def append(self, worker_id: str, line: str) -> None:
+        async with self._lock, aiofiles.open(self._path, "ab") as destination:
+            await destination.write(f"[GPU {worker_id}] {line}\n".encode())
 
 
 class JobManager:
@@ -167,35 +212,51 @@ class JobManager:
         try:
             job, source = await self._prepare(job_id)
             binary = self._resolver.binary(job.blender_version, source)
-            command = build_render_command(job, binary=binary, jobs_root=self._jobs_root)
             if job.device is not ComputeDevice.CPU:
                 gpu_allocation = await self._gpu_scheduler.reserve(job.gpu_ids)
-            environment = await build_worker_environment(
-                command.job_directory,
-                device=job.device,
-                gpu_uuids=list(gpu_allocation.uuids) if gpu_allocation is not None else [],
-            )
             await self._mark_rendering(job_id)
+            if job.gpu_render_mode is GpuRenderMode.FRAME_PER_GPU:
+                if gpu_allocation is None:
+                    raise RuntimeError("FRAME_PER_GPU job has no reserved GPU allocation")
+                results = await self._run_frame_workers(
+                    job,
+                    binary=binary,
+                    gpu_allocation=gpu_allocation,
+                    cancellation=cancellation,
+                )
+                await self._finish_from_worker_results(
+                    job_id,
+                    results,
+                    cancellation_requested=cancellation.is_set(),
+                )
+            else:
+                command = build_render_command(job, binary=binary, jobs_root=self._jobs_root)
+                gpu_uuids = list(gpu_allocation.uuids) if gpu_allocation is not None else []
+                environment = await build_worker_environment(
+                    command.job_directory,
+                    device=job.device,
+                    gpu_uuids=gpu_uuids,
+                )
 
-            async def on_started(pid: int) -> None:
-                await self._set_pid(job_id, pid)
+                async def on_started(pid: int) -> None:
+                    await self._set_pid(job_id, pid)
 
-            async def on_line(line: str) -> None:
-                await self._record_progress(job_id, job, line)
+                async def on_line(line: str) -> None:
+                    await self._record_progress(job_id, job, line, gpu_uuids=gpu_uuids)
 
-            async def on_output(path: Path) -> None:
-                await self._artifacts.register_output(job_id, path)
+                async def on_output(path: Path) -> None:
+                    await self._artifacts.register_output(job_id, path)
 
-            result = await self._runner.run(
-                command,
-                job_id=job_id,
-                environment=environment,
-                cancellation=cancellation,
-                on_started=on_started,
-                on_line=on_line,
-                on_output=on_output,
-            )
-            await self._finish_from_result(job_id, result)
+                result = await self._runner.run(
+                    command,
+                    job_id=job_id,
+                    environment=environment,
+                    cancellation=cancellation,
+                    on_started=on_started,
+                    on_line=on_line,
+                    on_output=on_output,
+                )
+                await self._finish_from_result(job_id, result)
         except (
             RunnerError,
             GpuReservationError,
@@ -226,6 +287,84 @@ class JobManager:
             if cleanup_cancellation is not None:
                 raise cleanup_cancellation
 
+    async def _run_frame_workers(
+        self,
+        job: Job,
+        *,
+        binary: Path,
+        gpu_allocation: GpuAllocation,
+        cancellation: asyncio.Event,
+    ) -> tuple[WorkerRunResult, ...]:
+        worker_count = self._frame_worker_count(job, len(gpu_allocation.devices))
+        tracker = _DistributedProgress(
+            total_frames=1 if job.frame_mode is FrameMode.SINGLE else None
+        )
+        aggregate_log = _AggregateLog(self._jobs_root / str(job.id) / "logs" / "blender.log")
+        await aggregate_log.reset()
+        workers: list[WorkerRunSpec] = []
+        for worker_index, device in enumerate(gpu_allocation.devices[:worker_count]):
+            command = build_render_command(
+                job,
+                binary=binary,
+                jobs_root=self._jobs_root,
+                worker=FrameWorker(index=worker_index, count=worker_count),
+            )
+            environment = await build_worker_environment(
+                command.job_directory,
+                device=job.device,
+                gpu_uuids=[device.uuid],
+                worker_index=worker_index,
+            )
+
+            async def on_started(pid: int) -> None:
+                await self._set_pid(job.id, pid)
+
+            async def on_line(
+                line: str,
+                *,
+                worker_id: str = device.uuid,
+                index: int = worker_index,
+            ) -> None:
+                await self._record_distributed_progress(
+                    job.id,
+                    tracker,
+                    aggregate_log,
+                    worker_id=worker_id,
+                    worker_index=index,
+                    line=line,
+                )
+
+            async def on_output(path: Path) -> None:
+                await self._record_distributed_output(job.id, tracker, path)
+
+            workers.append(
+                WorkerRunSpec(
+                    worker_id=device.uuid,
+                    command=command,
+                    environment=environment,
+                    on_started=on_started,
+                    on_line=on_line,
+                    on_output=on_output,
+                )
+            )
+        return await self._runner.run_workers(
+            tuple(workers),
+            job_id=job.id,
+            cancellation=cancellation,
+        )
+
+    @staticmethod
+    def _frame_worker_count(job: Job, gpu_count: int) -> int:
+        if gpu_count < 1:
+            raise RuntimeError("FRAME_PER_GPU job has no available GPUs")
+        if job.frame_mode is FrameMode.SINGLE:
+            return 1
+        if job.frame_mode is FrameMode.RANGE:
+            if job.frame_start is None or job.frame_end is None:
+                raise RuntimeError("Frame-range job is incomplete")
+            return min(gpu_count, job.frame_end - job.frame_start + 1)
+        return gpu_count
+
     async def _prepare(self, job_id: UUID) -> tuple[Job, RuntimeSource]:
         async with self._database.session_factory() as session:
             job = await JobRepository(session).get(job_id)
@@ -252,14 +391,29 @@ class JobManager:
     async def _set_pid(self, job_id: UUID, pid: int) -> None:
         async with self._database.session_factory() as session, session.begin():
             job = await self._require_job(JobRepository(session), job_id)
-            job.process_pid = pid
+            if job.process_pid is None:
+                job.process_pid = pid
 
-    async def _record_progress(self, job_id: UUID, original_job: Job, line: str) -> None:
+    async def _record_progress(
+        self,
+        job_id: UUID,
+        original_job: Job,
+        line: str,
+        *,
+        gpu_uuids: list[str],
+    ) -> None:
         normalized_line = "".join(
             character for character in line if character == "\t" or ord(character) >= 32
         )[:4000]
+        visible_line = (
+            f"[GPUs {','.join(gpu_uuids)}] {normalized_line}" if gpu_uuids else normalized_line
+        )
         await self._events.publish(
-            "render.log", job_id=str(job_id), stream="combined", line=normalized_line
+            "render.log",
+            job_id=str(job_id),
+            stream="combined",
+            line=visible_line,
+            gpu_uuids=gpu_uuids,
         )
         try:
             update = parse_progress(line)
@@ -286,6 +440,125 @@ class JobManager:
             total_samples=update.total_samples,
             progress=persisted_progress,
         )
+
+    async def _record_distributed_progress(
+        self,
+        job_id: UUID,
+        tracker: _DistributedProgress,
+        aggregate_log: _AggregateLog,
+        *,
+        worker_id: str,
+        worker_index: int,
+        line: str,
+    ) -> None:
+        normalized_line = "".join(
+            character for character in line if character == "\t" or ord(character) >= 32
+        )[:4000]
+        await aggregate_log.append(worker_id, normalized_line)
+        await self._events.publish(
+            "render.log",
+            job_id=str(job_id),
+            stream="combined",
+            line=f"[GPU {worker_id}] {normalized_line}",
+            gpu_uuid=worker_id,
+        )
+        plan = parse_frame_plan(line)
+        if plan is not None:
+            if plan.worker != worker_index:
+                raise RuntimeError(f"Frame plan worker mismatch for GPU {worker_id}: {plan.worker}")
+            async with tracker.lock:
+                if tracker.total_frames is not None and tracker.total_frames != plan.total:
+                    raise RuntimeError("GPU workers reported inconsistent frame ranges")
+                tracker.total_frames = plan.total
+            return
+        try:
+            update = parse_progress(line)
+        except Exception:
+            return
+        if update is None:
+            return
+
+        async with tracker.lock:
+            if update.frame is not None:
+                previous = tracker.active_frames.get(worker_id)
+                if previous is not None and previous[0] != update.frame:
+                    tracker.completed_frames.add(previous[0])
+                previous_progress = (
+                    previous[1] if previous is not None and previous[0] == update.frame else 0.0
+                )
+                tracker.active_frames[worker_id] = (
+                    update.frame,
+                    max(previous_progress, update.frame_progress or 0.0),
+                )
+            overall = tracker.overall()
+            persisted_progress, current_frame, _ = await self._persist_progress(
+                job_id,
+                frame=update.frame,
+                progress=overall,
+            )
+        await self._events.publish(
+            "render.progress",
+            job_id=str(job_id),
+            gpu_uuid=worker_id,
+            frame=update.frame if update.frame is not None else current_frame,
+            sample=update.sample,
+            total_samples=update.total_samples,
+            progress=persisted_progress,
+        )
+
+    async def _record_distributed_output(
+        self,
+        job_id: UUID,
+        tracker: _DistributedProgress,
+        path: Path,
+    ) -> None:
+        frame_number = frame_number_from_output(path)
+        if frame_number is None:
+            return
+        async with tracker.lock:
+            if path in tracker.registered_outputs:
+                return
+            tracker.registered_outputs.add(path)
+            tracker.completed_frames.add(frame_number)
+            tracker.active_frames = {
+                worker_id: active
+                for worker_id, active in tracker.active_frames.items()
+                if active[0] != frame_number
+            }
+            overall = tracker.overall()
+            persisted_progress, current_frame, changed = await self._persist_progress(
+                job_id,
+                frame=frame_number,
+                progress=overall,
+            )
+        await self._artifacts.register_output(job_id, path)
+        if changed:
+            await self._events.publish(
+                "render.progress",
+                job_id=str(job_id),
+                frame=current_frame,
+                sample=None,
+                total_samples=None,
+                progress=persisted_progress,
+            )
+
+    async def _persist_progress(
+        self,
+        job_id: UUID,
+        *,
+        frame: int | None,
+        progress: float | None,
+    ) -> tuple[float, int | None, bool]:
+        async with self._database.session_factory() as session, session.begin():
+            job = await self._require_job(JobRepository(session), job_id)
+            if job.status is not JobStatus.RENDERING:
+                return job.progress, job.current_frame, False
+            before = job.progress
+            if frame is not None:
+                job.current_frame = frame
+            if progress is not None:
+                job.progress = max(job.progress, min(progress, 1.0))
+            return job.progress, job.current_frame, job.progress > before
 
     @staticmethod
     def _overall_progress(
@@ -331,6 +604,78 @@ class JobManager:
             job.error = error
             job.finished_at = utc_now()
         await self._publish_status(job)
+
+    async def _finish_from_worker_results(
+        self,
+        job_id: UUID,
+        results: tuple[WorkerRunResult, ...],
+        *,
+        cancellation_requested: bool,
+    ) -> None:
+        failed = next(
+            (
+                worker
+                for worker in results
+                if not worker.result.cancelled
+                and (
+                    worker.result.timed_out
+                    or worker.result.limit_exceeded
+                    or worker.result.failure_kind is not None
+                    or worker.result.exit_code != 0
+                )
+            ),
+            None,
+        )
+        async with self._database.session_factory() as session, session.begin():
+            job = await self._require_job(JobRepository(session), job_id)
+            if self._stopping and cancellation_requested:
+                target = JobStatus.FAILED
+                exit_code = next(
+                    (worker.result.exit_code for worker in results if worker.result.exit_code != 0),
+                    None,
+                )
+                error = "Render was interrupted by service shutdown"
+            elif failed is not None:
+                target = JobStatus.FAILED
+                exit_code = failed.result.exit_code
+                error = self._worker_failure_message(failed)
+            elif cancellation_requested or any(worker.result.cancelled for worker in results):
+                target = JobStatus.CANCELLED
+                exit_code = next(
+                    (worker.result.exit_code for worker in results if worker.result.exit_code != 0),
+                    None,
+                )
+                error = None
+            elif all(worker.result.exit_code == 0 for worker in results):
+                target = JobStatus.COMPLETED
+                exit_code = 0
+                error = None
+            else:
+                target = JobStatus.FAILED
+                exit_code = next(
+                    (worker.result.exit_code for worker in results if worker.result.exit_code != 0),
+                    None,
+                )
+                error = "One or more Blender GPU workers did not complete"
+            job.status = transition_job(job.status, target)
+            job.progress = 1.0 if target is JobStatus.COMPLETED else job.progress
+            job.process_pid = None
+            job.exit_code = exit_code
+            job.error = error
+            job.finished_at = utc_now()
+        await self._publish_status(job)
+
+    def _worker_failure_message(self, worker: WorkerRunResult) -> str:
+        result = worker.result
+        if result.timed_out:
+            detail = "render exceeded the job wall-time limit"
+        elif result.limit_exceeded:
+            detail = "render exceeded the job output or log size limit"
+        elif result.failure_kind is not None:
+            detail = self._failure_message(result)
+        else:
+            detail = f"Blender exited with code {result.exit_code}"
+        return f"GPU {worker.worker_id}: {detail}"
 
     @staticmethod
     def _failure_message(result: RunResult) -> str:

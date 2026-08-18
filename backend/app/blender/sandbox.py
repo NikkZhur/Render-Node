@@ -14,8 +14,13 @@ async def build_worker_environment(
     *,
     device: ComputeDevice,
     gpu_uuids: list[str],
+    worker_index: int | None = None,
 ) -> dict[str, str]:
     temp_root = contained_path(job_directory, job_directory / "temp")
+    if worker_index is not None:
+        if worker_index < 0:
+            raise ValueError("worker_index cannot be negative")
+        temp_root = contained_path(temp_root, temp_root / f"gpu-{worker_index}")
     home = contained_path(temp_root, temp_root / "home")
     config = contained_path(temp_root, temp_root / "config")
     cache = contained_path(temp_root, temp_root / "cache")

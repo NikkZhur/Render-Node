@@ -1,6 +1,6 @@
 import pytest
 
-from app.blender.progress import parse_progress
+from app.blender.progress import parse_frame_plan, parse_progress
 
 
 @pytest.mark.parametrize(
@@ -41,3 +41,20 @@ def test_unknown_or_malformed_progress_is_ignored() -> None:
     update = parse_progress("Fra:2 | Sample 3/0")
     assert update is not None
     assert update.frame_progress is None
+
+
+def test_parse_frame_plan_accepts_only_complete_backend_marker() -> None:
+    plan = parse_frame_plan(
+        "RENDER_NODE_FRAME_PLAN total=4 worker=1 assigned=2 start=1 end=8 step=2"
+    )
+
+    assert plan is not None
+    assert (plan.total, plan.worker, plan.assigned, plan.start, plan.end, plan.step) == (
+        4,
+        1,
+        2,
+        1,
+        8,
+        2,
+    )
+    assert parse_frame_plan("RENDER_NODE_FRAME_PLAN total=4") is None

@@ -20,6 +20,15 @@ FAKE_PROGRESS_RE = re.compile(
     r"^RENDER_NODE_PROGRESS\s+(?P<progress>0(?:\.\d+)?|1(?:\.0+)?)"
     r"(?:\s+frame=(?P<frame>\d+))?$"
 )
+FRAME_PLAN_RE = re.compile(
+    r"^RENDER_NODE_FRAME_PLAN"
+    r"\s+total=(?P<total>\d+)"
+    r"\s+worker=(?P<worker>\d+)"
+    r"\s+assigned=(?P<assigned>\d+)"
+    r"\s+start=(?P<start>\d+)"
+    r"\s+end=(?P<end>\d+)"
+    r"\s+step=(?P<step>\d+)$"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +37,23 @@ class ProgressUpdate:
     sample: int | None
     total_samples: int | None
     frame_progress: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class FramePlan:
+    total: int
+    worker: int
+    assigned: int
+    start: int
+    end: int
+    step: int
+
+
+def parse_frame_plan(line: str) -> FramePlan | None:
+    match = FRAME_PLAN_RE.fullmatch(line.strip())
+    if match is None:
+        return None
+    return FramePlan(**{name: int(value) for name, value in match.groupdict().items()})
 
 
 def parse_progress(line: str) -> ProgressUpdate | None:

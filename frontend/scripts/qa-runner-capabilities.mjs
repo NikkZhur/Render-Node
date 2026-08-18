@@ -34,9 +34,12 @@ const readyJob = {
   error: null,
 };
 
-const routeReadyJob = (page) => page.route("**/api/v1/jobs", (route) => {
+const routeReadyJob = (page) => page.route("**/api/v1/jobs/page?**", (route) => {
   if (route.request().method() !== "GET") return route.continue();
-  return route.fulfill({ contentType: "application/json", json: [readyJob] });
+  return route.fulfill({
+    contentType: "application/json",
+    json: { items: [readyJob], page: 1, page_size: 10, total: 1, pages: 1 },
+  });
 });
 
 const assertFit = async (page, label) => {
@@ -72,7 +75,7 @@ try {
   }));
   await availablePage.goto(targetUrl, { waitUntil: "networkidle" });
   const availableSetup = availablePage.locator(".setup-panel");
-  await availableSetup.getByText("Ready to render", { exact: true }).waitFor();
+  await availableSetup.getByRole("status").getByText("Ready to render", { exact: true }).waitFor();
   const startButton = availableSetup.getByRole("button", { name: "Start render" });
   assert(await startButton.isEnabled(), "Available runner did not enable Start render");
   const panelBeforeError = await availableSetup.boundingBox();
@@ -91,9 +94,13 @@ try {
   assert(errorBox && runtimeAfterError && errorBox.y + errorBox.height < runtimeAfterError.y, "Setup error was not placed above Runtime");
   await assertFit(availablePage, "Available runner desktop");
   await availablePage.screenshot({ path: path.join(outputDirectory, "runner-error-layout-desktop.png"), scale: "css" });
+  const authenticatedState = await availableContext.storageState();
   await availableContext.close();
 
-  const unavailableContext = await browser.newContext({ viewport: { width: 1600, height: 900 } });
+  const unavailableContext = await browser.newContext({
+    viewport: { width: 1600, height: 900 },
+    storageState: authenticatedState,
+  });
   const unavailablePage = await unavailableContext.newPage();
   await routeReadyJob(unavailablePage);
   await unavailablePage.route("**/api/v1/system/capabilities", (route) => route.fulfill({
@@ -114,7 +121,12 @@ try {
   await unavailablePage.screenshot({ path: path.join(outputDirectory, "runner-unavailable-desktop.png"), scale: "css" });
   await unavailableContext.close();
 
-  const mobileContext = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  const mobileContext = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    isMobile: true,
+    hasTouch: true,
+    storageState: authenticatedState,
+  });
   const mobilePage = await mobileContext.newPage();
   await routeReadyJob(mobilePage);
   await mobilePage.route("**/api/v1/system/capabilities", (route) => route.fulfill({
@@ -127,7 +139,10 @@ try {
   await mobilePage.screenshot({ path: path.join(outputDirectory, "runner-unavailable-mobile.png"), fullPage: true, scale: "css" });
   await mobileContext.close();
 
-  const errorContext = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const errorContext = await browser.newContext({
+    viewport: { width: 1280, height: 800 },
+    storageState: authenticatedState,
+  });
   const errorPage = await errorContext.newPage();
   await routeReadyJob(errorPage);
   await errorPage.route("**/api/v1/system/capabilities", (route) => route.abort());

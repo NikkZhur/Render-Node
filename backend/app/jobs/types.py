@@ -25,6 +25,11 @@ class ComputeDevice(StrEnum):
     OPTIX = "OPTIX"
 
 
+class GpuRenderMode(StrEnum):
+    FRAME_PER_GPU = "FRAME_PER_GPU"
+    ALL_GPUS_PER_FRAME = "ALL_GPUS_PER_FRAME"
+
+
 class FrameMode(StrEnum):
     SINGLE = "SINGLE"
     RANGE = "RANGE"

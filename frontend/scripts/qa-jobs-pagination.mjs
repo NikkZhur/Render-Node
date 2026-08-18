@@ -99,9 +99,15 @@ try {
   await rows.first().getByText("Paginated job 01", { exact: true }).waitFor();
   await assertNoHorizontalOverflow(desktop, "Desktop jobs pagination");
   await desktop.screenshot({ path: path.join(outputDirectory, "jobs-pagination-desktop.png"), scale: "css" });
+  const authenticatedState = await desktopContext.storageState();
   await desktopContext.close();
 
-  const mobileContext = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  const mobileContext = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    isMobile: true,
+    hasTouch: true,
+    storageState: authenticatedState,
+  });
   const mobile = await mobileContext.newPage();
   await routeJobPages(mobile);
   await mobile.goto(targetUrl, { waitUntil: "networkidle" });

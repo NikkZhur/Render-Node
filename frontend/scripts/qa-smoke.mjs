@@ -89,7 +89,7 @@ try {
     const controlsBounds = controls.getBoundingClientRect();
     const itemBounds = [
       ...controls.querySelectorAll(
-        ".summary-pill, .header-actions > .connection-pill, .header-actions > .version-button, .header-actions > .icon-button, .header-actions > .theme-switch",
+        ".header-controls > .icon-button, .summary-pill, .header-actions > .connection-pill, .header-actions > .version-button, .header-actions > .icon-button, .header-actions > .theme-switch",
       ),
     ].map((element) => element.getBoundingClientRect());
     return {
@@ -192,6 +192,7 @@ try {
   assert(metricComposition.stops[0] > 0 && metricComposition.stops.at(-1) === 0, "Metric chart fill does not fade through alpha");
   assert((await desktop.locator(".metric-chart").count()) === 12, "Not every hardware metric has a line chart");
 
+  await desktop.locator(".job-row").filter({ hasText: "Loft still" }).click();
   await desktop.getByRole("button", { name: "Open frame sequence, 240 frames" }).click();
   const desktopFramesModal = desktop.getByRole("dialog", { name: "Frames 1–240" });
   assert(await desktopFramesModal.isVisible(), "Frame sequence popup did not open on desktop");
@@ -244,6 +245,7 @@ try {
   await desktop.screenshot({ path: path.join(outputDirectory, "desktop-frames-single.png"), scale: "css" });
   await desktop.keyboard.press("Escape");
   await desktopFramesModal.waitFor({ state: "hidden" });
+  await desktop.locator(".job-row").filter({ hasText: "Atrium lighting" }).click();
 
   const desktopVersionButton = desktop.locator(".version-button");
   await desktopVersionButton.click();
@@ -325,7 +327,7 @@ try {
   await desktop.getByRole("button", { name: /Start render/ }).click();
   await desktop.getByText("Rendering", { exact: true }).first().waitFor();
   assert(await desktop.getByRole("button", { name: /Cancel render/ }).isVisible(), "Cancel action is not available during render");
-  assert(await headerSummary.getByText("1 queued", { exact: true }).isVisible(), "Queued job count does not update after starting a render");
+  assert(await headerSummary.getByText("0 queued", { exact: true }).isVisible(), "Rendering job is incorrectly counted as queued");
 
   assert((await desktop.getByRole("tab", { name: /Live log/ }).count()) === 0, "Live log tab was not removed");
   assert((await desktop.getByRole("button", { name: "More options" }).count()) === 0, "Preview overflow placeholder was not removed");
@@ -573,10 +575,10 @@ try {
       whiteSpace: style.whiteSpace,
     };
   });
-  assert(logGlassLayout.backdropFilter.includes("blur"), "Live log is missing its glass blur");
+  assert(logGlassLayout.backdropFilter === "none", "Live log uses an expensive backdrop blur");
   assert(
     logGlassLayout.borderRightWidth === "0px" && logGlassLayout.borderTopRightRadius === "0px"
-      && logToggleGlass.backdropFilter.includes("blur")
+      && logToggleGlass.backdropFilter === "none"
       && logToggleGlass.surfaceBackground.includes("linear-gradient")
       && logToggleGlass.contourBackground !== "rgba(0, 0, 0, 0)",
     "Live log and its trapezoid do not form a seamless glass surface",
@@ -984,6 +986,7 @@ try {
   await mobileFullFrameDialog.getByRole("button", { name: "Close full resolution frame" }).tap();
   await mobile.getByRole("button", { name: /Cancel render/ }).tap();
 
+  await mobile.locator(".job-row").filter({ hasText: "Loft still" }).tap();
   await mobile.getByRole("button", { name: "Open frame sequence, 240 frames" }).tap();
   const mobileFramesModal = mobile.getByRole("dialog", { name: "Frames 1–240" });
   assert(await mobileFramesModal.isVisible(), "Frame sequence popup did not open after a mobile tap");

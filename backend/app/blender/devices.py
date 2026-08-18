@@ -34,7 +34,7 @@ class GpuReservationError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class GpuAllocation:
-    """Stable NVML identities reserved for one Blender process."""
+    """Stable NVML identities reserved for one logical render job."""
 
     devices: tuple[GpuDevice, ...]
 

@@ -31,6 +31,11 @@ ORIGINAL_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".exr"
 PREVIEW_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}
 
 
+def frame_number_from_output(path: Path) -> int | None:
+    match = FRAME_PATTERN.search(path.name)
+    return int(match["frame"]) if match is not None else None
+
+
 @dataclass(frozen=True, slots=True)
 class ArtifactFile:
     path: Path
@@ -73,10 +78,9 @@ class ArtifactService:
         path = contained_path(output_root, output_path)
         if path.suffix.lower() not in ORIGINAL_EXTENSIONS:
             return
-        frame_match = FRAME_PATTERN.search(path.name)
-        if frame_match is None:
+        frame = frame_number_from_output(path)
+        if frame is None:
             return
-        frame = int(frame_match["frame"])
         lock = self._locks.setdefault(job_id, asyncio.Lock())
         async with lock:
             file_stat = await asyncio.to_thread(path.stat)
@@ -84,7 +88,7 @@ class ArtifactService:
                 raise ArtifactRejectedError(
                     "unsafe_render_output", "Render output must be a regular contained file"
                 )
-            original = await self._upsert(
+            original, original_created = await self._upsert(
                 job_id,
                 ArtifactKind.FRAME_ORIGINAL,
                 path,
@@ -101,7 +105,7 @@ class ArtifactService:
                 try:
                     await asyncio.to_thread(self._create_preview, path, preview_path)
                     preview_stat = await asyncio.to_thread(preview_path.stat)
-                    preview = await self._upsert(
+                    preview, preview_created = await self._upsert(
                         job_id,
                         ArtifactKind.FRAME_PREVIEW,
                         preview_path,
@@ -117,12 +121,13 @@ class ArtifactService:
                     Image.DecompressionBombWarning,
                 ):
                     preview = None
+                    preview_created = False
 
         original_url = f"/api/v1/jobs/{job_id}/frames/{frame}/original"
         preview_url = (
             f"/api/v1/jobs/{job_id}/frames/{frame}/preview" if preview is not None else None
         )
-        if preview is not None:
+        if preview is not None and preview_created:
             await self._events.publish(
                 "render.preview_ready",
                 job_id=str(job_id),
@@ -130,15 +135,16 @@ class ArtifactService:
                 frame=frame,
                 url=preview_url,
             )
-        await self._events.publish(
-            "render.frame_ready",
-            job_id=str(job_id),
-            frame=frame,
-            artifact_id=str(original.id),
-            preview_url=preview_url,
-            original_url=original_url,
-            downloadable=True,
-        )
+        if original_created:
+            await self._events.publish(
+                "render.frame_ready",
+                job_id=str(job_id),
+                frame=frame,
+                artifact_id=str(original.id),
+                preview_url=preview_url,
+                original_url=original_url,
+                downloadable=True,
+            )
 
     async def register_log(self, job_id: UUID) -> Artifact | None:
         job_root = self._storage.job_directory(job_id)
@@ -146,7 +152,7 @@ class ArtifactService:
         if not await asyncio.to_thread(log_path.is_file):
             return None
         file_stat = await asyncio.to_thread(log_path.stat)
-        artifact = await self._upsert(
+        artifact, _ = await self._upsert(
             job_id,
             ArtifactKind.BLENDER_LOG,
             log_path,
@@ -254,7 +260,7 @@ class ArtifactService:
             finally:
                 if await asyncio.to_thread(temporary.exists):
                     await asyncio.to_thread(temporary.unlink)
-            artifact = await self._upsert(
+            artifact, _ = await self._upsert(
                 job_id,
                 ArtifactKind.FRAMES_ZIP,
                 destination,
@@ -295,13 +301,14 @@ class ArtifactService:
         filename: str,
         content_type: str,
         size_bytes: int,
-    ) -> Artifact:
+    ) -> tuple[Artifact, bool]:
         job_root = self._storage.job_directory(job_id)
         relative_path = str(contained_path(job_root, path).relative_to(job_root))
         async with self._database.session_factory() as session, session.begin():
             repository = ArtifactRepository(session)
             artifact = await repository.get_by_kind_frame(job_id, kind, frame)
             if artifact is None:
+                created = True
                 artifact = await repository.add(
                     Artifact(
                         job_id=job_id,
@@ -314,11 +321,12 @@ class ArtifactService:
                     )
                 )
             else:
+                created = False
                 artifact.relative_path = relative_path
                 artifact.filename = filename
                 artifact.content_type = content_type
                 artifact.size_bytes = size_bytes
-            return artifact
+            return artifact, created
 
     async def _require_job(self, job_id: UUID) -> None:
         async with self._database.session_factory() as session:

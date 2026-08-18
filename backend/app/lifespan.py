@@ -28,7 +28,7 @@ from app.storage.repository import DatabaseHealthRepository
 from app.storage.uploads import UploadStorage
 from app.system.metrics import SystemMetricsService
 
-EXPECTED_DATABASE_REVISION = "20260730_0004"
+EXPECTED_DATABASE_REVISION = "20260818_0005"
 
 
 async def _prepare_storage(settings: Settings) -> BlenderStorage:

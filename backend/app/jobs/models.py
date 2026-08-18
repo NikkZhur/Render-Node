@@ -11,7 +11,7 @@ from sqlalchemy.engine.interfaces import Dialect
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
 
-from app.jobs.types import ComputeDevice, FrameMode, JobStatus, RenderEngine
+from app.jobs.types import ComputeDevice, FrameMode, GpuRenderMode, JobStatus, RenderEngine
 from app.storage.database import Base
 
 
@@ -62,6 +62,11 @@ class Job(Base):
     engine: Mapped[RenderEngine] = mapped_column(enum_column(RenderEngine, "render_engine"))
     device: Mapped[ComputeDevice] = mapped_column(enum_column(ComputeDevice, "compute_device"))
     gpu_ids: Mapped[list[int]] = mapped_column(JSON, default=list)
+    gpu_render_mode: Mapped[GpuRenderMode] = mapped_column(
+        enum_column(GpuRenderMode, "gpu_render_mode"),
+        default=GpuRenderMode.ALL_GPUS_PER_FRAME,
+        server_default=GpuRenderMode.ALL_GPUS_PER_FRAME.value,
+    )
     frame_mode: Mapped[FrameMode] = mapped_column(enum_column(FrameMode, "frame_mode"))
     frame_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
     frame_end: Mapped[int | None] = mapped_column(Integer, nullable=True)

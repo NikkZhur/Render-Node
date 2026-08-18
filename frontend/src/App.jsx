@@ -3,6 +3,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createPairingUrl } from "./accessBootstrap";
 import { accessApi, artifactsApi, blenderApi, devicesApi, jobsApi, systemApi } from "./api";
 import { getLogLevel } from "./logPresentation";
+import {
+  ALL_GPUS_PER_FRAME,
+  FRAME_PER_GPU,
+  normalizeGpuRenderMode,
+  supportsFramePerGpu,
+} from "./gpuRenderMode";
 import { useRenderEvents } from "./realtime";
 import { useUiStore } from "./store";
 
@@ -35,6 +41,7 @@ const draftJob = {
   frame_start: 1,
   frame_end: 240,
   gpu_ids: [],
+  gpu_render_mode: FRAME_PER_GPU,
   engine: "Cycles",
   device: "OptiX",
   version: "5.2.0",
@@ -53,6 +60,7 @@ function applyJobConfiguration(job, configuration) {
     engine: ENGINE_DISPLAY_VALUES[configuration.engine] ?? configuration.engine,
     device: DEVICE_DISPLAY_VALUES[configuration.device] ?? configuration.device,
     gpu_ids: configuration.gpu_ids,
+    gpu_render_mode: configuration.gpu_render_mode,
     frame,
     frame_mode: configuration.frame_mode,
     frame_start: configuration.frame_start,
@@ -476,7 +484,12 @@ function JobSetup({
     job.id === "draft" && devices.length === 0 ? "CPU" : (job.device ?? "OptiX"),
   );
   const [frameMode, setFrameMode] = useState(job.frame_mode?.toLowerCase() ?? "range");
-  const [selectedGpus, setSelectedGpus] = useState(job.gpu_ids ?? null);
+  const [selectedGpus, setSelectedGpus] = useState(
+    job.id === "draft" ? null : (job.gpu_ids ?? null),
+  );
+  const [gpuRenderMode, setGpuRenderMode] = useState(
+    job.gpu_render_mode ?? (job.id === "draft" ? FRAME_PER_GPU : ALL_GPUS_PER_FRAME),
+  );
   const [fileName, setFileName] = useState(job.file);
   const [frameStart, setFrameStart] = useState(job.frame_start ?? 1);
   const [frameEnd, setFrameEnd] = useState(job.frame_end ?? 240);
@@ -489,6 +502,7 @@ function JobSetup({
   const runtimeUnavailable = !activeVersion;
   const controlsDisabled = !editable || operationPending || runtimeUnavailable;
   const activeGpuIds = selectedGpus ?? devices.map((gpu) => gpu.id);
+  const gpuRenderModeVisible = supportsFramePerGpu(device, activeGpuIds);
   const computeDevices = devices.length > 0 ? COMPUTE_DEVICES : [...new Set([device, "CPU"])];
   const runtimeVersion = isDraft ? activeVersion : (job.version ?? job.blender_version);
   const runnerUnavailable = !runner.available;
@@ -504,26 +518,49 @@ function JobSetup({
     engine: ENGINE_API_VALUES[engine],
     device: device.toUpperCase(),
     gpu_ids: device === "CPU" ? [] : activeGpuIds,
+    gpu_render_mode: normalizeGpuRenderMode(device, activeGpuIds, gpuRenderMode),
     frame_mode: frameMode.toUpperCase(),
     frame_start: frameMode === "all" ? null : Number(frameStart),
     frame_end: frameMode === "range" ? Number(frameEnd) : null,
   });
 
   const toggleGpu = (gpuId) => {
-    setSelectedGpus((current) => {
-      const currentSelection = current ?? devices.map((gpu) => gpu.id);
-      return (
-        currentSelection.includes(gpuId)
-          ? currentSelection.filter((id) => id !== gpuId)
-          : [...currentSelection, gpuId]
-      );
-    });
+    const nextSelection = (
+      activeGpuIds.includes(gpuId)
+        ? activeGpuIds.filter((id) => id !== gpuId)
+        : [...activeGpuIds, gpuId]
+    );
+    if (
+      isDraft
+      && !supportsFramePerGpu(device, activeGpuIds)
+      && supportsFramePerGpu(device, nextSelection)
+    ) {
+      setGpuRenderMode(FRAME_PER_GPU);
+    }
+    setSelectedGpus(nextSelection);
     setDirty(true);
+  };
+
+  const changeDevice = (nextDevice) => {
+    if (
+      isDraft
+      && !supportsFramePerGpu(device, activeGpuIds)
+      && supportsFramePerGpu(nextDevice, activeGpuIds)
+    ) {
+      setGpuRenderMode(FRAME_PER_GPU);
+    }
+    setDevice(nextDevice);
+    setDirty(true);
+  };
+
+  const syncSavedGpuRenderMode = (savedJob) => {
+    if (savedJob?.gpu_render_mode) setGpuRenderMode(savedJob.gpu_render_mode);
   };
 
   const save = async () => {
     try {
-      await onSave(job.id, configuration());
+      const savedJob = await onSave(job.id, configuration());
+      syncSavedGpuRenderMode(savedJob);
       setDirty(false);
     } catch {
       // The mutation exposes its user-facing error below the action controls.
@@ -532,7 +569,8 @@ function JobSetup({
 
   const start = async () => {
     try {
-      await onStart(job.id, configuration());
+      const startedJob = await onStart(job.id, configuration());
+      syncSavedGpuRenderMode(startedJob);
       setDirty(false);
     } catch {
       // The mutation exposes its user-facing error below the action controls.
@@ -567,7 +605,8 @@ function JobSetup({
             const nextConfiguration = configuration();
             if (isDraft) nextConfiguration.name = nextFile.name.replace(/\.(blend|zip)$/i, "");
             try {
-              await onSceneUpload(job, nextFile, nextConfiguration);
+              const uploadedJob = await onSceneUpload(job, nextFile, nextConfiguration);
+              syncSavedGpuRenderMode(uploadedJob);
               setFileName(nextFile.name);
               setDirty(false);
             } catch {
@@ -612,7 +651,7 @@ function JobSetup({
 
       <div className="two-column-fields">
         <DropdownField disabled={controlsDisabled} label="Render engine" onChange={markChanged(setEngine)} options={RENDER_ENGINES} value={engine} />
-        <DropdownField disabled={controlsDisabled} label="Compute device" onChange={markChanged(setDevice)} options={computeDevices} value={device} />
+        <DropdownField disabled={controlsDisabled} label="Compute device" onChange={changeDevice} options={computeDevices} value={device} />
       </div>
 
       <div className="field-group">
@@ -661,6 +700,42 @@ function JobSetup({
           </div>
         )}
       </div>
+
+      {gpuRenderModeVisible && (
+        <div className="field-group gpu-render-mode-field">
+          <div className="field-label-row">
+            <label>GPU render mode</label>
+          </div>
+          <div
+            aria-label="GPU render mode"
+            className="segmented-control"
+            role="group"
+            style={{
+              "--segment-count": 2,
+              "--segment-index": gpuRenderMode === FRAME_PER_GPU ? 0 : 1,
+            }}
+          >
+            <button
+              aria-pressed={gpuRenderMode === FRAME_PER_GPU}
+              className={gpuRenderMode === FRAME_PER_GPU ? "active" : ""}
+              disabled={controlsDisabled}
+              onClick={() => markChanged(setGpuRenderMode)(FRAME_PER_GPU)}
+              type="button"
+            >
+              Frame per GPU
+            </button>
+            <button
+              aria-pressed={gpuRenderMode === ALL_GPUS_PER_FRAME}
+              className={gpuRenderMode === ALL_GPUS_PER_FRAME ? "active" : ""}
+              disabled={controlsDisabled}
+              onClick={() => markChanged(setGpuRenderMode)(ALL_GPUS_PER_FRAME)}
+              type="button"
+            >
+              All GPUs per frame
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="field-group gpu-field">
         <div className="field-label-row">

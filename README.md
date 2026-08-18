@@ -12,7 +12,7 @@ isolated worker if a shared render service is needed later.
 
 > [!IMPORTANT]
 > The repository now contains the persistent Job API, safe scene uploads, the
-> Blender version manager, single-process render scheduler, realtime events,
+> Blender version manager, multi-GPU render scheduler, realtime events,
 > persistent result artifacts/previews, and system metrics.
 
 ## What Works Today
@@ -23,13 +23,17 @@ isolated worker if a shared render service is needed later.
 - persistent Job list and explicit lifecycle state machine;
 - bounded `.blend`/ZIP uploads with contained server-generated paths;
 - backend-owned Blender commands with automatic Python disabled;
-- one active render process, FIFO queueing, persisted progress, timeout, restart
-  recovery, and process-group cancellation;
+- one active logical render job, FIFO queueing, persisted progress, one absolute
+  timeout, restart recovery, and process-group cancellation for every worker;
 - per-job cgroup v2 limits for actual system RAM, swap and pids in strict mode,
   with cgroup OOM counters and fail-closed diagnostics;
 - stable NVML UUID reservations for single- and multi-GPU jobs; numeric API
   selections are resolved against the startup inventory and CUDA receives UUIDs;
-- raw Blender logs stored and downloadable inside the job directory;
+- explicit `Frame per GPU` and `All GPUs per frame` strategies. Animation frames
+  can run concurrently in one Blender process per selected GPU, while a heavy
+  frame can use one process with all selected GPUs;
+- per-GPU raw Blender logs plus a prefixed, downloadable aggregate
+  `blender.log`;
 - WebSocket job/progress/log/preview/operation/metrics events with REST resync;
 - live Current task progress with the current frame and Blender sample count
   parsed from real `Fra:… | Sample X/Y` output;
@@ -216,6 +220,13 @@ Blender execution is part of the installed Render Node and has no separate
 trust/profile setting. Install and activate a Blender version through the UI;
 the backend then runs it inside the node's configured resource boundary.
 
+`gpu_render_mode` is persisted on every Job and accepts
+`FRAME_PER_GPU` or `ALL_GPUS_PER_FRAME`. Omitted create requests default to
+frame distribution only for CUDA/OptiX with at least two GPUs; CPU and one-GPU
+jobs normalize to all-GPUs-per-frame. The frontend exposes the two-way selector
+only when frame distribution is valid and preserves the saved mode across
+update, retry, rerender, and reload.
+
 Open [http://localhost:8000/health](http://localhost:8000/health) for liveness,
 [http://localhost:8000/ready](http://localhost:8000/ready) for SQLite readiness,
 and [http://localhost:8000/docs](http://localhost:8000/docs) for Swagger UI.
@@ -309,6 +320,15 @@ diagnostics prioritize `memory.events` for system-RAM OOM, then Blender/CUDA log
 markers for VRAM or shared GPU-memory exhaustion, then report a plain `SIGABRT`
 or other exit. Cgroups do not impose a VRAM limit.
 
+In `FRAME_PER_GPU`, the scheduler reserves all requested stable UUIDs and starts
+at most one worker per GPU (`SINGLE` uses only the first; RANGE is bounded by
+its inclusive API span). Workers share the job cgroup, deadline, output limit,
+and raw-log byte budget. A trusted Blender adapter partitions the scene's real
+`frame_step` in deterministic round-robin order. Any startup/runtime failure,
+cancel, timeout, or output/log limit stops every peer before the reservation is
+released. Progress is the locked aggregate of completed and active worker
+fractions; duplicate output notifications register and publish one artifact.
+
 Cleanup is conservative and explicit:
 
 - `DELETE /api/v1/jobs/{id}` removes the database row, artifacts, and the whole
@@ -346,9 +366,11 @@ development and is not the production Render Node image.
 cd frontend
 npm run lint
 npm run build
+npm run test:gpu-render-mode
 npm run dev:mock
 # In another terminal:
 npm run qa:smoke
+npm run qa:multi-gpu
 npm run qa:versions-empty
 ```
 
@@ -398,7 +420,7 @@ Browser
 FastAPI
   ├── API and validation
   ├── Job Manager and state machine
-  ├── Single-process scheduler and GPU validation
+  ├── Logical-job scheduler and multi-GPU frame workers
   ├── SQLite
   ├── GPU/System monitoring
   └── Blender subprocess group

@@ -8,7 +8,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.jobs.types import ComputeDevice, FrameMode, JobStatus, RenderEngine
+from app.jobs.types import ComputeDevice, FrameMode, GpuRenderMode, JobStatus, RenderEngine
 
 
 class JobConfiguration(BaseModel):
@@ -16,6 +16,7 @@ class JobConfiguration(BaseModel):
     engine: RenderEngine
     device: ComputeDevice
     gpu_ids: list[int] = Field(default_factory=list, max_length=16)
+    gpu_render_mode: GpuRenderMode | None = None
     frame_mode: FrameMode
     frame_start: int | None = Field(default=None, ge=1, le=10_000_000)
     frame_end: int | None = Field(default=None, ge=1, le=10_000_000)
@@ -43,6 +44,10 @@ class JobConfiguration(BaseModel):
             raise ValueError("CPU jobs cannot reserve GPU ids")
         if self.device is not ComputeDevice.CPU and not self.gpu_ids:
             raise ValueError("CUDA and OPTIX jobs require at least one GPU id")
+        if self.gpu_render_mode is GpuRenderMode.FRAME_PER_GPU and (
+            self.device is ComputeDevice.CPU or len(self.gpu_ids) < 2
+        ):
+            raise ValueError("FRAME_PER_GPU requires CUDA or OPTIX with at least two GPUs")
 
         if self.frame_mode is FrameMode.SINGLE:
             if self.frame_start is None or self.frame_end is not None:
@@ -60,6 +65,16 @@ class JobConfiguration(BaseModel):
 class JobCreate(JobConfiguration):
     blender_version: str = Field(pattern=r"^\d+\.\d+\.\d+$")
 
+    @model_validator(mode="after")
+    def default_gpu_render_mode(self) -> Self:
+        if self.gpu_render_mode is None:
+            self.gpu_render_mode = (
+                GpuRenderMode.FRAME_PER_GPU
+                if self.device is not ComputeDevice.CPU and len(self.gpu_ids) >= 2
+                else GpuRenderMode.ALL_GPUS_PER_FRAME
+            )
+        return self
+
 
 class JobUpdate(JobConfiguration):
     pass
@@ -76,6 +91,7 @@ class JobResponse(BaseModel):
     engine: RenderEngine
     device: ComputeDevice
     gpu_ids: list[int]
+    gpu_render_mode: GpuRenderMode
     frame_mode: FrameMode
     frame_start: int | None
     frame_end: int | None

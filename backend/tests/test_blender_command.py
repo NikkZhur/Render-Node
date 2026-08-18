@@ -9,6 +9,7 @@ import pytest
 from app.blender.command import (
     BlenderExecutableResolver,
     CommandBuildError,
+    FrameWorker,
     build_render_command,
 )
 from app.blender.sandbox import build_worker_environment
@@ -69,6 +70,32 @@ def test_command_rejects_unverified_adapter_and_escaping_scene(tmp_path: Path) -
     (tmp_path / str(escaping.id)).mkdir()
     with pytest.raises(ValueError, match="escapes"):
         build_render_command(escaping, binary=Path("/blender"), jobs_root=tmp_path)
+
+
+def test_frame_worker_has_private_log_and_backend_owned_round_robin_arguments(
+    tmp_path: Path,
+) -> None:
+    job = make_job()
+    job_root = tmp_path / str(job.id)
+    (job_root / "input").mkdir(parents=True)
+    (job_root / "input" / "scene.blend").write_bytes(b"BLENDER")
+    for child in ("output", "logs", "temp"):
+        (job_root / child).mkdir()
+
+    command = build_render_command(
+        job,
+        binary=Path("/trusted/blender"),
+        jobs_root=tmp_path,
+        worker=FrameWorker(index=1, count=2),
+    )
+
+    assert command.log_path.name == "blender-gpu-1.log"
+    assert "frame_distribution.py" in " ".join(command.arguments)
+    assert "--frame-start" not in command.arguments
+    assert command.arguments[command.arguments.index("--render-node-worker-index") + 1] == "1"
+    assert command.arguments[command.arguments.index("--render-node-worker-count") + 1] == "2"
+    assert command.arguments[command.arguments.index("--render-node-frame-start") + 1] == "3"
+    assert command.arguments[command.arguments.index("--render-node-frame-end") + 1] == "5"
 
 
 def test_executable_resolver_uses_the_selected_runtime_version(tmp_path: Path) -> None:

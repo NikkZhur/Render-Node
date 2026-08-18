@@ -5,8 +5,8 @@
 
 ## Текущее состояние
 
-- Обновлено: 2026-08-18 после реализации provider-independent first-browser
-  pairing и удаления конфигурационного trust-gate для локального Blender runner.
+- Обновлено: 2026-08-18 после полной реализации multi-GPU распределения кадров;
+  first-browser pairing, same-origin и always-local runner сохранены.
 - Фазы 1–6 из `BACKEND_IMPLEMENTATION_MASTER_PROMPT.md` завершены.
 - Следующей фазы в master prompt нет; дальнейшая работа — отдельные deployment
   задачи, перечисленные ниже.
@@ -169,17 +169,35 @@
   переводятся в стабильные UUID; scheduler резервирует все UUID до `finally`,
   повторно проверяет их наличие и передаёт Blender UUID через
   `CUDA_VISIBLE_DEVICES`, включая multi-GPU process.
+- Jobs поддерживают `FRAME_PER_GPU` и `ALL_GPUS_PER_FRAME`. Первый режим для
+  RANGE/ALL параллельно запускает ограниченное число workers с одним стабильным
+  UUID
+  на процесс и round-robin планом по фактическому scene `frame_step`; SINGLE
+  использует только первую GPU. Второй режим сохраняет один Blender-процесс со
+  всеми UUID.
+- Группа workers имеет один job cgroup, deadline, output limit и общий log
+  budget. Failure/startup error/cancel/timeout останавливает все process groups,
+  после чего scheduler освобождает всю резервацию. Сырые логи разделены по
+  `blender-gpu-{index}.log`, совместимый `blender.log` и live events помечены
+  GPU UUID.
+- Concurrent progress сериализуется и остаётся монотонным; output paths и
+  artifacts дедуплицируются до preview/frame-ready событий. Frontend selector
+  показывается только для CUDA/OptiX с двумя GPU, нормализует несовместимые
+  конфигурации и сохраняет режим через save/retry/rerender/reload.
 
 ## Контракты и миграции
 
-- Alembic head остаётся `20260730_0004`; schema change в фазе 6 не требовался,
-  `alembic check` не обнаруживает новых операций.
+- Alembic head `20260818_0005` добавляет обязательный `jobs.gpu_render_mode` с
+  server default `ALL_GPUS_PER_FRAME` для существующих строк; downgrade удаляет
+  колонку, `alembic check` не обнаруживает новых операций.
 - Blender API schema не изменилась: frontend теперь использует существующий
   `DELETE /api/v1/blender/versions/{version}`.
 - Jobs API дополнен полным `PUT /api/v1/jobs/{job_id}` для editable-конфигурации
   и `POST /api/v1/jobs/{job_id}/rerender` (`201 Created`) для terminal jobs.
   Upload принимает `CREATED` и `READY`; для остальных статусов возвращает
-  `job_upload_locked`. Миграция БД не требуется.
+  `job_upload_locked`. Create/update/response содержат `gpu_render_mode` со
+  значениями `FRAME_PER_GPU` и `ALL_GPUS_PER_FRAME`; create default зависит от
+  device/числа GPU, update сохраняет совместимое значение или нормализует его.
 - `GET /api/v1/jobs/page?page=&page_size=` возвращает `items`, `page`,
   `page_size`, `total`, `pages`; сервер ограничивает страницу 10 записями.
   Старый `GET /api/v1/jobs` сохранён для совместимости. Миграция БД не требуется.
@@ -220,6 +238,19 @@
 
 ## Последняя проверка
 
+- Multi-GPU: backend Ruff format/check, strict mypy `app tests`, полный pytest
+  (`244 passed, 1 skipped`) и полный Alembic cycle
+  `upgrade/current/check/downgrade/upgrade` успешны. Integration-тесты на fake
+  Blender покрывают одновременный старт, UUID isolation, RANGE/ALL/SINGLE,
+  `frame_step`, logs, progress/artifact dedup, peer failure/startup error,
+  cancel/timeout и освобождение GPU.
+- Frontend ESLint, production/mock builds, все Node contract tests и полный
+  набор Playwright QA успешны: mock smoke/jobs/versions/sample/multi-GPU,
+  route-fixtures delete/pagination/capabilities/empty registry, real API,
+  fake-runner, pairing и same-origin. Desktop/mobile multi-GPU и proxy
+  screenshots просмотрены; selector расположен перед GPU allocation, primary
+  action доступен, clipping/overlap/overflow нет. Настоящий Blender и
+  CUDA/OptiX render в этой работе не запускались.
 - Always-local runner follow-up и first-browser pairing: backend Ruff
   format/check, strict mypy `app tests`, Alembic check и полный pytest успешны —
   223 passed, 1 skipped из-за
@@ -278,7 +309,8 @@
   preview, однокадровый ZIP и raw log выданы API. SHA-256 сохранённой сцены
   совпал с пользовательским файлом, исходный файл не изменялся.
 - Alembic: upgrade нового вложенного SQLite path, current/check, downgrade base и
-  повторный upgrade — успешно; head `20260730_0004`, schema diff отсутствует.
+  повторный upgrade — успешно; текущий head `20260818_0005`, schema diff
+  отсутствует.
 - Frontend: ESLint, production Vite build и explicit mock build — успешно.
   Production bundle проверен на отсутствие mock chunk и fixture markers.
 - Целевой Playwright `qa:versions-empty`: пустой real-mode registry, сохранение
@@ -366,6 +398,10 @@
   текущий GPU smoke относится только к trusted devcontainer без per-job cgroup.
   После просьбы пользователя дальнейшие render smoke не запускаются; целевой
   strict/GPU сценарий остаётся ручной внешней проверкой.
+- Реальный multi-GPU `FRAME_PER_GPU` smoke с Blender/CUDA/OptiX намеренно не
+  выполнялся; concurrency и lifecycle проверены fake Blender без использования
+  GPU. Его следует отдельно подтвердить в целевом cloud Pod после делегации
+  strict cgroup v2.
 - Для custom browser deployment backend должен оставаться приватным за HTTPS
   proxy на том же public origin, что и frontend. Proxy не должен подставлять
   internal Bearer в browser HTTP/WebSocket; переписывание `Host` допустимо.

@@ -33,6 +33,7 @@ async def test_job_lifecycle_and_server_generated_storage(
     job_id = UUID(created["id"])
     job_directory = job_settings.jobs_root / str(job_id)
     assert created["status"] == "created"
+    assert created["gpu_render_mode"] == "FRAME_PER_GPU"
     assert created["source_filename"] is None
     assert job_directory.is_dir()
     assert {path.name for path in job_directory.iterdir()} == {
@@ -94,6 +95,7 @@ async def test_job_lifecycle_and_server_generated_storage(
     assert updated.json()["name"] == "Adjusted scene"
     assert updated.json()["engine"] == "BLENDER_EEVEE"
     assert updated.json()["frame_start"] == 12
+    assert updated.json()["gpu_render_mode"] == "ALL_GPUS_PER_FRAME"
     await asyncio.to_thread((job_directory / "input" / "textures").mkdir)
     await asyncio.to_thread(
         (job_directory / "input" / "textures" / "albedo.bin").write_bytes, b"texture"
@@ -123,6 +125,7 @@ async def test_job_lifecycle_and_server_generated_storage(
     assert cancelled.json()["finished_at"].endswith("Z")
     retry_response = await job_client.post(f"/api/v1/jobs/{job_id}/retry")
     assert retry_response.json()["status"] == "queued"
+    assert retry_response.json()["gpu_render_mode"] == "ALL_GPUS_PER_FRAME"
     second_cancel = await job_client.post(f"/api/v1/jobs/{job_id}/cancel")
     assert second_cancel.json()["status"] == "cancelled"
 
@@ -136,6 +139,7 @@ async def test_job_lifecycle_and_server_generated_storage(
     assert rerendered["source_filename"] == "replacement.blend"
     assert rerendered["engine"] == "BLENDER_EEVEE"
     assert rerendered["frame_mode"] == "SINGLE"
+    assert rerendered["gpu_render_mode"] == "ALL_GPUS_PER_FRAME"
     assert (rerendered_directory / "input" / "scene.blend").read_bytes() == b"BLENDER-v310"
     assert (rerendered_directory / "input" / "textures" / "albedo.bin").read_bytes() == b"texture"
 
@@ -151,6 +155,31 @@ async def test_job_lifecycle_and_server_generated_storage(
     delete_rerendered = await job_client.delete(f"/api/v1/jobs/{rerendered_id}")
     assert delete_rerendered.status_code == 204
     assert not rerendered_directory.exists()
+
+
+async def test_retry_and_rerender_preserve_frame_per_gpu_strategy(
+    job_client: AsyncClient,
+) -> None:
+    created = await job_client.post("/api/v1/jobs", json=job_payload("Distributed retry"))
+    assert created.status_code == 201
+    job_id = created.json()["id"]
+    assert created.json()["gpu_render_mode"] == "FRAME_PER_GPU"
+    assert (
+        await job_client.post(
+            f"/api/v1/jobs/{job_id}/uploads",
+            files={"file": ("scene.blend", b"BLENDER-v300", "application/octet-stream")},
+        )
+    ).status_code == 200
+    assert (await job_client.post(f"/api/v1/jobs/{job_id}/start")).status_code == 200
+    assert (await job_client.post(f"/api/v1/jobs/{job_id}/cancel")).status_code == 200
+
+    retried = await job_client.post(f"/api/v1/jobs/{job_id}/retry")
+    assert retried.json()["gpu_render_mode"] == "FRAME_PER_GPU"
+    assert (await job_client.post(f"/api/v1/jobs/{job_id}/cancel")).status_code == 200
+    rerendered = await job_client.post(f"/api/v1/jobs/{job_id}/rerender")
+
+    assert rerendered.status_code == 201
+    assert rerendered.json()["gpu_render_mode"] == "FRAME_PER_GPU"
 
 
 async def test_jobs_survive_application_restart(job_settings: Settings) -> None:

@@ -8,7 +8,14 @@ import pytest
 
 from app.blender.cgroups import CgroupIsolation, CgroupLimits
 from app.blender.command import RenderCommand
-from app.blender.runner import FailureKind, RunnerLimits, SandboxRunner, _cpu_time_limit
+from app.blender.runner import (
+    FailureKind,
+    RunnerLimits,
+    SandboxRunner,
+    WorkerRunnerError,
+    WorkerRunSpec,
+    _cpu_time_limit,
+)
 from app.config import ResourceIsolationMode
 
 
@@ -19,24 +26,24 @@ def executable(tmp_path: Path, body: str) -> Path:
     return path
 
 
-def command(tmp_path: Path, binary: Path) -> RenderCommand:
+def command(tmp_path: Path, binary: Path, *, log_name: str = "blender.log") -> RenderCommand:
     for child in ("output", "logs", "temp"):
         (tmp_path / child).mkdir(exist_ok=True)
     return RenderCommand(
         arguments=(str(binary), "--background", "--factory-startup", "--disable-autoexec"),
         job_directory=tmp_path,
         output_directory=tmp_path / "output",
-        log_path=tmp_path / "logs" / "blender.log",
+        log_path=tmp_path / "logs" / log_name,
     )
 
 
-def runner(*, timeout_seconds: float = 5) -> SandboxRunner:
+def runner(*, timeout_seconds: float = 5, max_log_bytes: int = 1024 * 1024) -> SandboxRunner:
     return SandboxRunner(
         RunnerLimits(
             timeout_seconds=timeout_seconds,
             terminate_grace_seconds=0.2,
             max_output_bytes=1024 * 1024,
-            max_log_bytes=1024 * 1024,
+            max_log_bytes=max_log_bytes,
         ),
         CgroupIsolation(
             ResourceIsolationMode.TRUSTED,
@@ -172,6 +179,203 @@ async def test_gpu_memory_log_is_distinct_from_plain_sigabrt(tmp_path: Path) -> 
 
     assert gpu_result.failure_kind is FailureKind.GPU_MEMORY_OOM
     assert plain_result.failure_kind is FailureKind.BLENDER_ABORT
+
+
+async def test_worker_group_runs_concurrently_with_separate_logs(tmp_path: Path) -> None:
+    (tmp_path / "first").mkdir()
+    (tmp_path / "second").mkdir()
+    first = executable(
+        tmp_path / "first",
+        'touch "$PWD/first.ready"\n'
+        'while [ ! -f "$PWD/second.ready" ]; do sleep 0.02; done\n'
+        "echo first-worker",
+    )
+    second = executable(
+        tmp_path / "second",
+        'touch "$PWD/second.ready"\n'
+        'while [ ! -f "$PWD/first.ready" ]; do sleep 0.02; done\n'
+        "echo second-worker",
+    )
+    for child in ("output", "logs", "temp"):
+        (tmp_path / child).mkdir(exist_ok=True)
+
+    async def ignore_line(line: str) -> None:
+        pass
+
+    async def ignore_pid(pid: int) -> None:
+        pass
+
+    workers = (
+        WorkerRunSpec(
+            "GPU-a",
+            command(tmp_path, first, log_name="blender-gpu-0.log"),
+            {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path / "temp")},
+            ignore_pid,
+            ignore_line,
+        ),
+        WorkerRunSpec(
+            "GPU-b",
+            command(tmp_path, second, log_name="blender-gpu-1.log"),
+            {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path / "temp")},
+            ignore_pid,
+            ignore_line,
+        ),
+    )
+
+    results = await runner().run_workers(
+        workers,
+        job_id=uuid4(),
+        cancellation=asyncio.Event(),
+    )
+
+    assert [worker.result.exit_code for worker in results] == [0, 0]
+    assert "first-worker" in (tmp_path / "logs" / "blender-gpu-0.log").read_text()
+    assert "second-worker" in (tmp_path / "logs" / "blender-gpu-1.log").read_text()
+
+
+async def test_worker_failure_terminates_other_process_group(tmp_path: Path) -> None:
+    (tmp_path / "failing").mkdir()
+    (tmp_path / "slow").mkdir()
+    failing = executable(
+        tmp_path / "failing",
+        'while [ ! -f "$PWD/slow.ready" ]; do sleep 0.02; done\nexit 7',
+    )
+    slow = executable(
+        tmp_path / "slow",
+        'sleep 60 &\nchild="$!"\nprintf "%s" "$child" > "$PWD/slow-child.pid"\n'
+        'touch "$PWD/slow.ready"\nwait',
+    )
+    for child in ("output", "logs", "temp"):
+        (tmp_path / child).mkdir(exist_ok=True)
+
+    async def ignore_line(line: str) -> None:
+        pass
+
+    async def ignore_pid(pid: int) -> None:
+        pass
+
+    results = await runner().run_workers(
+        (
+            WorkerRunSpec(
+                "GPU-fail",
+                command(tmp_path, failing, log_name="blender-gpu-0.log"),
+                {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path / "temp")},
+                ignore_pid,
+                ignore_line,
+            ),
+            WorkerRunSpec(
+                "GPU-slow",
+                command(tmp_path, slow, log_name="blender-gpu-1.log"),
+                {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path / "temp")},
+                ignore_pid,
+                ignore_line,
+            ),
+        ),
+        job_id=uuid4(),
+        cancellation=asyncio.Event(),
+    )
+
+    assert results[0].result.exit_code == 7
+    assert results[1].result.cancelled is True
+    child_pid = int((tmp_path / "slow-child.pid").read_text())
+    await assert_process_stopped(child_pid)
+
+
+async def test_worker_start_error_terminates_already_started_process_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "slow").mkdir()
+    (tmp_path / "bad").mkdir()
+    slow = executable(
+        tmp_path / "slow",
+        'sleep 60 &\nchild="$!"\nprintf "%s" "$child" > "$PWD/start-child.pid"\necho STARTED\nwait',
+    )
+    bad = executable(tmp_path / "bad", "exit 0")
+    for child in ("output", "logs", "temp"):
+        (tmp_path / child).mkdir(exist_ok=True)
+    original_create_subprocess_exec = asyncio.create_subprocess_exec
+    slow_ready = asyncio.Event()
+
+    async def create_subprocess_exec(*arguments: object, **kwargs: object) -> object:
+        if arguments and arguments[0] == str(bad):
+            await slow_ready.wait()
+            raise OSError("synthetic exec failure")
+        return await original_create_subprocess_exec(*arguments, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess_exec)
+
+    async def ignore_line(line: str) -> None:
+        if line == "STARTED":
+            slow_ready.set()
+
+    async def ignore_pid(pid: int) -> None:
+        pass
+
+    with pytest.raises(WorkerRunnerError, match=r"GPU-bad.*synthetic exec failure"):
+        await runner().run_workers(
+            (
+                WorkerRunSpec(
+                    "GPU-slow",
+                    command(tmp_path, slow, log_name="blender-gpu-0.log"),
+                    {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path / "temp")},
+                    ignore_pid,
+                    ignore_line,
+                ),
+                WorkerRunSpec(
+                    "GPU-bad",
+                    command(tmp_path, bad, log_name="blender-gpu-1.log"),
+                    {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path / "temp")},
+                    ignore_pid,
+                    ignore_line,
+                ),
+            ),
+            job_id=uuid4(),
+            cancellation=asyncio.Event(),
+        )
+
+    child_pid = int((tmp_path / "start-child.pid").read_text())
+    await assert_process_stopped(child_pid)
+
+
+async def test_worker_group_shares_one_job_log_limit(tmp_path: Path) -> None:
+    (tmp_path / "first").mkdir()
+    (tmp_path / "second").mkdir()
+    first = executable(tmp_path / "first", "head -c 200 /dev/zero | tr '\\0' a")
+    second = executable(tmp_path / "second", "head -c 200 /dev/zero | tr '\\0' b")
+    for child in ("output", "logs", "temp"):
+        (tmp_path / child).mkdir(exist_ok=True)
+
+    async def ignore_line(line: str) -> None:
+        pass
+
+    async def ignore_pid(pid: int) -> None:
+        pass
+
+    results = await runner(max_log_bytes=100).run_workers(
+        (
+            WorkerRunSpec(
+                "GPU-a",
+                command(tmp_path, first, log_name="blender-gpu-0.log"),
+                {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path / "temp")},
+                ignore_pid,
+                ignore_line,
+            ),
+            WorkerRunSpec(
+                "GPU-b",
+                command(tmp_path, second, log_name="blender-gpu-1.log"),
+                {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path / "temp")},
+                ignore_pid,
+                ignore_line,
+            ),
+        ),
+        job_id=uuid4(),
+        cancellation=asyncio.Event(),
+    )
+
+    total_saved = sum(path.stat().st_size for path in (tmp_path / "logs").iterdir())
+    assert total_saved <= 100
+    assert any(worker.result.limit_exceeded for worker in results)
 
 
 async def assert_process_stopped(pid: int) -> None:

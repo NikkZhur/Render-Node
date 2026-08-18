@@ -253,6 +253,7 @@ blender_version: string
 engine: CYCLES | BLENDER_EEVEE | BLENDER_WORKBENCH
 device: CPU | CUDA | OPTIX
 gpu_ids: list[int]
+gpu_render_mode: FRAME_PER_GPU | ALL_GPUS_PER_FRAME
 frame_mode: SINGLE | RANGE | ALL
 frame_start: int | null
 frame_end: int | null
@@ -372,7 +373,9 @@ workspace, jobs, Blender versions и отдельное хранилище ре�
 |       |-- preview/
 |       |   `-- frame_0002.webp
 |       |-- logs/
-|       |   `-- blender.log
+|       |   |-- blender.log
+|       |   |-- blender-gpu-0.log
+|       |   `-- blender-gpu-1.log
 |       `-- temp/
 |-- blender/
 |   |-- versions/
@@ -420,6 +423,13 @@ POST   /api/v1/jobs/{job_id}/rerender
 неизменяемы. `rerender` разрешён для `COMPLETED`, `FAILED` и `CANCELLED`: он
 создаёт отдельный `READY` job с копией настроек и безопасной серверной копией
 input исходного job. Артефакты и runtime-состояние при этом не копируются.
+
+Поле `gpu_render_mode` принимает `FRAME_PER_GPU` и
+`ALL_GPUS_PER_FRAME`. При создании без поля backend выбирает распределение
+кадров только для CUDA/OptiX с двумя и более GPU; CPU и одна GPU нормализуются в
+`ALL_GPUS_PER_FRAME`. При update пропущенное совместимое значение сохраняется,
+retry/rerender копируют его. Миграция `20260818_0005` заполняет существующие
+строки безопасным legacy-значением `ALL_GPUS_PER_FRAME`.
 
 ### Uploads
 
@@ -564,8 +574,10 @@ blender.operation_failed
 system.metrics_updated
 ```
 
-`render.log` содержит timestamp, stream и одну нормализованную строку, но сырой
-лог всё равно записывается на диск. `render.frame_ready` содержит номер кадра,
+`render.log` содержит timestamp, stream, GPU UUID и одну нормализованную строку.
+В `FRAME_PER_GPU` исходные потоки остаются в отдельных
+`blender-gpu-{index}.log`, а совместимый `blender.log` получает строки с
+префиксом UUID. `render.frame_ready` содержит номер кадра,
 preview URL, original URL и признак готовности скачивания. Blender operation
 events содержат `operation_id`, чтобы frontend не связывал состояние с текстом
 кнопки или локальным таймером. System metrics можно отправлять не чаще одного
@@ -666,7 +678,7 @@ HOME=/workspace/jobs/{job_id}/temp/home
 XDG_CONFIG_HOME=/workspace/jobs/{job_id}/temp/config
 XDG_CACHE_HOME=/workspace/jobs/{job_id}/temp/cache
 TMPDIR=/workspace/jobs/{job_id}/temp
-CUDA_VISIBLE_DEVICES=GPU-<stable-nvml-uuid>
+CUDA_VISIBLE_DEVICES=GPU-<stable-nvml-uuid>[,GPU-<stable-nvml-uuid>...]
 PYTHONPATH=
 PYTHONHOME=
 ```
@@ -774,18 +786,27 @@ CUDA_VISIBLE_DEVICES=GPU-<uuid-a>,GPU-<uuid-b>
 
 ### Режимы планирования
 
-**Multi-device frame** — несколько GPU совместно считают один кадр. Подходит для
-тяжёлых одиночных изображений.
+**All GPUs per frame (`ALL_GPUS_PER_FRAME`)** — один Blender-процесс видит все
+выбранные UUID и считает кадры последовательно. Подходит для тяжёлых одиночных
+изображений и сохраняет поведение jobs, созданных до миграции.
 
-**Frame parallelism** — отдельный Blender-процесс на каждую GPU получает свою
-часть кадров. Обычно обеспечивает лучший throughput для анимации.
+**Frame per GPU (`FRAME_PER_GPU`)** — отдельный Blender-процесс видит ровно один
+UUID и получает свою часть кадров. Обычно обеспечивает лучший throughput для
+анимации. `SINGLE` запускает только worker первой GPU. Для RANGE число workers
+не превышает длину включительного API-диапазона; для ALL используются все
+выбранные GPU.
 
-Первый MVP поддерживает один процесс и один набор GPU, но `GpuScheduler` всё
-равно атомарно резервирует все UUID задания до полного `finally` runner. Это
-делает освобождение одной/нескольких карт проверяемым и сохраняет правильную
-границу для будущего frame parallelism. Один тяжёлый кадр получает один процесс
-с несколькими UUID; распределение кадров сможет создавать отдельный процесс и
-cgroup на каждую выделенную карту без изменения публичного Job API.
+После загрузки `.blend` доверенный backend-адаптер читает фактические
+`frame_start`, `frame_end` и `frame_step` сцены. Worker `i` получает
+round-robin-последовательность `start + i*scene_step` с шагом
+`scene_step*worker_count`; RANGE ограничивает её API-границами. Такой контракт
+не дублирует и не пропускает кадры, включая `frame_step > 1`.
+
+`GpuScheduler` атомарно резервирует все UUID логического job до общего
+`finally`. Все workers разделяют один per-job cgroup, абсолютный deadline,
+output limit и log budget, но имеют отдельные process groups и temp/home/cache.
+Ошибка запуска или выполнения одного worker, cancel, timeout или превышение
+лимита останавливает все peer groups до освобождения GPU.
 
 ## 13. Очередь и Scheduler
 
@@ -797,8 +818,9 @@ cgroup на каждую выделенную карту без изменени
 1. Если активного процесса нет, найти старейший `QUEUED` job.
 2. Проверить наличие запрошенных GPU.
 3. Зарезервировать все выбранные GPU по UUID.
-4. Создать per-job cgroup и запустить Blender.
-5. Передавать события и обновлять прогресс.
+4. Создать per-job cgroup и запустить один Blender либо группу workers согласно
+   `gpu_render_mode`.
+5. Передавать GPU-tagged логи и сериализованно обновлять общий прогресс.
 6. В `finally` удалить cgroup и освободить все GPU.
 7. После завершения перейти к следующему job.
 
@@ -810,7 +832,8 @@ FastAPI `BackgroundTasks` не используется для длительн�
 
 ## 14. Progress parser
 
-Сырые строки Blender всегда записываются в `blender.log`. Дополнительно parser
+Сырые строки Blender всегда записываются в per-worker raw log и совместимый
+`blender.log`. Дополнительно parser
 пытается извлечь:
 
 - текущий кадр;
@@ -826,11 +849,12 @@ FastAPI `BackgroundTasks` не используется для длительн�
 Для Blender 4.1 поддерживается фактический формат
 `Fra:1 ... | Sample 48/512` (включая необязательные пробелы), а legacy-строки
 `Rendering 48 / 512 samples` сохраняются для совместимости с fake/старыми
-адаптерами. Sample progress текущего кадра пересчитывается в overall progress
-диапазона кадров и публикуется в существующих полях WebSocket
-`sample`/`total_samples`. Frontend хранит этот snapshot только до смены кадра
-или terminal status и показывает его в блоке Current task. Парсер покрывается
-тестами на сохранённых фрагментах вывода Blender 4.1.
+адаптерами. В распределённом режиме общий progress вычисляется под lock как
+сумма завершённых кадров и активных worker fractions, остаётся монотонным и
+записывается как состояние одного job. Output path дедуплицируется до
+регистрации artifact, поэтому `render.frame_ready` и preview публикуются один
+раз. Frontend хранит sample snapshot только до смены кадра или terminal status
+и показывает его в блоке Current task.
 
 ## 15. Preview и результаты
 
@@ -987,6 +1011,9 @@ Backend пишет структурированные JSON-логи:
 - правила выбора единственной активной версии;
 - расчёт storage status и low-space thresholds;
 - GPU scheduler;
+- валидация/default/normalization `gpu_render_mode`;
+- round-robin frame plan с фактическим scene `frame_step`;
+- монотонная агрегация concurrent progress и дедупликация outputs;
 - cgroup v2 detection/configuration, read-only/v1 failure, strict/trusted mode;
 - отсутствие `RLIMIT_AS`, cgroup OOM counters и cleanup всех terminal paths;
 - проверка API schemas.
@@ -1003,6 +1030,8 @@ Backend пишет структурированные JSON-логи:
 - создание fake cgroup v2, наследование потомками и cleanup после
   success/failure/cancel/timeout/setup failure;
 - UUID-резервация и освобождение одной/нескольких GPU без настоящей GPU;
+- одновременный старт per-GPU fake workers, отдельные UUID/logs и общий cgroup;
+- peer teardown при startup/failure/cancel/timeout и общий log/output budget;
 - восстановление после перезапуска;
 - создание preview и выдача artifact;
 - пагинация кадров с `page_size <= 50`, original download и потоковый ZIP;
@@ -1014,6 +1043,8 @@ Backend пишет структурированные JSON-логи:
 
 - lint и production build;
 - один основной Playwright smoke-сценарий desktop/mobile;
+- selector multi-GPU стратегии: видимость, default, normalization, persistence
+  и desktop/mobile screenshots;
 - Job Setup находится перед Preview на mobile, а основное действие помещается в
   первый viewport;
 - dropdown и segmented controls доступны с клавиатуры;

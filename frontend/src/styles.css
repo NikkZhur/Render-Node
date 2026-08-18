@@ -888,7 +888,7 @@ main {
   position: relative;
   isolation: isolate;
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(var(--segment-count, 3), 1fr);
   overflow: hidden;
   padding: 3px;
   border: 1px solid var(--border);
@@ -902,7 +902,7 @@ main {
   top: 3px;
   bottom: 3px;
   left: 3px;
-  width: calc((100% - 6px) / 3);
+  width: calc((100% - 6px) / var(--segment-count, 3));
   border-radius: 6px;
   background: linear-gradient(135deg, rgb(89 167 255 / 13%), rgb(168 139 255 / 7%)), var(--surface-soft);
   box-shadow: inset 0 1px 0 rgb(255 255 255 / 7%), 0 4px 12px rgb(0 0 0 / 14%);
@@ -977,6 +977,10 @@ main {
 
 .single-frame label {
   flex: 0 0 calc(50% - 10px);
+}
+
+.gpu-render-mode-field + .gpu-field {
+  margin-top: 12px;
 }
 
 .gpu-list {
@@ -3288,6 +3292,31 @@ main {
     margin-top: 8px;
   }
 
+  .setup-panel { padding: 14px 16px; }
+  .setup-panel .section-heading { min-height: 38px; margin-bottom: 8px; }
+  .setup-panel .field-group,
+  .setup-panel .two-column-fields { margin-top: 10px; }
+  .setup-panel .gpu-render-mode-field + .gpu-field { margin-top: 7px; }
+  .setup-panel .field-label-row,
+  .setup-panel .select-field > span { margin-bottom: 5px; }
+  .setup-panel .file-drop { min-height: 52px; padding-block: 6px; }
+  .setup-panel .dropdown-trigger { height: 34px; }
+  .setup-panel .segmented-control button { min-height: 29px; }
+  .setup-panel .frame-range { margin-top: 6px; }
+  .setup-panel .frame-range input { height: 32px; }
+  .setup-panel .gpu-option { min-height: 34px; }
+  .setup-panel .setup-footer { gap: 6px; }
+  .setup-panel .setup-error-slot,
+  .setup-panel .setup-error { min-height: 30px; }
+  .setup-panel .setup-error { padding: 5px 9px; }
+  .setup-panel .active-runtime { min-height: 30px; padding-top: 8px; }
+  .setup-panel .runner-status { min-height: 30px; padding-block: 5px; }
+  .setup-panel .primary-action,
+  .setup-panel .secondary-action { min-height: 39px; }
+
+  .queue-panel { height: clamp(330px, 45vh, 500px); }
+  .artifacts-panel { height: 190px; }
+
   .app-footer {
     min-height: 32px;
   }
@@ -3520,8 +3549,28 @@ main {
 
   .progress-stats .progress-stat-samples { display: block; }
 
-  .setup-panel { padding: 17px; }
-  .two-column-fields { grid-template-columns: 1fr; }
+  .setup-panel { padding: 14px; }
+  .setup-panel .section-heading { min-height: 38px; margin-bottom: 9px; }
+  .setup-panel .field-group,
+  .setup-panel .two-column-fields { margin-top: 11px; }
+  .setup-panel .gpu-render-mode-field + .gpu-field { margin-top: 7px; }
+  .setup-panel .field-label-row,
+  .setup-panel .select-field > span { margin-bottom: 5px; }
+  .setup-panel .file-drop { min-height: 52px; padding-block: 6px; }
+  .setup-panel .dropdown-trigger { height: 34px; }
+  .setup-panel .segmented-control button { min-height: 29px; }
+  .setup-panel .frame-range { margin-top: 6px; }
+  .setup-panel .frame-range input { height: 32px; }
+  .setup-panel .gpu-option { min-height: 35px; }
+  .setup-panel .setup-footer { gap: 6px; }
+  .setup-panel .setup-error-slot,
+  .setup-panel .setup-error { min-height: 30px; }
+  .setup-panel .setup-error { padding: 5px 9px; }
+  .setup-panel .active-runtime { min-height: 30px; padding-top: 8px; }
+  .setup-panel .runner-status { min-height: 30px; padding-block: 5px; }
+  .setup-panel .primary-action,
+  .setup-panel .secondary-action { min-height: 39px; }
+  .two-column-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
   .metrics-strip {
     min-height: 420px;

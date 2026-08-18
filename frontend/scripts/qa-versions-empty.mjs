@@ -64,6 +64,7 @@ const installApiRoutes = async (page) => {
     const apiPath = url.pathname;
     const method = request.method();
 
+    if (apiPath === "/api/v1/access/claim" && method === "POST") return json(route, {});
     if (apiPath === "/api/v1/jobs/page" && method === "GET") {
       return json(route, { items: jobs, page: 1, page_size: 10, total: jobs.length, pages: 1 });
     }

@@ -169,9 +169,15 @@ try {
   await desktop.getByRole("dialog").getByRole("button", { name: "Delete job" }).click();
   await completed.waitFor({ state: "detached" });
   await assertNoHorizontalOverflow(desktop, "Desktop delete flow");
+  const authenticatedState = await desktopContext.storageState();
   await desktopContext.close();
 
-  const mobileContext = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  const mobileContext = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    isMobile: true,
+    hasTouch: true,
+    storageState: authenticatedState,
+  });
   const mobile = await mobileContext.newPage();
   const mobileState = await installRoutes(mobile);
   await mobile.goto(targetUrl, { waitUntil: "networkidle" });

@@ -17,7 +17,7 @@ from app.jobs.models import Job, utc_now
 from app.jobs.repository import JobRepository
 from app.jobs.schemas import JobCreate, JobUpdate
 from app.jobs.state_machine import transition_job
-from app.jobs.types import JobStatus
+from app.jobs.types import ComputeDevice, GpuRenderMode, JobStatus
 from app.storage.database import Database
 from app.storage.jobs import JobStorage
 
@@ -141,6 +141,7 @@ class JobService:
                         engine=source.engine,
                         device=source.device,
                         gpu_ids=list(source.gpu_ids),
+                        gpu_render_mode=source.gpu_render_mode,
                         frame_mode=source.frame_mode,
                         frame_start=source.frame_start,
                         frame_end=source.frame_end,
@@ -288,6 +289,10 @@ class JobService:
         job.engine = payload.engine
         job.device = payload.device
         job.gpu_ids = list(payload.gpu_ids)
+        if payload.gpu_render_mode is not None:
+            job.gpu_render_mode = payload.gpu_render_mode
+        elif payload.device is ComputeDevice.CPU or len(payload.gpu_ids) < 2:
+            job.gpu_render_mode = GpuRenderMode.ALL_GPUS_PER_FRAME
         job.frame_mode = payload.frame_mode
         job.frame_start = payload.frame_start
         job.frame_end = payload.frame_end

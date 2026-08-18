@@ -18,7 +18,13 @@ from httpx import ASGITransport, AsyncClient
 
 from app.blender.cgroups import MemoryEvents
 from app.blender.devices import GpuDevice, GpuDiscovery, GpuScheduler
-from app.blender.runner import FailureKind, RunnerError, RunResult, SandboxRunner
+from app.blender.runner import (
+    FailureKind,
+    RunnerError,
+    RunResult,
+    SandboxRunner,
+    WorkerRunnerError,
+)
 from app.config import Environment, Settings
 from app.jobs.manager import JobManager
 from app.jobs.models import Job, utc_now
@@ -415,7 +421,13 @@ async def test_multi_gpu_job_uses_uuid_visibility_and_releases_every_gpu(
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             assert (await client.post("/api/v1/blender/versions/5.2.0/activate")).status_code == 200
             payload = job_payload("Multi GPU")
-            payload.update({"device": "OPTIX", "gpu_ids": [0, 1]})
+            payload.update(
+                {
+                    "device": "OPTIX",
+                    "gpu_ids": [0, 1],
+                    "gpu_render_mode": "ALL_GPUS_PER_FRAME",
+                }
+            )
             created = await client.post("/api/v1/jobs", json=payload)
             job_id = UUID(created.json()["id"])
             uploaded = await client.post(
@@ -433,6 +445,338 @@ async def test_multi_gpu_job_uses_uuid_visibility_and_releases_every_gpu(
         (render_settings.jobs_root / str(job_id) / "logs" / "blender.log").read_text
     )
     assert "visible-gpus=GPU-stable-a,GPU-stable-b" in raw_log
+    assert scheduler.reserved_uuids == set()
+
+
+async def test_frame_per_gpu_renders_two_frames_concurrently_with_monotonic_events(
+    render_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    devices = [
+        GpuDevice(id=0, uuid="GPU-stable-a", name="GPU A", memory_total_bytes=24 * 1024**3),
+        GpuDevice(id=1, uuid="GPU-stable-b", name="GPU B", memory_total_bytes=48 * 1024**3),
+    ]
+    monkeypatch.setattr(GpuDiscovery, "discover", lambda self: devices)
+    app = create_app(render_settings)
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            assert (await client.post("/api/v1/blender/versions/5.2.0/activate")).status_code == 200
+            payload = job_payload("Parallel frames")
+            payload.update(
+                {
+                    "device": "OPTIX",
+                    "gpu_ids": [0, 1],
+                    "frame_mode": "RANGE",
+                    "frame_start": 1,
+                    "frame_end": 2,
+                }
+            )
+            created = await client.post("/api/v1/jobs", json=payload)
+            assert created.status_code == 201
+            assert created.json()["gpu_render_mode"] == "FRAME_PER_GPU"
+            job_id = UUID(created.json()["id"])
+            assert (
+                await client.post(
+                    f"/api/v1/jobs/{job_id}/uploads",
+                    files={
+                        "file": (
+                            "scene.blend",
+                            b"BLENDER-v300 BARRIER",
+                            "application/octet-stream",
+                        )
+                    },
+                )
+            ).status_code == 200
+            subscription = await app.state.event_hub.connect()
+            await app.state.event_hub.subscribe(subscription, {job_id})
+            assert (await client.post(f"/api/v1/jobs/{job_id}/start")).status_code == 200
+            manager = cast(JobManager, app.state.job_manager)
+            completed = await manager.wait_for_terminal(job_id, max_wait_seconds=5)
+            frames = await client.get(f"/api/v1/jobs/{job_id}/frames")
+            scheduler = cast(GpuScheduler, app.state.gpu_scheduler)
+            events: list[dict[str, object]] = []
+            while not subscription.queue.empty():
+                events.append(subscription.queue.get_nowait())
+            await app.state.event_hub.disconnect(subscription)
+
+    assert completed.status is JobStatus.COMPLETED
+    assert completed.progress == 1.0
+    assert frames.json()["total"] == 2
+    assert [item["frame"] for item in frames.json()["items"]] == [1, 2]
+    job_root = render_settings.jobs_root / str(job_id)
+    first_log = (job_root / "logs" / "blender-gpu-0.log").read_text()
+    second_log = (job_root / "logs" / "blender-gpu-1.log").read_text()
+    aggregate = (job_root / "logs" / "blender.log").read_text()
+    assert "visible-gpus=GPU-stable-a" in first_log
+    assert "visible-gpus=GPU-stable-b" in second_log
+    assert "GPU-stable-a" in aggregate and "GPU-stable-b" in aggregate
+    assert sorted(path.name for path in (job_root / "output").glob("frame_*.png")) == [
+        "frame_0001.png",
+        "frame_0002.png",
+    ]
+    progress_values = [
+        float(cast(float | int, event["progress"]))
+        for event in events
+        if event["type"] == "render.progress"
+    ]
+    assert progress_values == sorted(progress_values)
+    frame_ready = [
+        cast(int, event["frame"]) for event in events if event["type"] == "render.frame_ready"
+    ]
+    assert sorted(frame_ready) == [1, 2]
+    live_logs = [event for event in events if event["type"] == "render.log"]
+    assert live_logs and all("gpu_uuid" in event for event in live_logs)
+    assert scheduler.reserved_uuids == set()
+
+
+@pytest.mark.parametrize(
+    ("frame_configuration", "scene", "expected_frames"),
+    [
+        (
+            {"frame_mode": "RANGE", "frame_start": 1, "frame_end": 7},
+            b"BLENDER-v300 STEP=2",
+            [1, 3, 5, 7],
+        ),
+        (
+            {"frame_mode": "ALL", "frame_start": None, "frame_end": None},
+            b"BLENDER-v300 SCENE_START=2 SCENE_END=8 STEP=3",
+            [2, 5, 8],
+        ),
+    ],
+)
+async def test_frame_per_gpu_respects_range_all_and_scene_step(
+    render_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    frame_configuration: dict[str, object],
+    scene: bytes,
+    expected_frames: list[int],
+) -> None:
+    devices = [
+        GpuDevice(id=0, uuid="GPU-stable-a", name="GPU A", memory_total_bytes=24 * 1024**3),
+        GpuDevice(id=1, uuid="GPU-stable-b", name="GPU B", memory_total_bytes=48 * 1024**3),
+    ]
+    monkeypatch.setattr(GpuDiscovery, "discover", lambda self: devices)
+    app = create_app(render_settings)
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            assert (await client.post("/api/v1/blender/versions/5.2.0/activate")).status_code == 200
+            payload = job_payload("Frame sequence")
+            payload.update({"device": "CUDA", "gpu_ids": [0, 1], **frame_configuration})
+            created = await client.post("/api/v1/jobs", json=payload)
+            job_id = UUID(created.json()["id"])
+            assert (
+                await client.post(
+                    f"/api/v1/jobs/{job_id}/uploads",
+                    files={"file": ("scene.blend", scene, "application/octet-stream")},
+                )
+            ).status_code == 200
+            assert (await client.post(f"/api/v1/jobs/{job_id}/start")).status_code == 200
+            manager = cast(JobManager, app.state.job_manager)
+            completed = await manager.wait_for_terminal(job_id, max_wait_seconds=5)
+            frames = await client.get(f"/api/v1/jobs/{job_id}/frames")
+
+    assert completed.status is JobStatus.COMPLETED
+    assert [item["frame"] for item in frames.json()["items"]] == expected_frames
+
+
+async def test_frame_per_gpu_single_uses_only_first_selected_gpu(
+    render_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    devices = [
+        GpuDevice(id=0, uuid="GPU-stable-a", name="GPU A", memory_total_bytes=24 * 1024**3),
+        GpuDevice(id=1, uuid="GPU-stable-b", name="GPU B", memory_total_bytes=48 * 1024**3),
+    ]
+    monkeypatch.setattr(GpuDiscovery, "discover", lambda self: devices)
+    app = create_app(render_settings)
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            assert (await client.post("/api/v1/blender/versions/5.2.0/activate")).status_code == 200
+            payload = job_payload("Single distributed")
+            payload.update({"device": "OPTIX", "gpu_ids": [0, 1]})
+            created = await client.post("/api/v1/jobs", json=payload)
+            job_id = UUID(created.json()["id"])
+            assert (
+                await client.post(
+                    f"/api/v1/jobs/{job_id}/uploads",
+                    files={"file": ("scene.blend", b"BLENDER-v300", "application/octet-stream")},
+                )
+            ).status_code == 200
+            assert (await client.post(f"/api/v1/jobs/{job_id}/start")).status_code == 200
+            manager = cast(JobManager, app.state.job_manager)
+            completed = await manager.wait_for_terminal(job_id, max_wait_seconds=5)
+
+    assert completed.status is JobStatus.COMPLETED
+    logs = render_settings.jobs_root / str(job_id) / "logs"
+    assert "visible-gpus=GPU-stable-a" in (logs / "blender-gpu-0.log").read_text()
+    assert not (logs / "blender-gpu-1.log").exists()
+
+
+async def test_frame_worker_failure_stops_peers_and_releases_all_gpus(
+    render_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    devices = [
+        GpuDevice(id=0, uuid="GPU-stable-a", name="GPU A", memory_total_bytes=24 * 1024**3),
+        GpuDevice(id=1, uuid="GPU-stable-b", name="GPU B", memory_total_bytes=48 * 1024**3),
+    ]
+    monkeypatch.setattr(GpuDiscovery, "discover", lambda self: devices)
+    app = create_app(render_settings)
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            assert (await client.post("/api/v1/blender/versions/5.2.0/activate")).status_code == 200
+            payload = job_payload("Fail one GPU")
+            payload.update(
+                {
+                    "device": "OPTIX",
+                    "gpu_ids": [0, 1],
+                    "frame_mode": "RANGE",
+                    "frame_start": 1,
+                    "frame_end": 2,
+                }
+            )
+            created = await client.post("/api/v1/jobs", json=payload)
+            job_id = UUID(created.json()["id"])
+            assert (
+                await client.post(
+                    f"/api/v1/jobs/{job_id}/uploads",
+                    files={
+                        "file": (
+                            "scene.blend",
+                            b"BLENDER-v300 FAIL_GPU=GPU-stable-b",
+                            "application/octet-stream",
+                        )
+                    },
+                )
+            ).status_code == 200
+            assert (await client.post(f"/api/v1/jobs/{job_id}/start")).status_code == 200
+            manager = cast(JobManager, app.state.job_manager)
+            failed = await manager.wait_for_terminal(job_id, max_wait_seconds=5)
+            scheduler = cast(GpuScheduler, app.state.gpu_scheduler)
+
+    assert failed.status is JobStatus.FAILED
+    assert failed.error is not None and "GPU-stable-b" in failed.error
+    child_pid = int((render_settings.jobs_root / str(job_id) / "child-gpu-0.pid").read_text())
+    await assert_process_stopped(child_pid)
+    assert scheduler.reserved_uuids == set()
+
+
+async def test_frame_worker_launch_error_releases_all_gpus(
+    render_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    devices = [
+        GpuDevice(id=0, uuid="GPU-stable-a", name="GPU A", memory_total_bytes=24 * 1024**3),
+        GpuDevice(id=1, uuid="GPU-stable-b", name="GPU B", memory_total_bytes=48 * 1024**3),
+    ]
+    monkeypatch.setattr(GpuDiscovery, "discover", lambda self: devices)
+
+    async def fail_workers(self: SandboxRunner, *args: object, **kwargs: object) -> None:
+        raise WorkerRunnerError("GPU-stable-b", "synthetic process startup error")
+
+    monkeypatch.setattr(SandboxRunner, "run_workers", fail_workers)
+    app = create_app(render_settings)
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            assert (await client.post("/api/v1/blender/versions/5.2.0/activate")).status_code == 200
+            payload = job_payload("Launch failure")
+            payload.update(
+                {
+                    "device": "CUDA",
+                    "gpu_ids": [0, 1],
+                    "frame_mode": "RANGE",
+                    "frame_start": 1,
+                    "frame_end": 2,
+                }
+            )
+            created = await client.post("/api/v1/jobs", json=payload)
+            job_id = UUID(created.json()["id"])
+            assert (
+                await client.post(
+                    f"/api/v1/jobs/{job_id}/uploads",
+                    files={"file": ("scene.blend", b"BLENDER-v300", "application/octet-stream")},
+                )
+            ).status_code == 200
+            assert (await client.post(f"/api/v1/jobs/{job_id}/start")).status_code == 200
+            manager = cast(JobManager, app.state.job_manager)
+            failed = await manager.wait_for_terminal(job_id, max_wait_seconds=5)
+            scheduler = cast(GpuScheduler, app.state.gpu_scheduler)
+
+    assert failed.status is JobStatus.FAILED
+    assert failed.error is not None and "GPU-stable-b" in failed.error
+    assert scheduler.reserved_uuids == set()
+
+
+@pytest.mark.parametrize("cancel_explicitly", [True, False])
+async def test_frame_workers_cancel_or_timeout_stop_every_process_and_release_gpus(
+    render_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    cancel_explicitly: bool,
+) -> None:
+    devices = [
+        GpuDevice(id=0, uuid="GPU-stable-a", name="GPU A", memory_total_bytes=24 * 1024**3),
+        GpuDevice(id=1, uuid="GPU-stable-b", name="GPU B", memory_total_bytes=48 * 1024**3),
+    ]
+    monkeypatch.setattr(GpuDiscovery, "discover", lambda self: devices)
+    configured = (
+        render_settings
+        if cancel_explicitly
+        else render_settings.model_copy(update={"render_timeout_seconds": 0.5})
+    )
+    app = create_app(configured)
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            assert (await client.post("/api/v1/blender/versions/5.2.0/activate")).status_code == 200
+            payload = job_payload("Stop all workers")
+            payload.update(
+                {
+                    "device": "OPTIX",
+                    "gpu_ids": [0, 1],
+                    "frame_mode": "RANGE",
+                    "frame_start": 1,
+                    "frame_end": 2,
+                }
+            )
+            created = await client.post("/api/v1/jobs", json=payload)
+            job_id = UUID(created.json()["id"])
+            assert (
+                await client.post(
+                    f"/api/v1/jobs/{job_id}/uploads",
+                    files={
+                        "file": ("scene.blend", b"BLENDER-v300 SLOW", "application/octet-stream")
+                    },
+                )
+            ).status_code == 200
+            assert (await client.post(f"/api/v1/jobs/{job_id}/start")).status_code == 200
+            await wait_for_status(client, job_id, JobStatus.RENDERING)
+            job_root = configured.jobs_root / str(job_id)
+            child_pids = [
+                int(await asyncio.to_thread(read_when_created, job_root / f"child-gpu-{index}.pid"))
+                for index in range(2)
+            ]
+            if cancel_explicitly:
+                response = await client.post(f"/api/v1/jobs/{job_id}/cancel")
+                assert response.status_code == 200
+                terminal = await cast(JobManager, app.state.job_manager).wait_for_terminal(
+                    job_id, max_wait_seconds=5
+                )
+            else:
+                terminal = await cast(JobManager, app.state.job_manager).wait_for_terminal(
+                    job_id, max_wait_seconds=5
+                )
+            scheduler = cast(GpuScheduler, app.state.gpu_scheduler)
+
+    assert terminal.status is (JobStatus.CANCELLED if cancel_explicitly else JobStatus.FAILED)
+    if not cancel_explicitly:
+        assert terminal.error is not None and "wall-time limit" in terminal.error
+    for child_pid in child_pids:
+        await assert_process_stopped(child_pid)
     assert scheduler.reserved_uuids == set()
 
 

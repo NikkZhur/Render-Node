@@ -2,30 +2,85 @@
 set -eu
 
 if [ "${1-}" = "--version" ]; then
-    printf 'Blender 5.2.0\n'
+    case "$0" in
+        */4.1.1/*) printf 'Blender 4.1.1\n' ;;
+        *) printf 'Blender 5.2.0\n' ;;
+    esac
     exit 0
 fi
 
 scene=""
+worker_index=""
+worker_count=""
+frame_mode=""
+frame_start=""
+frame_end=""
+render_frame=""
+next_value=""
 for argument in "$@"; do
+    if [ -n "$next_value" ]; then
+        case "$next_value" in
+            worker_index) worker_index="$argument" ;;
+            worker_count) worker_count="$argument" ;;
+            frame_mode) frame_mode="$argument" ;;
+            frame_start) frame_start="$argument" ;;
+            frame_end) frame_end="$argument" ;;
+            render_frame) render_frame="$argument" ;;
+        esac
+        next_value=""
+        continue
+    fi
     case "$argument" in
         */input/*.blend) scene="$argument" ;;
+        --render-node-worker-index) next_value="worker_index" ;;
+        --render-node-worker-count) next_value="worker_count" ;;
+        --render-node-frame-mode) next_value="frame_mode" ;;
+        --render-node-frame-start) next_value="frame_start" ;;
+        --render-node-frame-end) next_value="frame_end" ;;
+        --render-frame) next_value="render_frame" ;;
     esac
 done
 
-printf '%s\n' "$@" > "$PWD/logs/arguments.txt"
+argument_log="$PWD/logs/arguments.txt"
+if [ -n "$worker_index" ]; then
+    argument_log="$PWD/logs/arguments-gpu-$worker_index.txt"
+fi
+printf '%s\n' "$@" > "$argument_log"
 printf 'inherited-secret=%s\n' "${RENDER_NODE_TEST_SECRET-unset}"
 printf 'visible-gpus=%s\n' "${CUDA_VISIBLE_DEVICES-unset}"
 
 write_frame() {
+    frame="$1"
     printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=' \
-        | base64 -d > "$PWD/output/frame_0001.png"
+        | base64 -d > "$PWD/output/frame_$(printf '%04d' "$frame").png"
 }
 
-if [ -n "$scene" ] && grep -q 'SLOW' "$scene"; then
+if [ -n "$worker_index" ] && grep -q 'FAIL_GPU=' "$scene"; then
+    failing_gpu="$(sed -n 's/.*FAIL_GPU=\([^ ]*\).*/\1/p' "$scene" | head -n 1)"
+    if [ "${CUDA_VISIBLE_DEVICES-unset}" = "$failing_gpu" ]; then
+        other_index=0
+        if [ "$worker_index" = "0" ]; then
+            other_index=1
+        fi
+        while [ ! -f "$PWD/child-gpu-$other_index.pid" ]; do
+            sleep 0.02
+        done
+        printf 'Synthetic failure on %s\n' "${CUDA_VISIBLE_DEVICES-unset}"
+        exit 7
+    fi
     sleep 60 &
     child_pid="$!"
-    printf '%s' "$child_pid" > "$PWD/child.pid"
+    printf '%s' "$child_pid" > "$PWD/child-gpu-$worker_index.pid"
+    printf 'RENDER_NODE_PROGRESS 0.1 frame=1\n'
+    wait
+elif [ -n "$scene" ] && grep -q 'SLOW' "$scene"; then
+    sleep 60 &
+    child_pid="$!"
+    child_file="$PWD/child.pid"
+    if [ -n "$worker_index" ]; then
+        child_file="$PWD/child-gpu-$worker_index.pid"
+    fi
+    printf '%s' "$child_pid" > "$child_file"
     printf 'RENDER_NODE_PROGRESS 0.1 frame=1\n'
     wait
 elif [ -n "$scene" ] && grep -q 'BROWSER' "$scene"; then
@@ -33,10 +88,51 @@ elif [ -n "$scene" ] && grep -q 'BROWSER' "$scene"; then
     sleep 0.8
     printf 'RENDER_NODE_PROGRESS 0.75 frame=1\n'
     sleep 0.8
-    write_frame
+    write_frame 1
+elif [ -n "$worker_index" ]; then
+    scene_step="$(sed -n 's/.*STEP=\([0-9][0-9]*\).*/\1/p' "$scene" | head -n 1)"
+    scene_step="${scene_step:-1}"
+    if [ "$frame_mode" = "ALL" ]; then
+        frame_start="$(sed -n 's/.*SCENE_START=\([0-9][0-9]*\).*/\1/p' "$scene" | head -n 1)"
+        frame_end="$(sed -n 's/.*SCENE_END=\([0-9][0-9]*\).*/\1/p' "$scene" | head -n 1)"
+        frame_start="${frame_start:-1}"
+        frame_end="${frame_end:-4}"
+    fi
+    if [ "$frame_mode" = "SINGLE" ]; then
+        frame_start="${render_frame:-1}"
+        frame_end="$frame_start"
+        scene_step=1
+    fi
+    total=$(( (frame_end - frame_start) / scene_step + 1 ))
+    first_frame=$(( frame_start + worker_index * scene_step ))
+    worker_step=$(( scene_step * worker_count ))
+    assigned=0
+    if [ "$first_frame" -le "$frame_end" ]; then
+        assigned=$(( (frame_end - first_frame) / worker_step + 1 ))
+    fi
+    printf 'RENDER_NODE_FRAME_PLAN total=%s worker=%s assigned=%s start=%s end=%s step=%s\n' \
+        "$total" "$worker_index" "$assigned" "$frame_start" "$frame_end" "$scene_step"
+    if grep -q 'BARRIER' "$scene"; then
+        : > "$PWD/temp/worker-$worker_index.ready"
+        while [ "$(find "$PWD/temp" -maxdepth 1 -name 'worker-*.ready' | wc -l)" -lt "$worker_count" ]; do
+            sleep 0.02
+        done
+    fi
+    if grep -q "FAIL_GPU=${CUDA_VISIBLE_DEVICES-unset}" "$scene"; then
+        printf 'Synthetic failure on %s\n' "${CUDA_VISIBLE_DEVICES-unset}"
+        exit 7
+    fi
+    frame="$first_frame"
+    while [ "$frame" -le "$frame_end" ]; do
+        printf 'RENDER_NODE_PROGRESS 0.25 frame=%s\n' "$frame"
+        sleep 0.15
+        printf 'RENDER_NODE_PROGRESS 0.75 frame=%s\n' "$frame"
+        write_frame "$frame"
+        frame=$(( frame + worker_step ))
+    done
 else
     printf 'RENDER_NODE_PROGRESS 0.25 frame=1\n'
     sleep 0.15
     printf 'RENDER_NODE_PROGRESS 0.75 frame=1\n'
-    write_frame
+    write_frame 1
 fi
