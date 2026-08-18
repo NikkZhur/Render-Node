@@ -273,6 +273,32 @@ async def test_frame_pagination_is_persistent_and_bounded(render_settings: Setti
     assert [item["frame"] for item in second_page.json()["items"]] == [51]
 
 
+async def test_artifact_reconciliation_registers_a_missed_completed_frame(
+    render_settings: Settings,
+) -> None:
+    app = create_app(render_settings.model_copy(update={"render_scheduler_enabled": False}))
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            assert (await client.post("/api/v1/blender/versions/5.2.0/activate")).status_code == 200
+            created = await client.post("/api/v1/jobs", json=job_payload("Reconcile output"))
+            job_id = UUID(created.json()["id"])
+            output = render_settings.jobs_root / str(job_id) / "output"
+            first = output / "frame_0001.png"
+            second = output / "frame_0002.png"
+            await asyncio.to_thread(first.write_bytes, PNG_1X1)
+            await asyncio.to_thread(second.write_bytes, PNG_1X1)
+            await asyncio.to_thread((output / "frame_0003.tmp").write_bytes, b"partial")
+            await app.state.artifact_service.register_output(job_id, second)
+
+            registered = await app.state.artifact_service.reconcile_outputs(job_id)
+            frames = await client.get(f"/api/v1/jobs/{job_id}/frames")
+
+    assert registered == 1
+    assert frames.json()["total"] == 2
+    assert [item["frame"] for item in frames.json()["items"]] == [1, 2]
+
+
 async def test_retry_clears_previous_runtime_files_and_artifacts(
     render_settings: Settings,
     monkeypatch: pytest.MonkeyPatch,

@@ -258,6 +258,7 @@ class JobManager:
                     gpu_allocation=gpu_allocation,
                     cancellation=cancellation,
                 )
+                await self._reconcile_outputs(job_id)
                 await self._finish_from_worker_results(
                     job_id,
                     results,
@@ -290,6 +291,7 @@ class JobManager:
                     on_line=on_line,
                     on_output=on_output,
                 )
+                await self._reconcile_outputs(job_id)
                 await self._finish_from_result(job_id, result)
         except (
             RunnerError,
@@ -320,6 +322,12 @@ class JobManager:
             self._wake.set()
             if cleanup_cancellation is not None:
                 raise cleanup_cancellation
+
+    async def _reconcile_outputs(self, job_id: UUID) -> None:
+        # Artifact discovery remains best-effort: a preview/indexing problem must
+        # not change a successful Blender exit into a failed render.
+        with contextlib.suppress(Exception):
+            await self._artifacts.reconcile_outputs(job_id)
 
     async def _run_frame_workers(
         self,

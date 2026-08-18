@@ -104,8 +104,8 @@ try {
     throw new Error(`Unexpected frame download name: ${download.suggestedFilename()}`);
   }
 
-  await page.getByRole("button", { name: "Open frame sequence, 1 frames" }).click();
-  const framesDialog = page.getByRole("dialog", { name: "Frames 1–1" });
+  await page.getByRole("button", { name: "Open frame sequence, 1 frame" }).click();
+  const framesDialog = page.getByRole("dialog", { name: "Frame 1" });
   await framesDialog.getByText("frame_0001.png", { exact: true }).waitFor();
   const [zipDownload] = await Promise.all([
     page.waitForEvent("download"),

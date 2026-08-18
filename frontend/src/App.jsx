@@ -2,6 +2,7 @@ import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createPairingUrl } from "./accessBootstrap";
 import { accessApi, artifactsApi, blenderApi, devicesApi, jobsApi, systemApi } from "./api";
+import { frameSequencePresentation } from "./artifactPresentation";
 import { getLogLevel } from "./logPresentation";
 import {
   ALL_GPUS_PER_FRAME,
@@ -1769,7 +1770,7 @@ function PairDeviceDialog({ error, invitation, onClose, onRetry, pending }) {
   );
 }
 
-function FrameSequencePanel({ jobId, mockApi, onClose }) {
+function FrameSequencePanel({ jobId, mockApi, onClose, sequenceTitle }) {
   const isMockMode = mockApi !== null;
   const closeButton = useRef(null);
   const dialogRef = useDialogBehavior(onClose, closeButton);
@@ -1801,7 +1802,7 @@ function FrameSequencePanel({ jobId, mockApi, onClose }) {
         <div className="frames-modal-header">
           <div>
             <span className="eyebrow">Render sequence</span>
-            <h2 id="frames-title">Frames {totalFrames ? `1–${totalFrames}` : "—"}</h2>
+            <h2 id="frames-title">{sequenceTitle}</h2>
             <p id="frames-description">{totalFrames} {isMockMode ? "PNG files" : "files"} · {pageCount} pages</p>
           </div>
           <div className="frames-modal-actions">
@@ -1856,6 +1857,7 @@ function Artifacts({ job, mockApi }) {
   const hasMockArtifacts = isMockMode && job.id !== "draft" && job.hasArtifacts !== false;
   const frameCount = hasMockArtifacts ? mockApi.frameCount : (framesQuery.data?.total ?? 0);
   const pageCount = Math.max(1, Math.ceil(frameCount / FRAMES_PER_PAGE));
+  const sequence = frameSequencePresentation(job, framesQuery.data, frameCount);
   const logArtifact = hasMockArtifacts
     ? { filename: "blender.log", size_bytes: 284 * 1024 }
     : artifactsQuery.data?.find((artifact) => artifact.kind === "blender_log");
@@ -1867,13 +1869,13 @@ function Artifacts({ job, mockApi }) {
         <div className="artifact-list">
           {frameCount > 0 && <button
             aria-haspopup="dialog"
-            aria-label={`Open frame sequence, ${frameCount} frames`}
+            aria-label={`Open frame sequence, ${sequence.countText}`}
             className="artifact-row artifact-sequence-trigger"
             onClick={() => setFramesOpen(true)}
             type="button"
           >
             <span className="artifact-kind">SEQ</span>
-            <span><strong>frames_0001–{String(frameCount).padStart(4, "0")}</strong><small>{frameCount} frames · {pageCount} pages</small></span>
+            <span><strong>{sequence.name}</strong><small>{sequence.countText} · {pageCount} pages</small></span>
             <span className="artifact-open-icon"><Icon name="chevron" size={16} /></span>
           </button>}
           {logArtifact && <div className="artifact-row">
@@ -1889,6 +1891,7 @@ function Artifacts({ job, mockApi }) {
           jobId={job.id}
           mockApi={mockApi}
           onClose={() => setFramesOpen(false)}
+          sequenceTitle={sequence.title}
         />
       )}
     </>

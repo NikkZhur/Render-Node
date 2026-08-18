@@ -392,6 +392,14 @@
   process group, stdin password, clean child env и workflow checks gate.
   ShellCheck, system Nginx и Docker engine недоступны; реальные Pod/image/GPU
   smoke ниже остаются внешними проверками.
+- Исправлена гонка регистрации кадров: output watcher делает обязательный
+  post-exit snapshot, а Job Manager перед terminal status сверяет output с
+  artifact index. Исторический job `#92FE` восстановлен без повторного рендера:
+  API и UI снова видят кадры 1–2. Artifact sequence показывает реальные границы
+  или нейтральное количество для неизвестного/sparse диапазона. Ruff, strict
+  mypy, полный pytest (`246 passed, 1 skipped`), 29 frontend unit-тестов,
+  ESLint/build и Playwright fake-Blender runner smoke прошли; mobile screenshot
+  `Frames 1–2` просмотрен, clipping/overlap/overflow не обнаружены.
 
 ## Известные ограничения и дальнейшая работа
 

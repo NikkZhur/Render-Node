@@ -146,6 +146,34 @@ class ArtifactService:
                 downloadable=True,
             )
 
+    async def reconcile_outputs(self, job_id: UUID) -> int:
+        """Register render files that a live output notification did not observe."""
+        await self._require_job(job_id)
+        job_root = self._storage.job_directory(job_id)
+        output_root = contained_path(job_root, job_root / "output")
+        candidates = await asyncio.to_thread(lambda: sorted(output_root.iterdir()))
+        async with self._database.session_factory() as session:
+            originals = await ArtifactRepository(session).list_all_frames(
+                job_id, ArtifactKind.FRAME_ORIGINAL
+            )
+        registered_frames = {artifact.frame for artifact in originals if artifact.frame is not None}
+        registered = 0
+        for path in candidates:
+            frame = frame_number_from_output(path)
+            if (
+                frame is None
+                or frame in registered_frames
+                or path.suffix.lower() not in ORIGINAL_EXTENSIONS
+            ):
+                continue
+            try:
+                await self.register_output(job_id, path)
+            except (ArtifactRejectedError, OSError, ValueError):
+                continue
+            registered_frames.add(frame)
+            registered += 1
+        return registered
+
     async def register_log(self, job_id: UUID) -> Artifact | None:
         job_root = self._storage.job_directory(job_id)
         log_path = contained_path(job_root, job_root / "logs" / "blender.log")

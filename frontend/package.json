@@ -24,6 +24,7 @@
     "qa:sample-progress": "node scripts/qa-sample-progress.mjs",
     "qa:multi-gpu": "node scripts/qa-multi-gpu.mjs",
     "qa:render-progress": "node scripts/qa-render-progress.mjs",
+    "test:artifact-presentation": "node --test scripts/artifact-presentation.test.mjs",
     "test:render-timing": "node --test scripts/render-timing.test.mjs",
     "test:render-progress": "node --test scripts/render-progress.test.mjs",
     "test:access-security": "node --test scripts/access-security.test.mjs",

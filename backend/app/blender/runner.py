@@ -505,6 +505,7 @@ class SandboxRunner:
         observations: dict[Path, tuple[int, int]] = {}
         announced: set[Path] = set()
         while not limit_event.is_set():
+            process_closed_at_snapshot = process_task.done()
             size, unsafe, files = await asyncio.to_thread(
                 self._directory_snapshot, output_directory
             )
@@ -515,12 +516,15 @@ class SandboxRunner:
                 previous = observations.get(path)
                 stable_count = previous[1] + 1 if previous and previous[0] == file_size else 0
                 observations[path] = (file_size, stable_count)
-                is_closed = process_task.done()
-                if path not in announced and (is_closed or stable_count >= 1):
+                if path not in announced and (process_closed_at_snapshot or stable_count >= 1):
                     announced.add(path)
                     if on_output is not None:
                         await self._notify_output(on_output, path)
-            if process_task.done():
+            # A callback can spend noticeable time generating a preview while the
+            # process writes another frame and exits. Only stop after a snapshot
+            # that began with the process already closed, so that late output is
+            # observed at least once.
+            if process_closed_at_snapshot:
                 return
             await asyncio.sleep(0.2)
 

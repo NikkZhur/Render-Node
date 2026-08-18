@@ -233,6 +233,49 @@ async def test_worker_group_runs_concurrently_with_separate_logs(tmp_path: Path)
     assert "second-worker" in (tmp_path / "logs" / "blender-gpu-1.log").read_text()
 
 
+async def test_output_watcher_rescans_after_process_exits_during_callback(
+    tmp_path: Path,
+) -> None:
+    binary = executable(
+        tmp_path,
+        'printf first > "$PWD/output/frame_0001.png"\n'
+        'while [ ! -f "$PWD/output-callback.started" ]; do sleep 0.01; done\n'
+        'printf second > "$PWD/output/frame_0002.png"\n'
+        "echo PROCESS_OUTPUT_FINISHED",
+    )
+    announced: list[str] = []
+    process_output_finished = asyncio.Event()
+
+    async def on_line(line: str) -> None:
+        if line == "PROCESS_OUTPUT_FINISHED":
+            process_output_finished.set()
+
+    async def ignore_pid(pid: int) -> None:
+        pass
+
+    async def on_output(path: Path) -> None:
+        announced.append(path.name)
+        if path.name != "frame_0001.png":
+            return
+        await asyncio.to_thread((tmp_path / "output-callback.started").touch)
+        await process_output_finished.wait()
+        # Keep the callback busy until the process task has observed the exit.
+        await asyncio.sleep(0.05)
+
+    result = await runner().run(
+        command(tmp_path, binary),
+        job_id=uuid4(),
+        environment={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path / "temp")},
+        cancellation=asyncio.Event(),
+        on_started=ignore_pid,
+        on_line=on_line,
+        on_output=on_output,
+    )
+
+    assert result.exit_code == 0
+    assert announced == ["frame_0001.png", "frame_0002.png"]
+
+
 async def test_worker_failure_terminates_other_process_group(tmp_path: Path) -> None:
     (tmp_path / "failing").mkdir()
     (tmp_path / "slow").mkdir()
