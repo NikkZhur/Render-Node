@@ -2,9 +2,11 @@ import { ALL_GPUS_PER_FRAME, FRAME_PER_GPU } from "./gpuRenderMode.js";
 
 const isInteger = (value) => Number.isInteger(value);
 
-const percentage = (value, fallback = null) => typeof value === "number" && Number.isFinite(value)
-  ? Math.round(Math.min(Math.max(value, 0), 1) * 100)
-  : fallback;
+const percentage = (value, fallback = null) => {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  const normalized = Math.min(Math.max(value, 0), 1);
+  return normalized === 1 ? 100 : Math.floor(normalized * 100);
+};
 
 const mergeProgressSnapshot = (previous, event, progressField) => {
   const frame = isInteger(event.frame) ? event.frame : (previous?.frame ?? null);

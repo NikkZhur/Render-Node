@@ -145,3 +145,22 @@ test("clamps out-of-range overall progress", () => {
   assert.equal(mergeRenderProgress(undefined, { progress: 1.5 }).progress, 100);
   assert.equal(mergeRenderProgress(undefined, { progress: -0.5 }).progress, 0);
 });
+
+test("does not report a worker completed before its exact final progress", () => {
+  const almostFinished = mergeRenderProgress(undefined, {
+    gpu_uuid: "GPU-a",
+    frame: 120,
+    progress: 0.9999,
+    worker_progress: 0.9999,
+    sample: 511,
+    total_samples: 512,
+  });
+  const rows = buildProgressRows(
+    { ...baseJob, gpu_render_mode: "FRAME_PER_GPU" },
+    devices,
+    almostFinished,
+  );
+
+  assert.equal(rows.workers[0].progress, 99);
+  assert.equal(rows.workers[0].state, "Rendering");
+});

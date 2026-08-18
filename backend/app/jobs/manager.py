@@ -14,7 +14,7 @@ from app.artifacts.service import ArtifactService, frame_number_from_output
 from app.blender.cgroups import ResourceIsolationStatus
 from app.blender.command import BlenderExecutableResolver, FrameWorker, build_render_command
 from app.blender.devices import GpuAllocation, GpuReservationError, GpuScheduler
-from app.blender.progress import parse_frame_plan, parse_progress
+from app.blender.progress import FramePlan, parse_frame_plan, parse_progress
 from app.blender.repository import BlenderRepository
 from app.blender.runner import (
     FailureKind,
@@ -70,12 +70,29 @@ class _WorkerProgress:
 
 @dataclass(slots=True)
 class _DistributedProgress:
+    worker_ids: tuple[str, ...]
     total_frames: int | None = None
     completed_frames: set[int] = field(default_factory=set)
     active_frames: dict[str, tuple[int, float]] = field(default_factory=dict)
     workers: dict[str, _WorkerProgress] = field(default_factory=dict)
+    frame_plans: dict[str, FramePlan] = field(default_factory=dict)
     registered_outputs: set[Path] = field(default_factory=set)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    def worker_for_frame(self, frame_number: int) -> str | None:
+        if len(self.worker_ids) == 1:
+            return self.worker_ids[0]
+        worker_count = len(self.worker_ids)
+        for worker_id, plan in self.frame_plans.items():
+            first_frame = plan.start + plan.worker * plan.step
+            worker_step = plan.step * worker_count
+            if (
+                worker_step > 0
+                and first_frame <= frame_number <= plan.end
+                and (frame_number - first_frame) % worker_step == 0
+            ):
+                return worker_id
+        return None
 
     def overall(self) -> float | None:
         if not self.total_frames:
@@ -338,8 +355,10 @@ class JobManager:
         cancellation: asyncio.Event,
     ) -> tuple[WorkerRunResult, ...]:
         worker_count = self._frame_worker_count(job, len(gpu_allocation.devices))
+        worker_ids = tuple(device.uuid for device in gpu_allocation.devices[:worker_count])
         tracker = _DistributedProgress(
-            total_frames=1 if job.frame_mode is FrameMode.SINGLE else None
+            worker_ids=worker_ids,
+            total_frames=1 if job.frame_mode is FrameMode.SINGLE else None,
         )
         aggregate_log = _AggregateLog(self._jobs_root / str(job.id) / "logs" / "blender.log")
         await aggregate_log.reset()
@@ -376,12 +395,11 @@ class JobManager:
                     line=line,
                 )
 
-            async def on_output(path: Path, *, worker_id: str = device.uuid) -> None:
+            async def on_output(path: Path) -> None:
                 await self._record_distributed_output(
                     job.id,
                     tracker,
                     path,
-                    worker_id=worker_id,
                 )
 
             workers.append(
@@ -516,11 +534,23 @@ class JobManager:
             async with tracker.lock:
                 if tracker.total_frames is not None and tracker.total_frames != plan.total:
                     raise RuntimeError("GPU workers reported inconsistent frame ranges")
+                reference_plan = next(iter(tracker.frame_plans.values()), None)
+                if reference_plan is not None and (
+                    plan.start,
+                    plan.end,
+                    plan.step,
+                ) != (
+                    reference_plan.start,
+                    reference_plan.end,
+                    reference_plan.step,
+                ):
+                    raise RuntimeError("GPU workers reported inconsistent frame plans")
                 tracker.total_frames = plan.total
                 worker = tracker.workers.setdefault(worker_id, _WorkerProgress())
                 if worker.assigned_frames is not None and worker.assigned_frames != plan.assigned:
                     raise RuntimeError(f"GPU {worker_id} reported an inconsistent frame plan")
                 worker.assigned_frames = plan.assigned
+                tracker.frame_plans[worker_id] = plan
             return
         try:
             update = parse_progress(line)
@@ -566,8 +596,6 @@ class JobManager:
         job_id: UUID,
         tracker: _DistributedProgress,
         path: Path,
-        *,
-        worker_id: str,
     ) -> None:
         frame_number = frame_number_from_output(path)
         if frame_number is None:
@@ -577,15 +605,18 @@ class JobManager:
                 return
             tracker.registered_outputs.add(path)
             tracker.completed_frames.add(frame_number)
-            worker = tracker.workers.setdefault(worker_id, _WorkerProgress())
-            worker.complete_frame(frame_number)
+            worker_id = tracker.worker_for_frame(frame_number)
+            worker_progress = None
+            if worker_id is not None:
+                worker = tracker.workers.setdefault(worker_id, _WorkerProgress())
+                worker.complete_frame(frame_number)
+                worker_progress = worker.overall()
             tracker.active_frames = {
-                worker_id: active
-                for worker_id, active in tracker.active_frames.items()
+                active_worker_id: active
+                for active_worker_id, active in tracker.active_frames.items()
                 if active[0] != frame_number
             }
             overall = tracker.overall()
-            worker_progress = worker.overall()
             persisted_progress, current_frame, changed = await self._persist_progress(
                 job_id,
                 frame=frame_number,
@@ -593,16 +624,17 @@ class JobManager:
             )
         await self._artifacts.register_output(job_id, path)
         if changed:
-            await self._events.publish(
-                "render.progress",
-                job_id=str(job_id),
-                gpu_uuid=worker_id,
-                frame=current_frame,
-                sample=None,
-                total_samples=None,
-                progress=persisted_progress,
-                worker_progress=worker_progress,
-            )
+            event: dict[str, object] = {
+                "job_id": str(job_id),
+                "frame": current_frame,
+                "sample": None,
+                "total_samples": None,
+                "progress": persisted_progress,
+            }
+            if worker_id is not None and worker_progress is not None:
+                event["gpu_uuid"] = worker_id
+                event["worker_progress"] = worker_progress
+            await self._events.publish("render.progress", **event)
 
     async def _persist_progress(
         self,
