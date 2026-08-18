@@ -123,10 +123,26 @@ elif [ -n "$worker_index" ]; then
         exit 7
     fi
     frame="$first_frame"
+    worker_delay="0.15"
+    if grep -q 'UNEQUAL' "$scene"; then
+        if [ "$worker_index" = "0" ]; then
+            worker_delay="0.03"
+        else
+            worker_delay="0.3"
+        fi
+    fi
     while [ "$frame" -le "$frame_end" ]; do
-        printf 'RENDER_NODE_PROGRESS 0.25 frame=%s\n' "$frame"
-        sleep 0.15
-        printf 'RENDER_NODE_PROGRESS 0.75 frame=%s\n' "$frame"
+        if grep -q 'SAMPLES' "$scene"; then
+            printf 'Fra:%s | Sample 128/512\n' "$frame"
+        else
+            printf 'RENDER_NODE_PROGRESS 0.25 frame=%s\n' "$frame"
+        fi
+        sleep "$worker_delay"
+        if grep -q 'SAMPLES' "$scene"; then
+            printf 'Fra:%s | Sample 384/512\n' "$frame"
+        else
+            printf 'RENDER_NODE_PROGRESS 0.75 frame=%s\n' "$frame"
+        fi
         write_frame "$frame"
         frame=$(( frame + worker_step ))
     done

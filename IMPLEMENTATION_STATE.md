@@ -5,8 +5,9 @@
 
 ## Текущее состояние
 
-- Обновлено: 2026-08-18 после полной реализации multi-GPU распределения кадров;
-  first-browser pairing, same-origin и always-local runner сохранены.
+- Обновлено: 2026-08-18 после реализации duration, ETA и адаптивного multi-GPU
+  progress; frame distribution, first-browser pairing, same-origin и
+  always-local runner сохранены.
 - Фазы 1–6 из `BACKEND_IMPLEMENTATION_MASTER_PROMPT.md` завершены.
 - Следующей фазы в master prompt нет; дальнейшая работа — отдельные deployment
   задачи, перечисленные ниже.
@@ -184,6 +185,15 @@
   artifacts дедуплицируются до preview/frame-ready событий. Frontend selector
   показывается только для CUDA/OptiX с двумя GPU, нормализует несовместимые
   конфигурации и сохраняет режим через save/retry/rerender/reload.
+- Jobs вычисляет running/terminal duration из существующих `started_at` и
+  `finished_at`. Current task показывает elapsed и приблизительную ETA из
+  authoritative overall progress с порогом 5 секунд/2%, EWMA `alpha=0.2`,
+  монотонным progress и секундным sampling; transient ETA в БД не хранится.
+- `FRAME_PER_GPU` публикует additive `worker_progress` по стабильному
+  `gpu_uuid`; frontend показывает отдельные фактические worker rows и Overall.
+  `ALL_GPUS_PER_FRAME` показывает одну строку `All GPUs`. До четырёх worker rows
+  растут вверх за счёт Preview, затем прокручиваются внутри неизменной внешней
+  центральной панели.
 
 ## Контракты и миграции
 
@@ -219,8 +229,10 @@
   пользовательское `message`, а также additive `runner.isolation` с mode,
   backend/cgroup version, лимитами, feature support и диагностикой; изменения
   схемы БД не потребовалось.
-- Схема `render.progress` не менялась: frontend начал использовать уже
-  существующие optional поля `frame`, `sample`, `total_samples` и `progress`.
+- Схема `render.progress` обратно совместимо расширена optional
+  `worker_progress` только для GPU-tagged independent-worker snapshot. Поля
+  `frame`, `sample`, `total_samples` и монотонный overall `progress` сохранены;
+  отдельный REST endpoint и persistence transient progress не добавлялись.
 - Конфигурационного scene-trust gate больше нет; capability mode всегда `local`,
   а `available=false` означает реальную недоступность scheduler/resource
   isolation, не необходимость ручного включения. Миграция БД не требуется.
@@ -238,6 +250,16 @@
 
 ## Последняя проверка
 
+- Duration/ETA/adaptive progress: backend Ruff format/check, strict mypy
+  `app tests`, полный pytest (`244 passed, 1 skipped`) и `alembic check` успешны;
+  миграция не потребовалась. Frontend ESLint, 26 Node unit/contract tests и
+  production build успешны. Playwright `qa:render-progress`, `qa:smoke`,
+  `qa:jobs` и временный full-stack `qa:runner` с fake Blender успешны.
+  Desktop/mobile FRAME_PER_GPU, desktop All GPUs и runner screenshots
+  просмотрены: Preview/Current task, worker bars, Overall, controls и Jobs
+  помещаются без clipping, overlap и horizontal overflow; внешняя центральная
+  панель стабильна. Порты 5173/8000/8080 освобождены, временный workspace удалён.
+  Настоящий Blender/CUDA/OptiX smoke не запускался.
 - Multi-GPU: backend Ruff format/check, strict mypy `app tests`, полный pytest
   (`244 passed, 1 skipped`) и полный Alembic cycle
   `upgrade/current/check/downgrade/upgrade` успешны. Integration-тесты на fake

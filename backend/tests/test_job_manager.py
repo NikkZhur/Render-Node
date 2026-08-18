@@ -435,16 +435,26 @@ async def test_multi_gpu_job_uses_uuid_visibility_and_releases_every_gpu(
                 files={"file": ("scene.blend", b"BLENDER-v300 FAST", "application/octet-stream")},
             )
             assert uploaded.status_code == 200
+            subscription = await app.state.event_hub.connect()
+            await app.state.event_hub.subscribe(subscription, {job_id})
             assert (await client.post(f"/api/v1/jobs/{job_id}/start")).status_code == 200
             manager = cast(JobManager, app.state.job_manager)
             completed = await manager.wait_for_terminal(job_id, max_wait_seconds=3)
             scheduler = cast(GpuScheduler, app.state.gpu_scheduler)
+            events: list[dict[str, object]] = []
+            while not subscription.queue.empty():
+                events.append(subscription.queue.get_nowait())
+            await app.state.event_hub.disconnect(subscription)
 
     assert completed.status is JobStatus.COMPLETED
     raw_log = await asyncio.to_thread(
         (render_settings.jobs_root / str(job_id) / "logs" / "blender.log").read_text
     )
     assert "visible-gpus=GPU-stable-a,GPU-stable-b" in raw_log
+    joint_progress = [event for event in events if event["type"] == "render.progress"]
+    assert joint_progress
+    assert all("worker_progress" not in event for event in joint_progress)
+    assert all("gpu_uuid" not in event for event in joint_progress)
     assert scheduler.reserved_uuids == set()
 
 
@@ -482,7 +492,7 @@ async def test_frame_per_gpu_renders_two_frames_concurrently_with_monotonic_even
                     files={
                         "file": (
                             "scene.blend",
-                            b"BLENDER-v300 BARRIER",
+                            b"BLENDER-v300 BARRIER UNEQUAL SAMPLES",
                             "application/octet-stream",
                         )
                     },
@@ -521,10 +531,35 @@ async def test_frame_per_gpu_renders_two_frames_concurrently_with_monotonic_even
         if event["type"] == "render.progress"
     ]
     assert progress_values == sorted(progress_values)
+    progress_events = [event for event in events if event["type"] == "render.progress"]
+    assert progress_events
+    assert all(
+        event.get("gpu_uuid") in {"GPU-stable-a", "GPU-stable-b"}
+        and isinstance(event.get("worker_progress"), int | float)
+        for event in progress_events
+    )
+    for gpu_uuid, expected_frame in (("GPU-stable-a", 1), ("GPU-stable-b", 2)):
+        worker_events = [event for event in progress_events if event["gpu_uuid"] == gpu_uuid]
+        assert worker_events
+        assert {event["frame"] for event in worker_events} == {expected_frame}
+        worker_values = [
+            float(cast(float | int, event["worker_progress"])) for event in worker_events
+        ]
+        assert worker_values == sorted(worker_values)
+        sample_events = [event for event in worker_events if event["sample"] is not None]
+        assert sample_events
+        assert all(event["total_samples"] == 512 for event in sample_events)
+    first_finished = next(
+        event
+        for event in progress_events
+        if event["gpu_uuid"] == "GPU-stable-a" and event["worker_progress"] == 1.0
+    )
+    assert float(cast(float | int, first_finished["progress"])) < 1.0
     frame_ready = [
         cast(int, event["frame"]) for event in events if event["type"] == "render.frame_ready"
     ]
     assert sorted(frame_ready) == [1, 2]
+    assert len(frame_ready) == len(set(frame_ready))
     live_logs = [event for event in events if event["type"] == "render.log"]
     assert live_logs and all("gpu_uuid" in event for event in live_logs)
     assert scheduler.reserved_uuids == set()
@@ -605,14 +640,24 @@ async def test_frame_per_gpu_single_uses_only_first_selected_gpu(
                     files={"file": ("scene.blend", b"BLENDER-v300", "application/octet-stream")},
                 )
             ).status_code == 200
+            subscription = await app.state.event_hub.connect()
+            await app.state.event_hub.subscribe(subscription, {job_id})
             assert (await client.post(f"/api/v1/jobs/{job_id}/start")).status_code == 200
             manager = cast(JobManager, app.state.job_manager)
             completed = await manager.wait_for_terminal(job_id, max_wait_seconds=5)
+            events: list[dict[str, object]] = []
+            while not subscription.queue.empty():
+                events.append(subscription.queue.get_nowait())
+            await app.state.event_hub.disconnect(subscription)
 
     assert completed.status is JobStatus.COMPLETED
     logs = render_settings.jobs_root / str(job_id) / "logs"
     assert "visible-gpus=GPU-stable-a" in (logs / "blender-gpu-0.log").read_text()
     assert not (logs / "blender-gpu-1.log").exists()
+    progress_events = [event for event in events if event["type"] == "render.progress"]
+    assert progress_events
+    assert {event["gpu_uuid"] for event in progress_events} == {"GPU-stable-a"}
+    assert all(isinstance(event.get("worker_progress"), int | float) for event in progress_events)
 
 
 async def test_frame_worker_failure_stops_peers_and_releases_all_gpus(

@@ -35,8 +35,11 @@ isolated worker if a shared render service is needed later.
 - per-GPU raw Blender logs plus a prefixed, downloadable aggregate
   `blender.log`;
 - WebSocket job/progress/log/preview/operation/metrics events with REST resync;
-- live Current task progress with the current frame and Blender sample count
-  parsed from real `Fra:… | Sample X/Y` output;
+- live Current task progress with elapsed time, approximate smoothed ETA, the
+  current frame, and Blender sample count parsed from real
+  `Fra:… | Sample X/Y` output;
+- render duration in Jobs, independent per-GPU worker bars plus Overall for
+  `FRAME_PER_GPU`, and one truthful `All GPUs` bar for a shared process;
 - persistent preview/original frame metadata, frame pages capped at 50, and
   disk-built frame ZIP downloads;
 - real preview, log overlay, jobs, artifacts, CPU/GPU/storage metrics, and
@@ -227,6 +230,13 @@ jobs normalize to all-GPUs-per-frame. The frontend exposes the two-way selector
 only when frame distribution is valid and preserves the saved mode across
 update, retry, rerender, and reload.
 
+Jobs derives render duration from the existing UTC `started_at` and
+`finished_at` fields: active renders use the current browser time, while a
+terminal duration is fixed. Current task computes ETA in the browser from the
+authoritative overall `progress` and `started_at`, waits for at least five
+seconds and 2% progress, then applies an EWMA with alpha `0.2`. The estimate is
+approximate, sampled at most once per second, and is not stored in SQLite.
+
 Open [http://localhost:8000/health](http://localhost:8000/health) for liveness,
 [http://localhost:8000/ready](http://localhost:8000/ready) for SQLite readiness,
 and [http://localhost:8000/docs](http://localhost:8000/docs) for Swagger UI.
@@ -328,6 +338,17 @@ and raw-log byte budget. A trusted Blender adapter partitions the scene's real
 cancel, timeout, or output/log limit stops every peer before the reservation is
 released. Progress is the locked aggregate of completed and active worker
 fractions; duplicate output notifications register and publish one artifact.
+Each GPU-tagged `render.progress` event in this mode also carries additive
+`worker_progress` for that stable `gpu_uuid`; the existing `progress`, `frame`,
+`sample`, and `total_samples` fields remain backward compatible. Transient
+worker snapshots are not persisted: after reload REST restores Overall and the
+next live event restores a worker row.
+
+The Current task panel keeps the central panel's outer height fixed. Independent
+worker rows (at most four visible before internal scrolling) grow upward and
+reduce Preview; progress updates do not move Jobs, Artifacts, Job Setup, metrics,
+or the footer. `ALL_GPUS_PER_FRAME` displays one shared `All GPUs` row because
+its selected devices belong to one Blender process.
 
 Cleanup is conservative and explicit:
 
@@ -371,6 +392,7 @@ npm run dev:mock
 # In another terminal:
 npm run qa:smoke
 npm run qa:multi-gpu
+npm run qa:render-progress
 npm run qa:versions-empty
 ```
 
@@ -386,6 +408,9 @@ checks scene upload, `READY`, and persistence after reload. `npm run qa:runner`
 uses fake Blender to check WebSocket progress/logs, preview and full-frame
 delivery, frame/ZIP downloads, artifact recovery after reload, metrics, and
 process-group cancellation.
+`npm run qa:render-progress` covers running/fixed duration, ETA, CPU/single-bar,
+independent worker/Overall and shared-process layouts, desktop/mobile geometry,
+overflow, and progressbar accessibility.
 
 ## Current Repository Structure
 

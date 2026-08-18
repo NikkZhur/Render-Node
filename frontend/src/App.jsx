@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createPairingUrl } from "./accessBootstrap";
 import { accessApi, artifactsApi, blenderApi, devicesApi, jobsApi, systemApi } from "./api";
@@ -9,6 +9,13 @@ import {
   normalizeGpuRenderMode,
   supportsFramePerGpu,
 } from "./gpuRenderMode";
+import { buildProgressRows } from "./renderProgress";
+import {
+  EtaSmoother,
+  formatDuration,
+  renderDurationSeconds,
+  renderTimingPresentation,
+} from "./renderTiming";
 import { useRenderEvents } from "./realtime";
 import { useUiStore } from "./store";
 
@@ -102,6 +109,56 @@ function getInitialTheme() {
   const storedTheme = window.localStorage.getItem("render-node-theme");
   if (storedTheme === "light" || storedTheme === "dark") return storedTheme;
   return "dark";
+}
+
+function useSecondClock(active) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const immediate = window.setTimeout(() => setNow(Date.now()), 0);
+    if (!active) return undefined;
+    const interval = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => {
+      window.clearTimeout(immediate);
+      window.clearInterval(interval);
+    };
+  }, [active]);
+
+  return now;
+}
+
+function useRenderTiming(job) {
+  const [timingState, setTimingState] = useState(() => {
+    const smoother = new EtaSmoother();
+    return {
+      smoother,
+      timing: renderTimingPresentation(job, Date.now(), smoother),
+    };
+  });
+  const updateTiming = useEffectEvent(() => {
+    setTimingState((current) => {
+      const smoother = new EtaSmoother(current.smoother.alpha);
+      smoother.key = current.smoother.key;
+      smoother.monotonicProgress = current.smoother.monotonicProgress;
+      smoother.smoothedRemaining = current.smoother.smoothedRemaining;
+      return {
+        smoother,
+        timing: renderTimingPresentation(job, Date.now(), smoother),
+      };
+    });
+  });
+
+  useEffect(() => {
+    const immediate = window.setTimeout(updateTiming, 0);
+    if (job.status !== "rendering") return () => window.clearTimeout(immediate);
+    const interval = window.setInterval(updateTiming, 1000);
+    return () => {
+      window.clearTimeout(immediate);
+      window.clearInterval(interval);
+    };
+  }, [job.id, job.finished_at, job.started_at, job.status]);
+
+  return timingState.timing;
 }
 
 function Icon({ name, size = 18 }) {
@@ -878,7 +935,54 @@ function FramePreviewModal({ frameNumber, imageUrl, onClose }) {
   );
 }
 
-function RenderPreview({ isMockMode, job, liveLogs = [], mockLogLines = [], sampleProgress = null }) {
+function ProgressTrack({ accessibleLabel, progress }) {
+  return (
+    <div
+      aria-label={`${accessibleLabel} ${progress}%`}
+      aria-valuemax="100"
+      aria-valuemin="0"
+      aria-valuenow={progress}
+      className="progress-track"
+      role="progressbar"
+    >
+      <span style={{ width: `${progress}%` }} />
+    </div>
+  );
+}
+
+function ProgressRow({ row, timing = null, tone = "worker" }) {
+  const samples = Number.isInteger(row.sample) && Number.isInteger(row.totalSamples)
+    ? `${row.sample} / ${row.totalSamples}`
+    : "—";
+  const title = row.gpuUuid
+    ? `${row.label} · ${row.deviceName} · ${row.gpuUuid}`
+    : row.label;
+
+  return (
+    <div className={`progress-row progress-row-${tone}`} data-progress-row={row.key}>
+      <div className="progress-row-copy">
+        <span className="progress-row-identity" title={title}>
+          <strong>{row.label}</strong>
+          <small>{row.state}</small>
+        </span>
+        <span className="progress-row-detail">
+          <span><small>FRAME</small>{row.frame ?? "—"}</span>
+          <span><small>SAMPLES</small>{samples}</span>
+        </span>
+        {timing && (
+          <span className="progress-row-timing">
+            <span><small>ELAPSED</small>{timing.elapsed}</span>
+            <span><small>ETA</small>{timing.remaining}</span>
+          </span>
+        )}
+        <b>{row.progress}%</b>
+      </div>
+      <ProgressTrack accessibleLabel={row.accessibleLabel} progress={row.progress} />
+    </div>
+  );
+}
+
+function RenderPreview({ devices = [], isMockMode, job, liveLogs = [], mockLogLines = [], sampleProgress = null }) {
   const [frameOpen, setFrameOpen] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
   const [logPanelOpen, setLogPanelOpen] = useState(false);
@@ -890,6 +994,7 @@ function RenderPreview({ isMockMode, job, liveLogs = [], mockLogLines = [], samp
   const logToggleRef = useRef(null);
   const followLogTailRef = useRef(true);
   const isRendering = job.status === "rendering";
+  const timing = useRenderTiming(job);
   const canLoadOutput = !isMockMode && job.id !== "draft";
   const framesQuery = useQuery({
     queryKey: ["frames", job.id, 1, FRAMES_PER_PAGE],
@@ -924,6 +1029,7 @@ function RenderPreview({ isMockMode, job, liveLogs = [], mockLogLines = [], samp
     && Number.isInteger(sampleProgress?.totalSamples)
     ? `${sampleProgress.sample} / ${sampleProgress.totalSamples}`
     : "—";
+  const progressRows = buildProgressRows(job, devices, sampleProgress);
   const frameNumber = String(currentFrame).padStart(3, "0");
   const rawDisplayedLogs = isMockMode
     ? mockLogLines
@@ -1098,22 +1204,53 @@ function RenderPreview({ isMockMode, job, liveLogs = [], mockLogLines = [], samp
           )}
         </div>
 
-        <div className="render-progress-block">
-          <div className="render-progress-copy">
-            <div>
-              <span className="eyebrow">Current task</span>
-              <strong>{currentTask}</strong>
-            </div>
-            <div className="progress-stats">
-              <span className="progress-stat-frame"><small>FRAME</small>{isRendering ? currentFrame : "—"}</span>
-              <span className="progress-stat-samples"><small>SAMPLES</small>{shownSamples}</span>
-              <span className="progress-stat-state"><small>STATE</small>{job.status}</span>
-              <b>{shownProgress}%</b>
-            </div>
-          </div>
-          <div className="progress-track" aria-label={`Render progress ${shownProgress}%`}>
-            <span style={{ width: `${shownProgress}%` }} />
-          </div>
+        <div className={`render-progress-block render-progress-${progressRows.kind}`}>
+          {progressRows.kind === "single" ? (
+            <>
+              <div className="render-progress-copy">
+                <div className="current-task-copy">
+                  <span className="eyebrow">Current task</span>
+                  <strong>{currentTask}</strong>
+                  <span className="current-task-timing">
+                    <span><small>ELAPSED</small>{timing.elapsed}</span>
+                    <span><small>ETA</small>{timing.remaining}</span>
+                  </span>
+                </div>
+                <div className="progress-stats">
+                  <span className="progress-stat-frame"><small>FRAME</small>{isRendering ? currentFrame : "—"}</span>
+                  <span className="progress-stat-samples"><small>SAMPLES</small>{shownSamples}</span>
+                  <span className="progress-stat-state"><small>STATE</small>{job.status}</span>
+                  <b>{shownProgress}%</b>
+                </div>
+              </div>
+              <ProgressTrack accessibleLabel="Render progress" progress={shownProgress} />
+            </>
+          ) : (
+            <>
+              <div className="render-progress-heading">
+                <div>
+                  <span className="eyebrow">Current task</span>
+                  <strong>{currentTask}</strong>
+                </div>
+                <span className="render-progress-strategy">
+                  {progressRows.kind === "distributed" ? "Frame per GPU" : "Shared process"}
+                </span>
+              </div>
+              <div className={`worker-progress-list worker-progress-list-${progressRows.kind}`}>
+                {progressRows.workers.map((row) => (
+                  <ProgressRow
+                    key={row.key}
+                    row={row}
+                    timing={progressRows.kind === "all-gpus" ? timing : null}
+                    tone={progressRows.kind === "all-gpus" ? "joint" : "worker"}
+                  />
+                ))}
+              </div>
+              {progressRows.overall && (
+                <ProgressRow row={progressRows.overall} timing={timing} tone="overall" />
+              )}
+            </>
+          )}
           {job.error && <p className="render-error" role="alert">{job.error}</p>}
         </div>
       </section>
@@ -1141,6 +1278,7 @@ function JobQueue({
   pages,
   selectedJobId,
   total,
+  now,
 }) {
   const [revealedJobId, setRevealedJobId] = useState(null);
   const pointerStart = useRef(null);
@@ -1202,6 +1340,7 @@ function JobQueue({
         {jobs.map((job) => {
           const active = job.status === "queued" || job.status === "rendering";
           const revealed = revealedJobId === job.id;
+          const duration = formatDuration(renderDurationSeconds(job, now));
           return (
             <div className={`job-row-shell ${revealed ? "delete-revealed" : ""}`} key={job.id}>
               <button
@@ -1250,7 +1389,17 @@ function JobQueue({
                     <span className="job-detail">{job.engine} · {job.device} · {job.frame}</span>
                     <span className="job-bottom-line">
                       <StatusBadge status={job.status} />
-                      <small>{job.created}</small>
+                      <small className="job-timing">
+                        <span>{job.created}</span>
+                        <span aria-hidden="true"> · </span>
+                        <span
+                          aria-label={`Render duration ${duration}`}
+                          className="job-duration"
+                          title={`Render duration: ${duration}`}
+                        >
+                          {duration}
+                        </span>
+                      </small>
                     </span>
                     {job.status === "rendering" && (
                       <span className="job-mini-progress"><i style={{ width: `${job.progress}%` }} /></span>
@@ -2179,6 +2328,7 @@ export default function App({ mockApi = null }) {
     : (jobs.find((job) => job.id === selectedJobId) ?? jobs[0] ?? null);
   const setupJob = selectedJob ?? { ...draftJob, version: activeVersion };
   const isRendering = jobs.some((job) => job.status === "rendering");
+  const clockNow = useSecondClock(isRendering);
   const hasActiveJob = jobs.some((job) => job.status === "queued" || job.status === "rendering");
   const metricDevices = isMockMode ? (devicesQuery.data ?? []) : (metricsQuery.data?.devices ?? []);
   const processors = isMockMode ? (processorsQuery.data ?? []) : (metricsQuery.data?.processors ?? []);
@@ -2213,6 +2363,7 @@ export default function App({ mockApi = null }) {
             progress: nextProgress,
             status: nextProgress >= 100 ? "completed" : "rendering",
             created: nextProgress >= 100 ? "Completed now" : job.created,
+            finished_at: nextProgress >= 100 ? new Date().toISOString() : null,
           };
         }),
       );
@@ -2222,12 +2373,32 @@ export default function App({ mockApi = null }) {
 
   const displayJob = setupJob;
   const sampleProgress = isMockMode && displayJob.status === "rendering"
-    ? {
-        frame: displayJob.current_frame ?? displayJob.frame_start ?? null,
-        progress: displayJob.progress,
-        sample: Math.round((displayJob.progress / 100) * 512),
-        totalSamples: 512,
-      }
+    ? (() => {
+        const selectedDevices = (displayJob.gpu_ids ?? [])
+          .map((gpuId) => (devicesQuery.data ?? []).find((device) => device.id === gpuId))
+          .filter(Boolean);
+        const workersByGpu = displayJob.gpu_render_mode === FRAME_PER_GPU
+          ? Object.fromEntries(selectedDevices.map((device, index) => {
+              const workerProgress = Math.min(
+                100,
+                Math.max(0, displayJob.progress + (index === 0 ? 14 : -9)),
+              );
+              return [device.uuid, {
+                frame: (displayJob.frame_start ?? 1) + index,
+                progress: workerProgress,
+                sample: Math.round((workerProgress / 100) * 512),
+                totalSamples: 512,
+              }];
+            }))
+          : {};
+        return {
+          frame: displayJob.current_frame ?? displayJob.frame_start ?? null,
+          progress: displayJob.progress,
+          sample: Math.round((displayJob.progress / 100) * 512),
+          totalSamples: 512,
+          workersByGpu,
+        };
+      })()
     : realtime.progressByJob[displayJob.id] ?? null;
 
   const saveJob = async (jobId, configuration) => {
@@ -2273,6 +2444,8 @@ export default function App({ mockApi = null }) {
       status: "rendering",
       progress: 12,
       created: "Running now",
+      started_at: new Date(Date.now() - 8_000).toISOString(),
+      finished_at: null,
     };
     setMockJobs((currentJobs) => currentJobs.map((job) => job.id === jobId ? updated : job));
     setSelectedJobId(jobId);
@@ -2282,7 +2455,9 @@ export default function App({ mockApi = null }) {
   const cancelRender = async (jobId) => {
     if (!isMockMode) return cancelJobMutation.mutateAsync(jobId);
     setMockJobs((currentJobs) => currentJobs.map((job) =>
-      job.id === jobId ? { ...job, status: "cancelled", created: "Cancelled now" } : job));
+      job.id === jobId
+        ? { ...job, status: "cancelled", created: "Cancelled now", finished_at: new Date().toISOString() }
+        : job));
     return undefined;
   };
 
@@ -2300,6 +2475,8 @@ export default function App({ mockApi = null }) {
       current_frame: null,
       created: "Just now",
       hasArtifacts: false,
+      started_at: null,
+      finished_at: null,
     };
     setMockJobs((currentJobs) => [rerendered, ...currentJobs]);
     setSelectedJobId(id);
@@ -2412,6 +2589,7 @@ export default function App({ mockApi = null }) {
             versionsLoading={versionsQuery.isPending}
           />
           <RenderPreview
+            devices={devicesQuery.data ?? []}
             isMockMode={isMockMode}
             job={displayJob}
             liveLogs={realtime.logsByJob[displayJob.id] ?? []}
@@ -2435,6 +2613,7 @@ export default function App({ mockApi = null }) {
               pages={jobPages}
               selectedJobId={creatingNewJob ? "new" : selectedJob?.id}
               total={jobTotal}
+              now={clockNow}
             />
             <Artifacts job={displayJob} mockApi={mockApi} />
           </div>

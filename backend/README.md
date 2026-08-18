@@ -106,12 +106,21 @@ Render lifecycle:
   `logs/blender.log` aggregate prefixes each line with its stable GPU UUID, as do
   live log events;
 - `GET /api/v1/jobs/{id}` exposes persisted progress and process state;
+- Job responses already expose UTC `started_at` and `finished_at`; render
+  duration is derived from those fields and requires no stored duration column;
 - Blender 4.1 progress lines such as `Fra:1 ... | Sample 48/512` update both
   persisted overall frame-range progress and the existing WebSocket
   `sample`/`total_samples` fields; unrecognized log lines remain non-fatal;
 - concurrent worker progress is serialized into one monotonic job value.
-  Output paths are de-duplicated so a frame artifact, preview event, and
-  `render.frame_ready` event are emitted once;
+  GPU-tagged `render.progress` events for `FRAME_PER_GPU` add numeric
+  `worker_progress` scoped to the event's stable `gpu_uuid`. It includes that
+  worker's completed assigned frames plus its current-frame sample fraction;
+  `progress` remains the authoritative overall value used by existing clients;
+  `ALL_GPUS_PER_FRAME` keeps the original joint-process event without a false
+  per-device snapshot. Worker progress is transient and is not written to
+  SQLite or exposed through a new REST endpoint. Output paths are de-duplicated
+  so a frame artifact, preview event, and `render.frame_ready` event are emitted
+  once;
 - `POST /api/v1/jobs/{id}/cancel` stops the whole process group before persisting
   `cancelled`;
 - cgroup `memory.events` distinguishes actual system-RAM OOM from Blender/CUDA

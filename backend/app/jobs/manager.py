@@ -36,10 +36,44 @@ from app.storage.database import Database
 
 
 @dataclass(slots=True)
+class _WorkerProgress:
+    assigned_frames: int | None = None
+    completed_frames: set[int] = field(default_factory=set)
+    active_frame: int | None = None
+    frame_progress: float = 0.0
+
+    def record_frame(self, frame_number: int, frame_progress: float) -> None:
+        if self.active_frame is not None and self.active_frame != frame_number:
+            self.completed_frames.add(self.active_frame)
+            self.frame_progress = 0.0
+        self.active_frame = frame_number
+        if frame_number not in self.completed_frames:
+            self.frame_progress = max(self.frame_progress, frame_progress)
+
+    def complete_frame(self, frame_number: int) -> None:
+        self.completed_frames.add(frame_number)
+        if self.active_frame == frame_number:
+            self.active_frame = None
+            self.frame_progress = 0.0
+
+    def overall(self) -> float | None:
+        if not self.assigned_frames:
+            return None
+        completed = min(len(self.completed_frames), self.assigned_frames)
+        partial = (
+            self.frame_progress
+            if self.active_frame is not None and self.active_frame not in self.completed_frames
+            else 0.0
+        )
+        return min((completed + partial) / self.assigned_frames, 1.0)
+
+
+@dataclass(slots=True)
 class _DistributedProgress:
     total_frames: int | None = None
     completed_frames: set[int] = field(default_factory=set)
     active_frames: dict[str, tuple[int, float]] = field(default_factory=dict)
+    workers: dict[str, _WorkerProgress] = field(default_factory=dict)
     registered_outputs: set[Path] = field(default_factory=set)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -334,8 +368,13 @@ class JobManager:
                     line=line,
                 )
 
-            async def on_output(path: Path) -> None:
-                await self._record_distributed_output(job.id, tracker, path)
+            async def on_output(path: Path, *, worker_id: str = device.uuid) -> None:
+                await self._record_distributed_output(
+                    job.id,
+                    tracker,
+                    path,
+                    worker_id=worker_id,
+                )
 
             workers.append(
                 WorkerRunSpec(
@@ -470,6 +509,10 @@ class JobManager:
                 if tracker.total_frames is not None and tracker.total_frames != plan.total:
                     raise RuntimeError("GPU workers reported inconsistent frame ranges")
                 tracker.total_frames = plan.total
+                worker = tracker.workers.setdefault(worker_id, _WorkerProgress())
+                if worker.assigned_frames is not None and worker.assigned_frames != plan.assigned:
+                    raise RuntimeError(f"GPU {worker_id} reported an inconsistent frame plan")
+                worker.assigned_frames = plan.assigned
             return
         try:
             update = parse_progress(line)
@@ -479,6 +522,7 @@ class JobManager:
             return
 
         async with tracker.lock:
+            worker = tracker.workers.setdefault(worker_id, _WorkerProgress())
             if update.frame is not None:
                 previous = tracker.active_frames.get(worker_id)
                 if previous is not None and previous[0] != update.frame:
@@ -490,7 +534,9 @@ class JobManager:
                     update.frame,
                     max(previous_progress, update.frame_progress or 0.0),
                 )
+                worker.record_frame(update.frame, update.frame_progress or 0.0)
             overall = tracker.overall()
+            worker_progress = worker.overall()
             persisted_progress, current_frame, _ = await self._persist_progress(
                 job_id,
                 frame=update.frame,
@@ -504,6 +550,7 @@ class JobManager:
             sample=update.sample,
             total_samples=update.total_samples,
             progress=persisted_progress,
+            worker_progress=worker_progress,
         )
 
     async def _record_distributed_output(
@@ -511,6 +558,8 @@ class JobManager:
         job_id: UUID,
         tracker: _DistributedProgress,
         path: Path,
+        *,
+        worker_id: str,
     ) -> None:
         frame_number = frame_number_from_output(path)
         if frame_number is None:
@@ -520,12 +569,15 @@ class JobManager:
                 return
             tracker.registered_outputs.add(path)
             tracker.completed_frames.add(frame_number)
+            worker = tracker.workers.setdefault(worker_id, _WorkerProgress())
+            worker.complete_frame(frame_number)
             tracker.active_frames = {
                 worker_id: active
                 for worker_id, active in tracker.active_frames.items()
                 if active[0] != frame_number
             }
             overall = tracker.overall()
+            worker_progress = worker.overall()
             persisted_progress, current_frame, changed = await self._persist_progress(
                 job_id,
                 frame=frame_number,
@@ -536,10 +588,12 @@ class JobManager:
             await self._events.publish(
                 "render.progress",
                 job_id=str(job_id),
+                gpu_uuid=worker_id,
                 frame=current_frame,
                 sample=None,
                 total_samples=None,
                 progress=persisted_progress,
+                worker_progress=worker_progress,
             )
 
     async def _persist_progress(

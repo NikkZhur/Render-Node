@@ -72,6 +72,7 @@ const formatFileSize = (bytes) => {
 const devices = [
   {
     id: 0,
+    uuid: "GPU-mock-a",
     name: "NVIDIA RTX 4090",
     utilization: 72,
     memoryUsed: 14.8,
@@ -81,6 +82,7 @@ const devices = [
   },
   {
     id: 1,
+    uuid: "GPU-mock-b",
     name: "NVIDIA RTX 4090",
     utilization: 4,
     memoryUsed: 1.2,
@@ -117,6 +119,7 @@ const storages = [
 ];
 
 const frameCount = 240;
+const mockNow = Date.now();
 
 const initialJobs = [
   {
@@ -137,6 +140,8 @@ const initialJobs = [
     version: "5.2.0",
     created: "Just now",
     hasArtifacts: false,
+    started_at: null,
+    finished_at: null,
   },
   {
     id: "job-queued",
@@ -156,6 +161,8 @@ const initialJobs = [
     version: "4.5.11",
     created: "8 min ago",
     hasArtifacts: false,
+    started_at: null,
+    finished_at: null,
   },
   {
     id: "job-complete",
@@ -175,6 +182,8 @@ const initialJobs = [
     version: "4.2.22",
     created: "Yesterday",
     hasArtifacts: true,
+    started_at: new Date(mockNow - 86_520_000).toISOString(),
+    finished_at: new Date(mockNow - 86_400_000).toISOString(),
   },
   {
     id: "job-failed",
@@ -194,6 +203,8 @@ const initialJobs = [
     version: "4.1.1",
     created: "2 days ago",
     hasArtifacts: true,
+    started_at: new Date(mockNow - 172_920_000).toISOString(),
+    finished_at: new Date(mockNow - 172_800_000).toISOString(),
   },
 ];
 

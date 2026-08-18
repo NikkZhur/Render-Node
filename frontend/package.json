@@ -23,6 +23,8 @@
     "qa:jobs-pagination": "node scripts/qa-jobs-pagination.mjs",
     "qa:sample-progress": "node scripts/qa-sample-progress.mjs",
     "qa:multi-gpu": "node scripts/qa-multi-gpu.mjs",
+    "qa:render-progress": "node scripts/qa-render-progress.mjs",
+    "test:render-timing": "node --test scripts/render-timing.test.mjs",
     "test:render-progress": "node --test scripts/render-progress.test.mjs",
     "test:access-security": "node --test scripts/access-security.test.mjs",
     "test:vite-config": "node --test scripts/vite-config.test.mjs",

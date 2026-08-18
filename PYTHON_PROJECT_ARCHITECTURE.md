@@ -228,6 +228,21 @@ System Metrics. На viewport до 820 px Job Setup располагается �
 Подтверждение требуется только при наличии артефактов, после удаления выбранной
 записи frontend выбирает следующую доступную.
 
+Jobs показывает duration без отдельного поля БД: для `RENDERING` это
+`now - started_at`, для terminal job — фиксированное
+`finished_at - started_at`. Current task раз в секунду вычисляет elapsed и
+приблизительную ETA из authoritative overall `progress`: до 5 секунд или 2%
+показывается `Estimating…`, затем raw ETA сглаживается EWMA с `alpha=0.2` и
+монотонным входным progress. ETA и worker snapshots остаются transient frontend
+state и не восстанавливаются отдельным REST endpoint.
+
+Один CPU/GPU process использует компактную общую шкалу. Запущенный
+`FRAME_PER_GPU` с двумя и более workers показывает стабильные UUID-строки в
+порядке выбранных GPU и `Overall` снизу. `ALL_GPUS_PER_FRAME` показывает одну
+строку `All GPUs`. При добавлении worker rows внешняя высота центральной панели
+не меняется: Current task растёт вверх, Preview уменьшается, одновременно видны
+не более четырёх workers, остальные прокручиваются внутри списка.
+
 Все модальные окна используют общий lifecycle:
 
 - закрытие по `Escape`, кнопке и нажатию на backdrop;
@@ -546,10 +561,30 @@ WS /api/v1/events
   "frame": 12,
   "sample": 384,
   "total_samples": 1024,
-  "progress": 0.375,
-  "elapsed_seconds": 41.2
+  "progress": 0.375
 }
 ```
+
+Для независимого worker событие расширяется обратно совместимыми полями:
+
+```json
+{
+  "type": "render.progress",
+  "job_id": "d28e3f5f-8e1d-4a61-a01c-9d989eab6730",
+  "gpu_uuid": "GPU-acde0123",
+  "frame": 12,
+  "sample": 384,
+  "total_samples": 1024,
+  "worker_progress": 0.625,
+  "progress": 0.375
+}
+```
+
+`worker_progress` относится только к `gpu_uuid` этого snapshot. Поле
+`progress` остаётся монотонным overall progress логического job. В
+`ALL_GPUS_PER_FRAME` отдельного `worker_progress` нет: все UUID принадлежат
+одному процессу. После reload frontend немедленно берёт Overall из Job REST
+response, а worker rows ждут следующего live event.
 
 ```json
 {
@@ -853,8 +888,10 @@ FastAPI `BackgroundTasks` не используется для длительн�
 сумма завершённых кадров и активных worker fractions, остаётся монотонным и
 записывается как состояние одного job. Output path дедуплицируется до
 регистрации artifact, поэтому `render.frame_ready` и preview публикуются один
-раз. Frontend хранит sample snapshot только до смены кадра или terminal status
-и показывает его в блоке Current task.
+раз. В том же сериализованном snapshot вычисляется монотонный
+`worker_progress`: завершённые назначенные кадры плюс sample fraction только
+текущего кадра конкретного UUID. Frontend сопоставляет snapshots по UUID;
+отсутствие transient snapshot не сбрасывает persisted Overall.
 
 ## 15. Preview и результаты
 
@@ -1014,6 +1051,9 @@ Backend пишет структурированные JSON-логи:
 - валидация/default/normalization `gpu_render_mode`;
 - round-robin frame plan с фактическим scene `frame_step`;
 - монотонная агрегация concurrent progress и дедупликация outputs;
+- per-worker progress, UUID/sample binding, раннее завершение одного worker и
+  совместимость shared-process режима;
+- duration formatting, ETA guards/rounding/EWMA и strategy-aware progress rows;
 - cgroup v2 detection/configuration, read-only/v1 failure, strict/trusted mode;
 - отсутствие `RLIMIT_AS`, cgroup OOM counters и cleanup всех terminal paths;
 - проверка API schemas.
