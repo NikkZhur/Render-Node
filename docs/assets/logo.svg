@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96" fill="none">
+  <title>Render Node</title>
+  <rect x="1" y="1" width="94" height="94" rx="24" fill="#10151C" stroke="#293341" stroke-width="2"/>
+  <g transform="rotate(-8 48 48)" stroke-width="3.5">
+    <rect x="21" y="33" width="30" height="30" rx="6" stroke="#4DA3FF"/>
+    <rect x="44" y="22" width="30" height="30" rx="6" stroke="#86C0FF"/>
+    <rect x="42" y="48" width="30" height="30" rx="6" stroke="#317FDB"/>
+  </g>
+</svg>

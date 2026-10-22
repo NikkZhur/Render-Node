@@ -15,7 +15,9 @@ uv run uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000
 Blender execution belongs to the installed Render Node and has no separate
 runner trust/profile switch. Once a verified Blender version is installed and
 activated through the UI, the backend can run it inside the node's resource
-boundary. Settings load from the repository-root `.env`.
+boundary. Settings read `backend/.env` and `.env` in the backend's working
+directory. Export `RENDER_NODE_DATABASE_URL` for Alembic as well; see the
+[development guide](../docs/development.md) for a consistent workspace setup.
 
 Resource isolation is separate from the scene trust profile:
 

@@ -197,8 +197,11 @@ render-node/
 |   `-- render-node
 |-- docs/
 |   |-- README.md
+|   |-- development.md
 |   |-- architecture.md
-|   `-- implementation-state.md
+|   |-- implementation-state.md
+|   |-- i18n/
+|   `-- assets/
 |-- .github/workflows/release.yml
 |-- Dockerfile
 |-- install.sh

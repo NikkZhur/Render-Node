@@ -1,502 +1,156 @@
-# Render Node
+<p align="center">
+  <img src="docs/assets/logo.svg" width="80" height="80" alt="Render Node logo">
+</p>
 
-A single-node service for remote Blender rendering through a web browser. Users
-upload a scene, choose a Blender version and compute resources, start a render,
-and monitor jobs, logs, frames, and hardware status.
+<h1 align="center">Render Node</h1>
 
-The primary deployment is a temporary single-tenant Ubuntu GPU Pod: its owner
-installs the latest verified stable Release bundle with one command, renders
-their own scenes, downloads the results, and deletes the node. A prepared GHCR
-image is an alternative. The public API remains suitable for a separately
-isolated worker if a shared render service is needed later.
+<p align="center">
+  <strong>Blender rendering, managed from your browser.</strong><br>
+  One node. A persistent queue. One or multiple GPUs.
+</p>
 
-> [!IMPORTANT]
-> The repository now contains the persistent Job API, safe scene uploads, the
-> Blender version manager, multi-GPU render scheduler, realtime events,
-> persistent result artifacts/previews, and system metrics.
+<p align="center">
+  <strong>English</strong> · <a href="docs/i18n/README.ru.md">Русский</a> · <a href="docs/i18n/README.zh-CN.md">简体中文</a>
+</p>
 
-## What Works Today
+<p align="center">
+  <a href="https://github.com/NikkZhur/Render-Node/actions/workflows/release.yml"><img src="https://github.com/NikkZhur/Render-Node/actions/workflows/release.yml/badge.svg?branch=master" alt="Checks and publish workflow status"></a>
+  <img src="https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white" alt="Python 3.13">
+  <img src="https://img.shields.io/badge/React-19-149ECA?logo=react&logoColor=white" alt="React 19">
+  <img src="https://img.shields.io/badge/Blender-CUDA%20%2F%20OptiX-E87D0D?logo=blender&logoColor=white" alt="Blender with CUDA and OptiX">
+</p>
 
-- responsive desktop and mobile interface;
-- job setup for scene, render engine, compute device, frames, and GPUs;
-- all available GPUs selected by default;
-- persistent Job list and explicit lifecycle state machine;
-- bounded `.blend`/ZIP uploads with contained server-generated paths;
-- backend-owned Blender commands with automatic Python disabled;
-- one active logical render job, FIFO queueing, persisted progress, one absolute
-  timeout, restart recovery, and process-group cancellation for every worker;
-- per-job cgroup v2 limits for actual system RAM, swap and pids in strict mode,
-  with cgroup OOM counters and fail-closed diagnostics;
-- stable NVML UUID reservations for single- and multi-GPU jobs; numeric API
-  selections are resolved against the startup inventory and CUDA receives UUIDs;
-- explicit `Frame per GPU` and `All GPUs per frame` strategies. Animation frames
-  can run concurrently in one Blender process per selected GPU, while a heavy
-  frame can use one process with all selected GPUs;
-- per-GPU raw Blender logs plus a prefixed, downloadable aggregate
-  `blender.log`;
-- WebSocket job/progress/log/preview/operation/metrics events with REST resync;
-- live Current task progress with elapsed time, approximate smoothed ETA, the
-  current frame, and Blender sample count parsed from real
-  `Fra:… | Sample X/Y` output;
-- render duration in Jobs, independent per-GPU worker bars plus Overall for
-  `FRAME_PER_GPU`, and one truthful `All GPUs` bar for a shared process;
-- persistent preview/original frame metadata, frame pages capped at 50, and
-  disk-built frame ZIP downloads;
-- real preview, log overlay, jobs, artifacts, CPU/GPU/storage metrics, and
-  low-space warning in normal frontend mode;
-- management of installed and available Blender versions;
-- separate metric rows for every CPU and GPU with internal scrolling;
-- light and dark themes, with dark used by default;
-- Playwright smoke tests for the main UI workflows;
-- FastAPI application lifecycle and versioned API router;
-- async SQLite persistence with SQLAlchemy and Alembic migrations;
-- public health/readiness probes, shared error responses, bounded request bodies,
-  first-browser pairing sessions, and a private production Bearer boundary for
-  loopback/service clients;
-- support for verified bundled Blender 5.2.0 and 4.1.1 when their binaries are
-  present in the runtime image;
-- interactive one-command installer and `render-node` management command.
+<p align="center">
+  <a href="#features">Features</a> · <a href="#quick-start">Quick start</a> · <a href="#deployment">Deployment</a> · <a href="#documentation">Documentation</a>
+</p>
 
-## Target MVP
+![Render Node dashboard with scene settings, live preview, per-GPU progress, jobs, and hardware metrics](docs/assets/dashboard.png)
 
-- FastAPI REST API and WebSocket events;
-- persistent job queue with an explicit state machine;
-- job state and history stored in SQLite;
-- safe Blender execution without a shell;
-- process-group cancellation using `SIGTERM`, a timeout, and `SIGKILL`;
-- GPU reservation with guaranteed release;
-- `.blend` uploads and protected ZIP processing;
-- persistent logs, frames, previews, and other artifacts;
-- recovery of unfinished jobs after a backend restart;
-- installation of additional versions only from the official Blender archive,
-  with SHA-256 verification.
+<p align="center"><sub>Interface preview with demo data. Desktop and mobile layouts, light and dark themes.</sub></p>
 
-An image may include Blender `5.2.0` and `4.1.1`, but the backend registers each
-bundled version only after executing its real binary and confirming the exact
-patch version. An empty runtime registry is a ready application state. The user
-then completes `Download → Install → Activate` in the runtime manager; no version
-is activated automatically. Only one version can be active at a time, and it
-cannot be changed while a job is `QUEUED` or `RENDERING`. Additional inactive
-versions can be deleted; detected bundled versions are immutable.
+Render Node turns a Linux machine or GPU Pod into a personal Blender rendering
+workspace. Upload a scene, choose a runtime and compute resources, queue the
+render, then follow its progress and download the results from the same page.
 
-## Technology Stack
+It is designed for **one operator and their own trusted scenes**. Jobs run in FIFO
+order, with one active logical job at a time; that job can use several GPUs.
 
-| Area | Technology | Purpose |
+## Features
+
+| | What you can do |
+|---|---|
+| **Scene → job** | Upload `.blend` or ZIP files, choose the render engine and frame range, edit a job and replace its scene before the first start. |
+| **Queue controls** | Start, cancel, retry, or create an editable rerender copy. Keep job history in SQLite. |
+| **GPU rendering** | Use CUDA or OptiX, select GPUs, and switch between frame distribution and a shared render process. CPU rendering is also available. |
+| **Live feedback** | Follow overall and worker progress, elapsed time, estimated time remaining, previews, and Blender logs over WebSocket. |
+| **Results** | Browse frames, download originals, frame ZIPs, and logs. Job history and artifact metadata survive backend restarts. |
+| **Runtime & access** | Download, install, and explicitly activate Blender versions. Pair additional browsers with one-use invitation links. |
+
+### Two GPU modes
+
+| Mode | How it works | Intended use |
 |---|---|---|
-| Frontend | React, Vite | User interface and production build |
-| Server state | TanStack Query | Requests, caching, and synchronization |
-| UI state | Zustand | Local interface state |
-| Backend | Python, FastAPI, Uvicorn, Pydantic | REST API, WebSocket, and contracts |
-| Storage | SQLite, SQLAlchemy, Alembic | Jobs, settings, history, and migrations |
-| Blender | `asyncio.create_subprocess_exec` | Safe execution without `shell=True` |
-| GPU | NVIDIA NVML through `pynvml` | Device discovery and metrics |
-| Tests | pytest, pytest-asyncio, Playwright | Backend logic and user-facing UI flows |
+| **Frame per GPU** | Each selected GPU runs its own Blender process and renders assigned frames, respecting the scene's `frame_step`. | Animation frames rendered in parallel. |
+| **All GPUs per frame** | One Blender process uses all selected GPUs for the current frame. | Multiple GPUs working on the same frame. |
 
-Redis, DragonflyDB, RabbitMQ, and PostgreSQL are intentionally excluded from the
-single-node MVP. They should be introduced only when horizontal scaling becomes
-a real requirement.
+CUDA/OptiX jobs with at least two GPUs default to **Frame per GPU**. CPU and
+single-GPU jobs use the shared-process mode. One multi-GPU render remains one job
+in the queue.
 
-## One-command installation
+## Quick start
 
-Use this inside a fresh Ubuntu 22.04/24.04 x86_64 GPU Pod as root:
+For local development on Linux, install **Python 3.13**, **uv**, **Node.js 22.12+**,
+and **make**. Blender is not required to start the interface.
+
+```bash
+git clone https://github.com/NikkZhur/Render-Node.git
+cd Render-Node
+
+(cd backend && uv sync --frozen)
+npm --prefix frontend ci
+
+export RENDER_NODE_WORKSPACE="$HOME/render-node-data"
+export RENDER_NODE_DATABASE_URL="sqlite+aiosqlite:///$RENDER_NODE_WORKSPACE/database/render-node.sqlite3"
+
+make dev
+```
+
+Open **[localhost:5173](http://localhost:5173)**. `make dev` applies database
+migrations, starts the API on port `8000`, waits for readiness, then starts Vite
+on port `5173`. `Ctrl+C` stops both services. Data stays in the workspace selected
+above; keep the two environment variables set when starting a new shell.
+
+1. Open **Blender versions** and download, install, then activate a runtime.
+2. Create a job and upload a `.blend` scene or ZIP archive with its assets.
+3. Choose the engine, frames, and compute devices, then start the render.
+4. Follow the preview and logs; download completed frames from **Artifacts**.
+
+The first browser to open an unclaimed node gets access. Use **Pair another
+device** for another browser. Backend restarts clear browser sessions, while
+persistent jobs and files remain. The development server uses local resource
+limits and is intended for a trusted development environment.
+
+For a UI-only preview, run `npm --prefix frontend run dev:mock` and open the same
+port. It uses demo data and does not render scenes.
+
+See the [development guide](docs/development.md) for separate service startup,
+configuration, unit checks, and Playwright scenarios.
+
+## Deployment
+
+The native installer targets **Ubuntu 22.04/24.04 x86_64 GPU Pods** with a working
+`nvidia-smi`. Run it as root and expose port **8080** through the provider's HTTPS
+proxy:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/NikkZhur/Render-Node/master/install.sh | bash
 ```
 
-The installer does not require a public URL, Pod ID, or provider-specific
-variable. It checks the GPU, downloads the latest stable GitHub Release bundle and
-checksum, installs a pinned Python runtime and the verified Blender versions,
-then starts the already-built web interface as unprivileged Linux processes. It
-does not download Node.js, build frontend source, install Docker/Compose, or use
-systemd. Re-running the same command repairs or atomically updates the install;
-failed readiness rolls back to the previous release.
+> [!NOTE]
+> The installer requires a published stable GitHub Release bundle. No stable
+> release is published yet; use the source quick start above in the meantime.
+> See [releases](https://github.com/NikkZhur/Render-Node/releases) and the
+> [publication guide](deploy/README.md#publication).
 
-Before running it:
+The installer prepares a release before switching to it and rolls back if
+readiness fails. The repository also includes a Docker image recipe for platforms
+that run the image directly. Both deployment paths require a writable, delegated
+**cgroup v2** subtree for production rendering; HTTP readiness alone does not mean
+the renderer is available.
 
-- choose Ubuntu 22.04 or 24.04 where `nvidia-smi` succeeds;
-- expose internal HTTP port `8080` in the Pod settings;
-- use a machine dedicated to one operator and their own trusted scenes.
+[Installation, updates, rollback, pairing, and backups →](deploy/README.md)
 
-After installation:
+## Inside the project
 
-```bash
-render-node status
-render-node logs
-render-node reset-access
-render-node restart
-render-node uninstall
-```
-
-Opening the panel deliberately claims an unclaimed node for that browser. This
-is an explicit TOFU race, not identity verification: whoever completes the
-first browser claim gets access. Use **Pair another device** in the authorized
-panel to create a one-use fragment link that expires after five minutes. At most
-five browser sessions can exist. If every authorized browser is lost, run
-`render-node reset-access`; the next browser can then claim the running node
-without changing jobs or restarting the service. Backend restart also clears
-all ephemeral browser sessions and invitations.
-
-`uninstall` preserves the database, scenes, results and downloaded Blender
-versions under `/workspace`. Exact paths, update/rollback behavior, explicit
-`--version`, and release publication are documented in
-[`deploy/README.md`](deploy/README.md).
-
-### RunPod and other managed Pods
-
-The command above is the main Ubuntu Pod flow: no nested Docker is used. As an
-alternative, a Pod template may directly start the published
-`ghcr.io/nikkzhur/render-node:latest` image. Both variants expose port
-`8080/http`, keep data in `/workspace`, and use the platform HTTPS proxy.
-
-## Quick Start: Full Development Stack
-
-After installing the backend and frontend dependencies once, start both services
-from the repository root with one command:
-
-```bash
-make dev
-```
-
-The command applies pending Alembic migrations, starts the backend on port `8000`,
-waits up to 60 seconds for its public `/ready` endpoint, and only then starts the
-frontend on port `5173`. If the backend exits or does not become ready, the frontend
-is not started. `Ctrl+C` stops both processes; if either running service exits
-unexpectedly, the other is stopped too.
-Environment variables such as `RENDER_NODE_WORKSPACE` are passed through unchanged,
-and settings are also loaded from the repository-root `.env`. Rendering is ready
-without a separate trust/profile switch once a Blender version is installed and
-activated through the UI. Development uses the
-`RENDER_NODE_RESOURCE_ISOLATION_MODE=trusted` fallback unless a writable cgroup
-v2 subtree has been delegated to the current user. This fallback never applies
-`RLIMIT_AS`; it relies on the actual memory/pids boundary of the development
-container or machine and is reported by `/api/v1/system/capabilities`.
-Startup does not require Blender to exist. When no verified runtime is present,
-open **Blender versions** in the UI and explicitly download, install, and activate
-one before creating a render job.
-
-`make dev` uses the same automatic first-browser claim and shows no login form.
-It is a development server, not an anonymously safe Internet deployment. A
-backend restart clears access; an open tab will claim again when it reconnects
-if the node is still unclaimed.
-
-## Quick Start: Frontend
-
-Node.js 22 and npm are required.
-
-```bash
-cd frontend
-npm ci
-npm run dev
-```
-
-Open [http://localhost:5173](http://localhost:5173). Vite is configured to listen
-on `0.0.0.0:5173`, so the page is accessible from the host when the container port
-is forwarded. Vite uses the current browser host for HMR, including through an
-arbitrary HTTPS/WebSocket-capable reverse proxy; no public-origin variable or
-provider detection is needed.
-
-`npm run dev` uses the real Job API through Vite's `/api` proxy. Run
-`npm run dev:mock` only when the explicit legacy mock mode is needed. Set
-`RENDER_NODE_BACKEND_URL` when the backend is not available at
-`http://127.0.0.1:8000`. Vite does not inject the private backend Bearer into
-browser HTTP or WebSocket requests; browser access always uses pairing cookies.
-
-Vite keeps REST and application WebSocket traffic on the current browser host.
-The access boundary does not depend on the upstream `Host`, so another proxy may
-rewrite it without configuration. Frontend and API must remain on the same
-browser-visible HTTPS origin; cross-origin development is intentionally
-unsupported.
-
-## Quick Start: Backend
-
-Python 3.13 and `uv` are required.
-
-```bash
-cd backend
-uv sync
-uv run alembic upgrade head
-uv run uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000
-```
-
-Blender execution is part of the installed Render Node and has no separate
-trust/profile setting. Install and activate a Blender version through the UI;
-the backend then runs it inside the node's configured resource boundary.
-
-`gpu_render_mode` is persisted on every Job and accepts
-`FRAME_PER_GPU` or `ALL_GPUS_PER_FRAME`. Omitted create requests default to
-frame distribution only for CUDA/OptiX with at least two GPUs; CPU and one-GPU
-jobs normalize to all-GPUs-per-frame. The frontend exposes the two-way selector
-only when frame distribution is valid and preserves the saved mode across
-update, retry, rerender, and reload.
-
-Jobs derives render duration from the existing UTC `started_at` and
-`finished_at` fields: active renders use the current browser time, while a
-terminal duration is fixed. Current task computes ETA in the browser from the
-authoritative overall `progress` and `started_at`, waits for at least five
-seconds and 2% progress, then applies an EWMA with alpha `0.2`. The estimate is
-approximate, sampled at most once per second, and is not stored in SQLite.
-
-Open [http://localhost:8000/health](http://localhost:8000/health) for liveness,
-[http://localhost:8000/ready](http://localhost:8000/ready) for SQLite readiness,
-and [http://localhost:8000/docs](http://localhost:8000/docs) for Swagger UI.
-Interactive API documentation is disabled when `RENDER_NODE_ENV=production`.
-
-## Production Boundary
-
-Production startup requires a secret `RENDER_NODE_AUTH_TOKEN` of at least 32
-characters. It is a private management/service credential for origin-less
-clients on loopback or another private backend path; it is never sent to the
-frontend, installed as a browser cookie, or injected into public Nginx requests.
-`/health` and `/ready` remain public probes. Keep port `8000` loopback-only.
-
-The first deliberate JavaScript `POST /api/v1/access/claim` atomically claims an
-unclaimed backend process and sets an opaque `HttpOnly`, `Secure`,
-`SameSite=Strict`, `__Host-` session cookie. A page GET, crawler preview, probe,
-`HEAD`, or `OPTIONS` never claims the node. Browser requests additionally require
-same-origin Fetch Metadata; unsafe methods carry `X-Render-Node-Request: 1`.
-Browser WebSockets require the session cookie, valid HTTPS `Origin`, and the
-fixed non-secret `render-node-browser-v1` subprotocol. When Fetch Metadata is
-present it must be `Sec-Fetch-Site: same-origin`; the subprotocol is the explicit
-compatibility context for Chromium WebSocket handshakes that omit Fetch Metadata.
-Malformed origins and cross-/same-site contexts are rejected, but a valid
-browser `Origin` is deliberately not compared with backend-visible `Host`.
-`Forwarded` and `X-Forwarded-*` are never trusted.
-
-Additional browsers use one-time 256-bit invitation tokens created by an
-authorized browser. The frontend puts the token only in `#pair=...`, removes the
-fragment before sending it in a JSON body, and never stores session tokens in
-JavaScript storage. Invitations expire after five minutes; the total browser
-session limit is five. Sessions and invitations live only in the single Uvicorn
-worker and reset on backend restart. `render-node reset-access` performs the same
-reset locally without touching jobs or Blender operations.
-
-Deploy the static frontend and `/api` behind one HTTPS reverse proxy on one
-public origin. The proxy may rewrite upstream `Host`; no public URL or origin is
-configured. Separate cross-origin frontend/API hosting is unsupported. Do not
-expose port `8000`, the internal Bearer, or any `VITE_*` secret. Render Node no
-longer has Basic Auth, usernames, passwords, or a credentials command; provider
-authentication may still be added outside it.
-
-Render Node treats the installed VM, container, or cloud Pod as its execution
-boundary. There is no runner trust toggle to enable after deployment: browser
-pairing grants access to the node, while Blender runtime download, installation,
-activation, upload, and render actions are managed through the interface.
-
-A production process uses:
-
-```dotenv
-RENDER_NODE_ENV=production
-RENDER_NODE_RESOURCE_ISOLATION_MODE=strict
-RENDER_NODE_AUTH_TOKEN=<unique-secret-with-at-least-32-characters>
-```
-
-Pairing is an access boundary, not a sandbox between Blender and the backend.
-Automatic Python remains disabled, subprocess environment and paths remain
-constrained, and resource/time/output limits still apply. A multi-tenant render
-farm would require a separate worker isolation design outside this node product.
-
-Production resource isolation is always strict. Render Node detects the current
-cgroup hierarchy from `/proc/self/mountinfo` and `/proc/self/cgroup`; it does not
-assume that `/sys/fs/cgroup` is writable. A usable deployment must delegate a
-writable cgroup v2 subtree with the `memory` and `pids` controllers to the
-unprivileged backend. The native root management command and root image
-entrypoint try to prepare `<current-cgroup>/render-node` before dropping
-privileges. Managed containers must expose/delegate those controllers; a
-read-only host cgroup mount is insufficient. `RENDER_NODE_CGROUP_ROOT` may name
-an already-delegated child of the backend's current cgroup.
-
-If only cgroup v1 is available, or v2 is not writable/delegated, strict mode
-keeps the API ready for diagnostics but reports the runner unavailable and
-rejects Start/Retry before queueing. The verified fallback is
-`RENDER_NODE_RESOURCE_ISOLATION_MODE=trusted`, accepted only in development/test
-and never selected automatically in production.
-
-## Limits, Cleanup, and Backup
-
-JSON mutations default to 1 MiB and WebSocket client messages to 64 KiB. Scene,
-Blender archive, ZIP extraction, render time, actual system RAM, swap, pids,
-logs, and outputs have separate settings in [`.env.example`](.env.example).
-`RENDER_NODE_WORKER_MEMORY_GB` now means `memory.max`, not virtual address space;
-`RENDER_NODE_WORKER_SWAP_GB` maps to `memory.swap.max` when supported, and
-`RENDER_NODE_WORKER_PIDS_LIMIT` maps to `pids.max`. Uploads are
-bounded streaming multipart requests; resumable uploads are not implemented.
-
-Every strict job gets its own cgroup before Blender exec. Blender joins it in
-the child setup, so descendants inherit membership, while process-group
-cancellation still uses `SIGTERM` → grace period → `SIGKILL`. Cleanup also uses
-`cgroup.kill` when available and removes the per-job directory. Failure
-diagnostics prioritize `memory.events` for system-RAM OOM, then Blender/CUDA log
-markers for VRAM or shared GPU-memory exhaustion, then report a plain `SIGABRT`
-or other exit. Cgroups do not impose a VRAM limit.
-
-In `FRAME_PER_GPU`, the scheduler reserves all requested stable UUIDs and starts
-at most one worker per GPU (`SINGLE` uses only the first; RANGE is bounded by
-its inclusive API span). Workers share the job cgroup, deadline, output limit,
-and raw-log byte budget. A trusted Blender adapter partitions the scene's real
-`frame_step` in deterministic round-robin order. Any startup/runtime failure,
-cancel, timeout, or output/log limit stops every peer before the reservation is
-released. Progress is the locked aggregate of completed and active worker
-fractions; duplicate output notifications register and publish one artifact.
-Each GPU-tagged `render.progress` event in this mode also carries additive
-`worker_progress` for that stable `gpu_uuid`; the existing `progress`, `frame`,
-`sample`, and `total_samples` fields remain backward compatible. Transient
-worker snapshots are not persisted: after reload REST restores Overall and the
-next live event restores a worker row.
-
-The Current task panel keeps the central panel's outer height fixed. Independent
-worker rows (at most four visible before internal scrolling) grow upward and
-reduce Preview; progress updates do not move Jobs, Artifacts, Job Setup, metrics,
-or the footer. `ALL_GPUS_PER_FRAME` displays one shared `All GPUs` row because
-its selected devices belong to one Blender process.
-
-Cleanup is conservative and explicit:
-
-- `DELETE /api/v1/jobs/{id}` removes the database row, artifacts, and the whole
-  server-generated job directory when the job is not active;
-- job settings and the uploaded scene can be replaced while a job is `CREATED`
-  or `READY`; they become read-only after the first start;
-- rerender creates a separate editable `READY` job with copied settings and a
-  server-side copy of the original input, without copying artifacts;
-- retry removes old output, previews, logs, temporary files, and artifact rows,
-  while preserving the uploaded scene;
-- startup clears per-job temporary directories and discards an input directory
-  left by an upload that never advanced its job beyond `CREATED`;
-- failed Blender download/install operations remove incomplete downloads and
-  quarantine/extraction data.
-
-There is no automatic age-based retention. Operators should delete completed
-jobs explicitly and monitor the low-space signal. For a consistent backup, stop
-new mutations and renders, then back up the SQLite database together with
-`/workspace/jobs` and `/workspace/blender/versions`. Restore the matching set and
-run `uv run alembic upgrade head` before startup.
-
-### Dev Container
-
-The repository includes a VS Code Dev Container configuration with Python 3.13,
-`uv`, Node.js 22, `make`, and ports `5173` and `8000` forwarding. After opening
-the repository in the container, use `make dev` to run the full development
-stack.
-
-The current [`.devcontainer/Dockerfile`](.devcontainer/Dockerfile) is intended for
-development and is not the production Render Node image.
-
-## Frontend Verification
-
-```bash
-cd frontend
-npm run lint
-npm test
-npm run build
-npm run dev:mock
-# In another terminal:
-npm run qa:smoke
-npm run qa:multi-gpu
-npm run qa:render-progress
-npm run qa:versions-empty
-```
-
-If Playwright Chromium is not installed yet:
-
-```bash
-npx playwright install chromium
-```
-
-The mock smoke test covers desktop, ultrawide, compact desktop, and mobile
-layouts. With backend and real-mode Vite running, `npm run qa:api` additionally
-checks scene upload, `READY`, and persistence after reload. `npm run qa:runner`
-uses fake Blender to check WebSocket progress/logs, preview and full-frame
-delivery, frame/ZIP downloads, artifact recovery after reload, metrics, and
-process-group cancellation.
-`npm run qa:render-progress` covers running/fixed duration, ETA, CPU/single-bar,
-independent worker/Overall and shared-process layouts, desktop/mobile geometry,
-overflow, and progressbar accessibility.
-
-`npm test` runs all `scripts/*.test.mjs` unit suites, including request security,
-Vite proxy configuration, GPU mode normalization, artifact presentation, and
-render progress/timing. It does not require a running server or browser. The
-release workflow runs these suites before publishing.
-
-## Current Repository Structure
-
-Start with the [documentation index](docs/README.md) for the architecture,
-implementation state, and verification results. Deployment instructions remain
-next to their scripts in [deploy/README.md](deploy/README.md).
+**React + Vite** · **TanStack Query + Zustand** · **FastAPI** ·
+**SQLite + SQLAlchemy + Alembic** · **Blender subprocesses + NVIDIA NVML**
 
 ```text
-.
-├── .devcontainer/                 # Development environment and port forwarding
-├── backend/                       # FastAPI, async SQLite, Alembic, and tests
-│   ├── app/                       # Application, API, config, and storage code
-│   ├── migrations/                # Alembic schema history
-│   └── tests/                     # Backend unit and integration tests
-├── frontend/                      # React application and browser checks
-│   ├── scripts/                   # Node unit tests and Playwright scenarios
-│   ├── src/api.js                 # REST API boundary
-│   ├── src/realtime.js            # WebSocket reconnect and REST resync
-│   ├── src/App.jsx                # Layout and UI workflows
-│   ├── src/features/              # Artifact and Blender version interfaces
-│   ├── src/ui/                    # Shared visual primitives and dialog hooks
-│   ├── src/jobPresentation.js     # Shared job labels and frame formatting
-│   ├── src/mockApi.js             # Explicit mock-mode data source
-│   ├── src/store.js               # Zustand UI state
-│   └── src/styles.css             # Responsive components and themes
-├── deploy/                       # Runtime scripts and deployment instructions
-├── docs/                         # Maintained documentation
-│   ├── README.md                 # Documentation index
-│   ├── architecture.md           # Architecture and contracts
-│   └── implementation-state.md   # Current status, verification, and remaining work
-├── scripts/                      # Development, management, and bundle commands
-├── Dockerfile                    # Production image recipe
-├── install.sh                    # Installer entrypoint
-├── Makefile                      # Development command
-├── Untitled.blend                # Existing user scene
-└── README.md
+frontend/   React interface, API client, and browser checks
+backend/    FastAPI, job queue, Blender execution, storage, and tests
+deploy/     Runtime scripts and deployment guide
+scripts/    Development launcher, node management, and release packaging
+docs/       Architecture, development guide, project status, and translations
 ```
 
-The `проект пример/` directory is used only as reference material. It is fully
-excluded through `.gitignore` and is not part of Render Node.
+One node, one API process, SQLite storage. No external queue or database service
+is required. See the [architecture](docs/architecture.md) for module boundaries
+and REST/WebSocket contracts.
 
-## Architecture
+## Documentation
 
-```text
-Browser
-  │
-  │ REST + WebSocket
-  ▼
-FastAPI
-  ├── API and validation
-  ├── Job Manager and state machine
-  ├── Logical-job scheduler and multi-GPU frame workers
-  ├── SQLite
-  ├── GPU/System monitoring
-  └── Blender subprocess group
-        └── /workspace/jobs/{job_id}/
-```
+| Guide | Contents | Language |
+|---|---|---|
+| [Development](docs/development.md) | Setup, environment, checks, and browser QA | English |
+| [Deployment](deploy/README.md) | GPU Pod installation, Docker, updates, rollback, and backups | English |
+| [Backend](backend/README.md) | API, runtime management, rendering, and security | English |
+| [Architecture](docs/architecture.md) | Module responsibilities and system contracts | Russian |
+| [Implementation status](docs/implementation-state.md) | Verified behavior, known issues, and outstanding checks | Russian |
+| [Configuration](.env.example) | Environment variables and resource limits | English |
 
-Every job is isolated under `/workspace/jobs/{job_id}`. User-provided filenames
-never determine filesystem paths. The backend constructs Blender arguments from
-validated parameters and never accepts a ready-made shell command from the
-client.
-
-## Security Principles
-
-- `.blend` files, ZIP archives, and user-provided paths are untrusted;
-- arbitrary Python scripts and automatic add-on installation are disabled by
-  default;
-- ZIP archives are checked for Zip Slip, file count, and total extracted size;
-- upload size, render duration, and result size are limited;
-- Blender runs in a separate process group without a shell;
-- the single worker slot is released in `finally`, including cancellation and failures;
-- secrets, uploads, Blender binaries, and render results are never committed;
-- production processes must not run as root.
-
-## Remaining Deployment Work
-
-- publish the first GHCR image and create a ready-to-click RunPod template;
-- add the OS-isolated, non-root worker boundary before accepting third-party scenes;
-- repeat the CUDA/OptiX smoke in the released Pod image and validate delegated
-  cgroup v2 process isolation there;
-- add resumable uploads if deployment networks require them;
-- add an operator-selected retention policy instead of deleting user results by
-  age implicitly.
+Real CUDA/OptiX smoke checks have run on one NVIDIA GPU. Multiple physical GPUs,
+production installation/rollback, and delegated kernel cgroup v2 isolation still
+need validation in the target environment. Fake Blender checks cover application
+behavior; they do not replace those checks. The
+[implementation status](docs/implementation-state.md) records the current evidence
+and known limitations.

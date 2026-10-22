@@ -253,6 +253,22 @@
 
 ## Последняя проверка
 
+2026-10-22, обновление безопасности frontend-зависимостей:
+
+- Vite обновлён с 8.1.5 до [8.1.6](https://github.com/vitejs/vite/releases/tag/v8.1.6).
+  В lock-файле обновлены `baseline-browser-mapping`, `brace-expansion`,
+  `browserslist` с его browser-data зависимостями, `nanoid`, `postcss` и
+  `source-map-js`. Предупреждения относились к инструментам разработки/сборки;
+  production-зависимости и остальные прямые зависимости сохранены.
+- После чистого `npm ci` полный `npm audit` показывает 0 вместо 7 уязвимостей;
+  `npm audit --omit=dev` также показывает 0. Lint, все 35 unit-тестов,
+  production/mock builds и 10 Playwright suites прошли: smoke, jobs, versions,
+  multi-gpu, render-progress, api, runner, versions-empty, pairing, same-origin.
+  API/runner проверены на production-сборке с временной БД и fake Blender.
+- Production HTML, JS и CSS побайтно совпали со сборкой до обновления.
+  Проверены сборка release bundle, checksum, соответствие frontend assets
+  и два целевых deployment-теста; push и публикация не выполнялись.
+
 2026-10-22, техническая ревизия и отдельный реальный GPU smoke:
 
 - Ruff format/check, strict mypy `app tests`, pytest — успешно: 247 passed,
@@ -449,8 +465,6 @@
 - Графики metrics используют синтетическую историю также в real API mode.
 - `ArtifactService.frame_page` читает все originals и отдельно ищет previews;
   оптимизацию больших последовательностей следует рассмотреть отдельно.
-- На 2026-10-22 `npm audit` сообщил 7 advisories (2 moderate, 5 high).
-  Проверка совместимости и обновление зависимостей не входили в cleanup.
 - Нативный installer ещё не прогонялся целиком на реальном Ubuntu GPU Pod;
   необходимо проверить apt/runtime libraries, обе bundled Blender версии,
   RunPod HTTPS/WebSocket proxy и CUDA/OptiX до публикации команды пользователям.

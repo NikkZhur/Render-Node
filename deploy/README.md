@@ -5,6 +5,11 @@ It is not a security boundary for a shared render farm.
 
 ## Ubuntu GPU Pod: one-line installer
 
+The installer requires a stable GitHub Release containing the prebuilt bundle
+and checksum; it cannot install from a source checkout alone. No stable release
+is published yet. Use the [source setup](../README.md#quick-start) until one is
+available, or see [Publication](#publication) for the release process.
+
 Rent an Ubuntu 22.04 or 24.04 x86_64 Pod with an NVIDIA GPU, expose HTTP port
 `8080`, open its terminal as root, and run:
 
@@ -126,6 +131,35 @@ production.
 `RENDER_NODE_WORKER_PIDS_LIMIT` to `pids.max`. `memory.oom.group=1` and
 `memory.events` are used when supported. This limits host RAM/swap/processes,
 not GPU VRAM; VRAM errors come from Blender/CUDA logs.
+
+## Data, cleanup, and backups
+
+Scene uploads, archive extraction, render time, RAM, swap, process counts, logs,
+and outputs have separate limits in [`.env.example`](../.env.example). JSON
+mutations default to 1 MiB and WebSocket client messages to 64 KiB. Uploads are
+bounded streaming requests; resumable uploads are not implemented.
+
+Cleanup is explicit:
+
+- deleting an inactive job removes its database row, artifacts, and job directory;
+- settings and the scene can be replaced only before the first start, while the
+  job is `CREATED` or `READY`;
+- rerender creates a separate editable job with a copy of the input, without
+  copying results;
+- retry clears previous outputs, previews, logs, temporary files, and artifact
+  records while preserving the scene;
+- startup clears per-job temporary directories and incomplete uploads that
+  never advanced beyond `CREATED`;
+- failed Blender download/install operations remove incomplete downloads and
+  extraction/quarantine data.
+
+There is no automatic age-based retention. Delete completed jobs explicitly and
+monitor the low-space signal. For a consistent backup, stop new mutations and
+renders, then back up SQLite together with `/workspace/jobs` and
+`/workspace/blender/versions` (or their equivalents under the configured
+workspace). Restore the matching set and run `uv run alembic upgrade head` in
+the release's backend directory, with the restored database URL in the process
+environment, before starting the service.
 
 ## Publication
 
