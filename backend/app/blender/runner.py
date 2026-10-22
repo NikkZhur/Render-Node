@@ -435,14 +435,12 @@ class SandboxRunner:
     ) -> None:
         if process.stdout is None:
             return
-        written = 0
         pending = b""
         async with aiofiles.open(log_path, "wb") as log:
             while chunk := await process.stdout.read(64 * 1024):
                 saved, exceeded = await log_budget.take(chunk)
                 if saved:
                     await log.write(saved)
-                    written += len(saved)
                 if exceeded:
                     limit_event.set()
                 pending += saved

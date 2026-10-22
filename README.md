@@ -386,8 +386,8 @@ development and is not the production Render Node image.
 ```bash
 cd frontend
 npm run lint
+npm test
 npm run build
-npm run test:gpu-render-mode
 npm run dev:mock
 # In another terminal:
 npm run qa:smoke
@@ -412,7 +412,16 @@ process-group cancellation.
 independent worker/Overall and shared-process layouts, desktop/mobile geometry,
 overflow, and progressbar accessibility.
 
+`npm test` runs all `scripts/*.test.mjs` unit suites, including request security,
+Vite proxy configuration, GPU mode normalization, artifact presentation, and
+render progress/timing. It does not require a running server or browser. The
+release workflow runs these suites before publishing.
+
 ## Current Repository Structure
+
+Start with the [documentation index](docs/README.md) for the architecture,
+implementation state, and verification results. Deployment instructions remain
+next to their scripts in [deploy/README.md](deploy/README.md).
 
 ```text
 .
@@ -421,14 +430,27 @@ overflow, and progressbar accessibility.
 │   ├── app/                       # Application, API, config, and storage code
 │   ├── migrations/                # Alembic schema history
 │   └── tests/                     # Backend unit and integration tests
-├── frontend/                      # Working React prototype
-│   ├── scripts/qa-smoke.mjs       # Playwright smoke test
+├── frontend/                      # React application and browser checks
+│   ├── scripts/                   # Node unit tests and Playwright scenarios
 │   ├── src/api.js                 # REST API boundary
 │   ├── src/realtime.js            # WebSocket reconnect and REST resync
 │   ├── src/App.jsx                # Layout and UI workflows
-│   ├── src/mockApi.js             # Temporary mock data source
+│   ├── src/features/              # Artifact and Blender version interfaces
+│   ├── src/ui/                    # Shared visual primitives and dialog hooks
+│   ├── src/jobPresentation.js     # Shared job labels and frame formatting
+│   ├── src/mockApi.js             # Explicit mock-mode data source
 │   ├── src/store.js               # Zustand UI state
 │   └── src/styles.css             # Responsive components and themes
+├── deploy/                       # Runtime scripts and deployment instructions
+├── docs/                         # Maintained documentation
+│   ├── README.md                 # Documentation index
+│   ├── architecture.md           # Architecture and contracts
+│   └── implementation-state.md   # Current status, verification, and remaining work
+├── scripts/                      # Development, management, and bundle commands
+├── Dockerfile                    # Production image recipe
+├── install.sh                    # Installer entrypoint
+├── Makefile                      # Development command
+├── Untitled.blend                # Existing user scene
 └── README.md
 ```
 

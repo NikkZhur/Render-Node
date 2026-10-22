@@ -5,13 +5,16 @@
 
 ## Текущее состояние
 
-- Обновлено: 2026-08-18 после реализации duration, ETA и адаптивного multi-GPU
-  progress; frame distribution, first-browser pairing, same-origin и
-  always-local runner сохранены.
-- Фазы 1–6 из `BACKEND_IMPLEMENTATION_MASTER_PROMPT.md` завершены.
-- Следующей фазы в master prompt нет; дальнейшая работа — отдельные deployment
-  задачи, перечисленные ниже.
+- Обновлено: 2026-10-22 после технической ревизии. Самостоятельные frontend
+  панели и dialog hooks выделены из App, job presentation объединён, модель
+  multi-GPU progress вынесена из manager без изменения алгоритма.
+- Базовые этапы backend завершены; дальнейшая работа — отдельные deployment
+  и функциональные задачи, перечисленные ниже.
 - Пользовательский `Untitled.blend` не изменялся.
+- По отдельному разрешению пользователя 2026-10-22 выполнен реальный GPU smoke:
+  Blender 4.5.11, RTX PRO 4000 Blackwell, CUDA/OptiX, кадры с `frame_step=2`,
+  отмена, следующая задача из очереди и сохранность результатов после restart.
+  Всё прошло в `trusted` mode; ограничения проверки перечислены ниже.
 
 ## Реализовано
 
@@ -250,6 +253,39 @@
 
 ## Последняя проверка
 
+2026-10-22, техническая ревизия и отдельный реальный GPU smoke:
+
+- Ruff format/check, strict mypy `app tests`, pytest — успешно: 247 passed,
+  1 skipped (нет системных `nginx/envsubst`). До cleanup результат был таким же.
+  Alembic check на временной БД не обнаружил изменений схемы.
+- Frontend lint, production/mock builds и `npm test` — успешно: 35 unit-тестов
+  вместо исходных 30; добавлены проверки существующего job presentation.
+  Playwright `qa:smoke`, `qa:jobs`, `qa:versions`, `qa:versions-empty`,
+  `qa:multi-gpu`, `qa:render-progress`, `qa:api`, `qa:runner`, `qa:pairing`,
+  `qa:jobs-pagination`, `qa:job-delete`, `qa:capabilities` — успешно.
+- Release bundle: состав, checksum, детерминизм и исключения проверены;
+  bundle-тест больше не требует заранее собранного `frontend/dist`.
+  Install/repair/update/rollback проверены fake-command harness:
+  18 passed, 1 skipped в deployment suite. Реальная установка не выполнялась.
+- Реальный Blender 4.5.11 установлен и активирован через API во временном
+  workspace; SHA-256 официального архива проверен. На RTX PRO 4000 Blackwell
+  CUDA завершил RANGE 1–5 с `frame_step=2` (кадры 1, 3, 5), OptiX — SINGLE 1.
+  Отмена OptiX заняла 0,216 с, процесс завершился; следующая задача из очереди
+  успешно отрендерилась. NVML подтвердил реальные GPU-процессы и до 99% нагрузки.
+- В GPU smoke проверены WS log/progress/frame-ready, PNG, preview, original,
+  log и ZIP. После рестарта временного backend три завершённые задачи и пять
+  итоговых кадров сохранились, original совпали побайтно. После теста GPU
+  освободился. Данные проверки остались в `/tmp/render-node-gpu-smoke-uzn861fl`
+  и могут исчезнуть при очистке окружения.
+
+Ошибка вспомогательного QA setup с пустым `RENDER_NODE_DATABASE_URL` создала
+новую пустую БД `/workspace/database/render-node.sqlite3` вместо временной.
+После проверки времени создания, пустых таблиц и отсутствия других файлов
+удалены только эта БД и пустой каталог; существующих пользовательских данных
+там не было. Для последующих QA запусков указан абсолютный SQLite URL в `/tmp`.
+
+### Предыдущие проверки
+
 - Duration/ETA/adaptive progress: backend Ruff format/check, strict mypy
   `app tests`, полный pytest (`244 passed, 1 skipped`) и `alembic check` успешны;
   миграция не потребовалась. Frontend ESLint, 26 Node unit/contract tests и
@@ -403,6 +439,18 @@
 
 ## Известные ограничения и дальнейшая работа
 
+- Общий progress в `ALL_GPUS_PER_FRAME` + `ALL` может остаться на 100% после
+  первого кадра; вариант `RANGE` в этом пути не учитывает scene `frame_step`.
+  Исправление расчёта требует отдельной задачи и тестов; при cleanup алгоритм
+  сохранён. Реальный smoke подтверждает кадры и события, а не точность всех
+  вариантов процентов.
+- Некоторые frontend-индикаторы активности/очереди учитывают только текущую
+  страницу jobs и могут пропустить активную задачу на другой странице.
+- Графики metrics используют синтетическую историю также в real API mode.
+- `ArtifactService.frame_page` читает все originals и отдельно ищет previews;
+  оптимизацию больших последовательностей следует рассмотреть отдельно.
+- На 2026-10-22 `npm audit` сообщил 7 advisories (2 moderate, 5 high).
+  Проверка совместимости и обновление зависимостей не входили в cleanup.
 - Нативный installer ещё не прогонялся целиком на реальном Ubuntu GPU Pod;
   необходимо проверить apt/runtime libraries, обе bundled Blender версии,
   RunPod HTTPS/WebSocket proxy и CUDA/OptiX до публикации команды пользователям.
@@ -410,10 +458,10 @@
   RunPod template ещё не создан.
 - Отдельная multi-tenant worker architecture с network/filesystem/device
   isolation не реализована и не является режимом текущего одноузлового продукта.
-- Текущее devcontainer-окружение использует cgroup v1 и не делегирует writable
-  cgroup v2. Здесь проверены v1 detection/strict fail-closed и trusted fallback;
-  реальный kernel cgroup v2 setup/attach/OOM/cleanup требует Ubuntu Pod с
-  delegated `memory`/`pids`. Fake cgroup v2 покрывает эти lifecycle-контракты.
+- На ноде 2026-10-22 смонтирован cgroup v2, но subtree `render-node` не получает
+  контроллеры `memory`/`pids`; strict preflight корректно отказывает. Прежние
+  проверки включали cgroup v1 detection и trusted fallback. Реальный per-job
+  kernel setup/attach/OOM/cleanup требует делегации; fake cgroup tests сохраняются.
 - Blender subprocess запускается внутри VM/контейнера/Pod установленного узла;
   pairing не изолирует его от backend. `--disable-autoexec`, allowlisted env,
   path/resource/time/output limits остаются обязательными.
@@ -421,17 +469,15 @@
   собирался. Development CPU/Eevee для Blender 4.5.11 проверялся ранее; глобальный
   executable override удалён, поэтому повторная проверка должна использовать
   обычный UI workflow и реальный version-specific runtime. Blender 4.1.1 с
-  Cycles/OptiX проверен на RTX A5000 в текущем devcontainer; bundled 5.2.0,
+  Cycles/OptiX ранее проверен на RTX A5000; bundled 5.2.0,
   released production image и совместный strict cgroup v2 + GPU lifecycle ещё
   должны быть проверены на целевом облачном Pod.
 - Реального совместного smoke `strict cgroup v2 + Blender/CUDA/OptiX` нет:
-  текущий GPU smoke относится только к trusted devcontainer без per-job cgroup.
-  После просьбы пользователя дальнейшие render smoke не запускаются; целевой
-  strict/GPU сценарий остаётся ручной внешней проверкой.
-- Реальный multi-GPU `FRAME_PER_GPU` smoke с Blender/CUDA/OptiX намеренно не
-  выполнялся; concurrency и lifecycle проверены fake Blender без использования
-  GPU. Его следует отдельно подтвердить в целевом cloud Pod после делегации
-  strict cgroup v2.
+  разрешённый пользователем smoke 2026-10-22 прошёл в trusted mode без per-job
+  cgroup. Целевой strict/GPU сценарий остаётся отдельной проверкой.
+- Реальный multi-GPU `FRAME_PER_GPU` smoke не выполнен: на проверенной ноде одна
+  GPU. Concurrency и lifecycle нескольких workers проверены fake Blender;
+  настоящий multi-GPU сценарий требует подходящего cloud Pod.
 - Для custom browser deployment backend должен оставаться приватным за HTTPS
   proxy на том же public origin, что и frontend. Proxy не должен подставлять
   internal Bearer в browser HTTP/WebSocket; переписывание `Host` допустимо.

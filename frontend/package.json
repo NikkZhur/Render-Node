@@ -9,6 +9,7 @@
     "build": "vite build",
     "build:mock": "VITE_RENDER_NODE_MOCK=true vite build",
     "lint": "eslint .",
+    "test": "node --test scripts/*.test.mjs",
     "preview": "vite preview",
     "qa:smoke": "node scripts/qa-smoke.mjs",
     "qa:jobs": "node scripts/qa-jobs.mjs",

@@ -130,7 +130,8 @@ not GPU VRAM; VRAM errors come from Blender/CUDA logs.
 ## Publication
 
 `.github/workflows/release.yml` runs backend Ruff, strict mypy and full pytest,
-then frontend lint and production build. The single publish job depends on both
+then frontend lint, all Node unit suites (`npm test`), and production build. The
+single publish job depends on both
 check jobs. A stable `vX.Y.Z` tag creates an explicit non-draft,
 non-prerelease GitHub Release with the bundle and `.sha256`, then publishes the
 matching versioned `linux/amd64` GHCR image. `master` publishes `latest` and a
@@ -146,3 +147,10 @@ The bundle manifest includes only backend runtime files, migrations, frozen
 lock metadata, built frontend files, and deployment scripts. It excludes source
 frontend, tests, caches, `.venv`, `node_modules`, Blender binaries, uploads, and
 secrets.
+
+Backend deployment tests run the installer and management command with temporary
+paths and fake external commands. The bundle test stages runtime sources and a
+small static frontend fixture in a temporary checkout, so backend checks do not
+depend on a pre-existing `frontend/dist`. The production build and real bundle
+assembly are separate release checks. These tests do not verify an actual Ubuntu
+installation, GPU runtime, or delegated kernel cgroup v2.

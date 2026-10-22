@@ -1,3 +1,5 @@
+export const FRAMES_PER_PAGE = 50;
+
 const validFrame = (value) => Number.isInteger(value) && value >= 1;
 
 const paddedFrame = (frame) => String(frame).padStart(4, "0");

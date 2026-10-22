@@ -1,44 +1,9 @@
+import { presentJob } from "./jobPresentation";
 import { withBrowserRequestPolicy } from "./requestPolicy";
 
+export { presentJob } from "./jobPresentation";
+
 const API_PREFIX = import.meta.env.VITE_RENDER_NODE_API_URL ?? "/api/v1";
-
-const engineLabels = {
-  CYCLES: "Cycles",
-  BLENDER_EEVEE: "Eevee",
-  BLENDER_WORKBENCH: "Workbench",
-};
-
-const deviceLabels = {
-  CPU: "CPU",
-  CUDA: "CUDA",
-  OPTIX: "OptiX",
-};
-
-const formatFrameSelection = (job) => {
-  if (job.frame_mode === "SINGLE") return `Frame ${job.frame_start}`;
-  if (job.frame_mode === "RANGE") return `${job.frame_start}–${job.frame_end}`;
-  return "All frames";
-};
-
-const formatCreatedAt = (createdAt) => {
-  const elapsedSeconds = Math.max(0, (Date.now() - new Date(createdAt).getTime()) / 1000);
-  if (elapsedSeconds < 60) return "Just now";
-  if (elapsedSeconds < 3600) return `${Math.floor(elapsedSeconds / 60)} min ago`;
-  if (elapsedSeconds < 86400) return `${Math.floor(elapsedSeconds / 3600)} hr ago`;
-  return `${Math.floor(elapsedSeconds / 86400)} days ago`;
-};
-
-export const presentJob = (job) => ({
-  ...job,
-  shortId: job.id.slice(0, 4).toUpperCase(),
-  file: job.source_filename ?? "Choose a .blend or ZIP",
-  progress: Math.round(job.progress * 100),
-  frame: formatFrameSelection(job),
-  engine: engineLabels[job.engine] ?? job.engine,
-  device: deviceLabels[job.device] ?? job.device,
-  version: job.blender_version,
-  created: formatCreatedAt(job.created_at),
-});
 
 export class ApiError extends Error {
   constructor(message, { code, details, status }) {

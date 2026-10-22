@@ -58,8 +58,8 @@ Render Node — самостоятельный сервис для удалён�
 | Blender runner | `asyncio.subprocess` | Безопасный запуск и остановка Blender |
 | GPU monitoring | `pynvml` | Метрики и обнаружение NVIDIA GPU |
 | Файлы | `aiofiles` | Асинхронная работа с загрузками |
-| File watcher | `watchfiles` | Обнаружение готовых кадров |
-| Preview | Pillow/OpenImageIO | Создание уменьшенных изображений |
+| Обнаружение кадров | Polling output в runner, финальная reconciliation в manager | Регистрация готовых кадров |
+| Preview | Pillow | Создание уменьшенных PNG |
 | Тесты | pytest + pytest-asyncio | Unit и integration тесты backend |
 | Frontend QA | Playwright | Smoke-сценарии, responsive и accessibility |
 
@@ -88,8 +88,9 @@ FastAPI backend
         `-- /workspace/jobs/{job_id}/output
 ```
 
-Frontend собирается Vite и в production обслуживается FastAPI либо отдельным
-reverse proxy. В development Vite работает на `5173`, FastAPI — на `8000`.
+Frontend собирается Vite и в production обслуживается Nginx, который также
+проксирует API/WebSocket в FastAPI. В development Vite работает на `5173`,
+FastAPI — на `8000`.
 
 Основной one-command flow для Ubuntu Pod скачивает проверенный bundle последнего
 стабильного GitHub Release. Frontend уже собран; Node.js и исходники frontend на
@@ -110,6 +111,9 @@ RunPod запускает напрямую без Docker daemon внутри Pod
 
 ## 6. Структура репозитория
 
+Основные runtime-модули и границы ответственности (вспомогательные schemas,
+types и exceptions опущены):
+
 ```text
 render-node/
 |-- backend/
@@ -117,71 +121,84 @@ render-node/
 |   |   |-- main.py
 |   |   |-- config.py
 |   |   |-- lifespan.py
+|   |   |-- access.py
+|   |   |-- security.py
 |   |   |-- api/
 |   |   |   |-- router.py
+|   |   |   |-- access.py
 |   |   |   |-- jobs.py
 |   |   |   |-- uploads.py
 |   |   |   |-- artifacts.py
 |   |   |   |-- devices.py
-|   |   |   |-- versions.py
-|   |   |   `-- websocket.py
+|   |   |   |-- blender.py
+|   |   |   |-- events.py
+|   |   |   `-- system.py
 |   |   |-- blender/
 |   |   |   |-- command.py
 |   |   |   |-- runner.py
 |   |   |   |-- sandbox.py
+|   |   |   |-- cgroups.py
 |   |   |   |-- devices.py
 |   |   |   |-- progress.py
-|   |   |   |-- scripts.py
-|   |   |   `-- versions.py
+|   |   |   |-- service.py
+|   |   |   |-- official.py
+|   |   |   |-- storage.py
+|   |   |   `-- adapters/
 |   |   |-- jobs/
 |   |   |   |-- manager.py
-|   |   |   |-- scheduler.py
+|   |   |   |-- progress.py
+|   |   |   |-- service.py
+|   |   |   |-- upload_service.py
+|   |   |   |-- models.py
+|   |   |   `-- repository.py
+|   |   |-- artifacts/
+|   |   |   |-- service.py
 |   |   |   |-- models.py
 |   |   |   `-- repository.py
 |   |   |-- events/
-|   |   |   |-- hub.py
-|   |   |   `-- schemas.py
-|   |   |-- monitoring/
-|   |   |   |-- gpu.py
-|   |   |   `-- system.py
-|   |   |-- storage/
-|   |   |   |-- database.py
-|   |   |   |-- uploads.py
-|   |   |   `-- artifacts.py
-|   |   `-- security/
-|   |       |-- auth.py
-|   |       `-- paths.py
+|   |   |   `-- hub.py
+|   |   |-- system/
+|   |   |   `-- metrics.py
+|   |   `-- storage/
+|   |       |-- database.py
+|   |       |-- uploads.py
+|   |       `-- jobs.py
 |   |-- migrations/
 |   |-- tests/
 |   |-- pyproject.toml
 |   `-- alembic.ini
 |-- frontend/
 |   |-- src/
-|   |   |-- app/
+|   |   |-- App.jsx
+|   |   |-- AccessGate.jsx
 |   |   |-- features/
-|   |   |   |-- jobs/
-|   |   |   |-- render-preview/
-|   |   |   |-- artifacts/
-|   |   |   |-- blender-versions/
-|   |   |   `-- system-metrics/
-|   |   |-- shared/
-|   |   |   |-- api/
-|   |   |   |-- ui/
-|   |   |   `-- hooks/
-|   |   `-- store/
+|   |   |   |-- artifacts/Artifacts.jsx
+|   |   |   `-- blender/VersionPanel.jsx
+|   |   |-- ui/
+|   |   |   |-- components.jsx
+|   |   |   `-- dialogHooks.js
+|   |   |-- api.js
+|   |   |-- realtime.js
+|   |   |-- jobPresentation.js
+|   |   |-- store.js
+|   |   `-- styles.css
 |   |-- scripts/
-|   |-- public/
 |   |-- package.json
 |   `-- vite.config.js
 |-- deploy/
 |   |-- nginx.conf.template
 |   |-- container-entrypoint.sh
 |   |-- supervisor.sh
+|   |-- cgroup-delegation.sh
 |   `-- README.md
 |-- scripts/
 |   |-- build-release-bundle.sh
 |   |-- dev.py
 |   `-- render-node
+|-- docs/
+|   |-- README.md
+|   |-- architecture.md
+|   `-- implementation-state.md
 |-- .github/workflows/release.yml
 |-- Dockerfile
 |-- install.sh
@@ -203,17 +220,20 @@ Production layout не зависит от checkout репозитория:
 
 Bundle создаётся локально запускаемым скриптом из явного manifest: backend
 `app`, migrations, Alembic/pyproject/lock, готовый `frontend/dist`, единый Nginx
-template, supervisor и management command. Frontend source, tests, `.venv`,
+template, supervisor, cgroup delegation helper и management command. Frontend source, tests, `.venv`,
 `node_modules`, caches, Blender binaries, uploads и secrets в bundle отсутствуют.
 Stable tag `vX.Y.Z` публикуется только после backend/frontend checks; `master`
 может публиковать только `latest`/SHA GHCR image после тех же checks.
 
 ### 6.1 Frontend architecture
 
-Frontend группируется по пользовательским возможностям, а не по типам React-
-компонентов. TanStack Query владеет server state: jobs, artifacts, Blender
-versions, operations и system metrics. Zustand хранит только локальное UI-
-состояние: выбранное задание, тему и открытые панели. Бизнес-правила переходов
+`App.jsx` координирует layout, Job Setup, Preview, Jobs и System Metrics.
+Artifacts и управление версиями Blender выделены в `features/`; общие визуальные
+компоненты и lifecycle диалогов находятся в `ui/`. Presentation helpers остаются
+небольшими независимыми модулями. TanStack Query владеет server state: jobs, artifacts, Blender
+versions, operations и system metrics. Zustand хранит выбранный job и состояние
+панели версий; тема использует React state и `localStorage` в `App.jsx`.
+Бизнес-правила переходов
 job и установки Blender во frontend не дублируются.
 
 Основной desktop-интерфейс состоит из Job Setup, Preview, Jobs, Artifacts и
@@ -358,19 +378,19 @@ finished_at: datetime | null
 ### 7.6 SystemStorage
 
 ```text
-id: string
+id: int
 name: string
 mount_point: string
 total_bytes: int
 free_bytes: int
-read_bytes_per_second: int
-write_bytes_per_second: int
-status: HEALTHY | LOW_SPACE | READ_ONLY | UNAVAILABLE
+read_mbps: float
+write_mbps: float
+status: healthy | low_space
 ```
 
 Backend публикует только файловые системы, которые используются сервисом:
-workspace, jobs, Blender versions и отдельное хранилище результатов, если оно
-настроено. Внутренние pseudo-filesystems не попадают в API.
+workspace, jobs и Blender versions. Пути на одной файловой системе объединяются
+в одну строку. Внутренние pseudo-filesystems не попадают в API.
 
 ## 8. Файловая модель
 
@@ -386,21 +406,19 @@ workspace, jobs, Blender versions и отдельное хранилище ре�
 |       |   |-- frame_0001.png
 |       |   `-- frame_0002.png
 |       |-- preview/
-|       |   `-- frame_0002.webp
+|       |   `-- frame_0002.png
 |       |-- logs/
 |       |   |-- blender.log
 |       |   |-- blender-gpu-0.log
 |       |   `-- blender-gpu-1.log
 |       `-- temp/
-|-- blender/
-|   |-- versions/
-|   |-- downloads/
-|   `-- quarantine/
-`-- cache/
-    `-- previews/
+`-- blender/
+    |-- versions/
+    |-- downloads/
+    `-- quarantine/
 ```
 
-Каждое задание изолировано своей директорией. Пользовательские имена не
+Файлы каждого задания находятся в отдельной директории. Пользовательские имена не
 используются как директории. Все пути формируются backend из UUID и проверяются
 на выход за пределы `/workspace/jobs`.
 
@@ -671,15 +689,15 @@ Blender через единый `SandboxRunner`; прямой вызов subproc
 Минимальный профиль любого запуска:
 
 - отдельная process group через `start_new_session=True`;
-- непривилегированный worker без capabilities и с `no-new-privileges`;
+- `no-new-privileges`; production supervisor запускает backend и worker как UID 10001;
 - закрытые посторонние file descriptors;
 - очищенное окружение без backend secrets, `PYTHONPATH`, `PYTHONHOME` и
   пользовательских site-packages;
 - отдельные `HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` и `TMPDIR` внутри
   `/workspace/jobs/{job_id}/temp`;
-- read-only Blender installation и version-specific backend scripts;
-- read/write доступ только к директории текущего job;
-- доступ только к назначенным GPU;
+- доверенные version-specific backend scripts и проверенные пути input/output;
+- рабочая директория текущего job;
+- выбор назначенных GPU через UUID в `CUDA_VISIBLE_DEVICES` и Blender adapter;
 - лимиты wall time, CPU и размера output, а также per-job cgroup v2 для
   фактически используемой RAM, swap и pids;
 - `SIGTERM`, grace timeout и `SIGKILL` для всей process group в `finally`.
@@ -705,6 +723,9 @@ Blender через единый `SandboxRunner`; прямой вызов subproc
 scheduler может запускать её сразу. Browser pairing управляет доступом к узлу,
 а не выбором subprocess trust mode. Multi-tenant render farm потребует отдельной
 worker isolation architecture и не является режимом этого одноузлового продукта.
+Runner не создаёт filesystem/network namespaces и не ограничивает GPU через
+device cgroup. Проверка путей API и allowlist окружения не запрещают самому
+Blender читать доступные service UID файлы соседних jobs или обращаться к сети.
 
 Пример минимального окружения процесса:
 
@@ -895,11 +916,15 @@ FastAPI `BackgroundTasks` не используется для длительн�
 
 ## 15. Preview и результаты
 
-Watcher реагирует только на закрытие или стабилизацию нового файла. Preview:
+Runner опрашивает output directory, сравнивает размеры файлов между snapshots
+и выполняет заключительный snapshot после завершения Blender. Manager повторно
+сканирует output перед фиксацией terminal state, чтобы восстановить пропущенные
+artifacts. Preview:
 
 1. Проверяет, что путь принадлежит output-директории job.
-2. Проверяет формат и максимальный размер.
-3. Создаёт WebP/JPEG с ограничением ширины и высоты.
+2. Проверяет поддерживаемый формат и лимит числа пикселей.
+3. Создаёт PNG через Pillow с ограничением ширины и высоты. EXR сохраняется как
+   original без автоматического preview.
 4. Регистрирует artifact в SQLite.
 5. Отправляет `render.preview_ready` с HTTP URL.
 
@@ -913,8 +938,8 @@ presentation: полный `blender.log` остаётся artifact и скачи
 
 Artifacts относятся к выбранному job. Последовательность запрашивается
 страницами по 50 кадров, а переход между страницами не загружает thumbnails всех
-кадров. ZIP и отдельные originals обслуживаются потоково с лимитами размера и
-времени.
+кадров. ZIP собирается во временный файл на диске с проверкой лимита размера;
+ZIP и отдельные originals скачиваются по HTTP без загрузки целиком в память.
 
 ## 16. Безопасность
 
@@ -1004,29 +1029,20 @@ Start/Retry fail-closed, если strict cgroup недоступен.
 
 ## 18. Логирование и наблюдаемость
 
-Backend пишет структурированные JSON-логи:
+Ошибки API и сбора метрик используют стандартный Python logging. Blender stdout
+сохраняется в `blender.log` (и отдельных worker logs для `FRAME_PER_GPU`) и
+публикуется через `render.log`. Единого JSON-формата backend log сейчас нет.
 
-```json
-{
-  "level": "info",
-  "event": "blender.started",
-  "job_id": "d28e3f5f-8e1d-4a61-a01c-9d989eab6730",
-  "pid": 1241,
-  "gpu_ids": [0]
-}
-```
+`/api/v1/system/metrics` возвращает:
 
-Минимальные метрики:
-
-- количество jobs по статусам;
-- длительность подготовки и рендера;
-- размер очереди;
 - число активных WebSocket-клиентов;
 - GPU utilization и VRAM;
 - CPU utilization, RAM и температура, если sensor доступен;
-- total/free space и read/write throughput рабочих файловых систем;
-- прогресс и ошибки Blender download/upload/install operations;
-- количество завершений, отмен и ошибок.
+- total/free space и read/write throughput рабочих файловых систем.
+
+Состояние jobs и Blender operations, timestamps, progress и errors доступны
+через их REST-модели и WebSocket events. Отдельных счётчиков очереди/завершений
+и Prometheus endpoint пока нет.
 
 ## 19. Тестирование
 
@@ -1037,7 +1053,7 @@ Backend пишет структурированные JSON-логи:
 - обязательные `--factory-startup`, `--disable-autoexec`,
   `--python-exit-code 1` и запрет пользовательских Python/autoexec flags;
 - allowlist окружения worker и очистка `PYTHONPATH`, `PYTHONHOME` и secrets;
-- валидация запрета disabled sandbox в production;
+- валидация обязательного strict resource isolation в production;
 - progress parser;
 - защита путей и ZIP;
 - обнаружение версий, SHA-256 и безопасная распаковка Blender;
@@ -1063,8 +1079,7 @@ Backend пишет структурированные JSON-логи:
 - создание job и upload;
 - запуск fake Blender executable;
 - запуск только через `SandboxRunner`, а не напрямую из API/Job Manager;
-- запрет чтения соседнего job и записи вне текущей job directory;
-- запрет сети и превышения pids/resource limits в production sandbox fixture;
+- containment путей API/uploads/artifacts и очистка worker environment;
 - live-события и завершение;
 - отмена всей process group, включая дочерний fake process;
 - создание fake cgroup v2, наследование потомками и cleanup после
@@ -1079,9 +1094,14 @@ Backend пишет структурированные JSON-логи:
 - manual `upload -> official checksum match -> install` с fake archive;
 - отказ от manual archive без официального checksum и quarantine cleanup.
 
+Fake cgroup fixtures проверяют настройку и lifecycle вызовов, но не enforcement
+RAM/pids ядром. Kernel cgroup v2, реальный GPU и доступ к filesystem/network
+нельзя считать проверенными этими тестами; filesystem/network isolation внутри
+узла вообще не реализована.
+
 ### Frontend
 
-- lint и production build;
+- lint, все Node unit suites через `npm test` и production build;
 - один основной Playwright smoke-сценарий desktop/mobile;
 - selector multi-GPU стратегии: видимость, default, normalization, persistence
   и desktop/mobile screenshots;
@@ -1095,7 +1115,7 @@ Backend пишет структурированные JSON-логи:
 - CPU, GPU и storage rows не создают горизонтальный overflow, дополнительные
   строки доступны через внутреннюю прокрутку.
 
-### Blender smoke test
+### Blender smoke test (отдельная проверка реального runtime)
 
 - запуск каждой версии из manifest без GPU;
 - проверка заявленного номера версии;
@@ -1158,7 +1178,7 @@ Backend пишет структурированные JSON-логи:
 - Upload limits и resumable upload.
 - Cleanup policy.
 - Cleanup загруженных Blender archives и abandoned quarantine operations.
-- Single-tenant production profile для временно арендованного узла.
+- Single-tenant deployment для временно арендованного узла без trust/profile toggle.
 - Production worker sandbox без сети, соседних jobs и backend secrets перед
   shared deployment.
 - Health/readiness endpoints.
@@ -1187,10 +1207,11 @@ Blender и публикует результаты.
 - Frontend: React/Vite.
 - База: SQLite.
 - Realtime: нативный WebSocket.
-- Один Pod и один активный Blender process.
+- Один Pod и одна активная логическая job; `FRAME_PER_GPU` допускает несколько
+  Blender processes внутри этой job.
 - Каждый `.blend` запускается через `SandboxRunner` с `--factory-startup` и
-  `--disable-autoexec`; production direct runner требует явного single-tenant
-  профиля, а shared профиль остаётся fail-closed без изолированного worker.
+  `--disable-autoexec`; production требует strict resource isolation.
+  Shared/multi-tenant режим с отдельной worker sandbox не реализован.
 - `RLIMIT_AS` не применяется. Strict production требует writable delegated
   cgroup v2 на job; local trusted fallback использует внешний лимит узла и явно
   отображается в diagnostics.

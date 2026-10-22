@@ -194,7 +194,8 @@ try {
 
   await desktop.locator(".job-row").filter({ hasText: "Loft still" }).click();
   await desktop.getByRole("button", { name: "Open frame sequence, 240 frames" }).click();
-  const desktopFramesModal = desktop.getByRole("dialog", { name: "Frames 1–240" });
+  // The legacy mock job has no frame-range metadata, so its title reports a count.
+  const desktopFramesModal = desktop.getByRole("dialog", { name: "240 rendered frames", exact: true });
   assert(await desktopFramesModal.isVisible(), "Frame sequence popup did not open on desktop");
   await desktopFramesModal.getByText("frame_0050.png", { exact: true }).waitFor();
   assert((await desktopFramesModal.locator(".frame-row").count()) === 50, "The first frame page does not contain 50 frames");
@@ -988,7 +989,7 @@ try {
 
   await mobile.locator(".job-row").filter({ hasText: "Loft still" }).tap();
   await mobile.getByRole("button", { name: "Open frame sequence, 240 frames" }).tap();
-  const mobileFramesModal = mobile.getByRole("dialog", { name: "Frames 1–240" });
+  const mobileFramesModal = mobile.getByRole("dialog", { name: "240 rendered frames", exact: true });
   assert(await mobileFramesModal.isVisible(), "Frame sequence popup did not open after a mobile tap");
   await mobileFramesModal.getByText("frame_0050.png", { exact: true }).waitFor();
   assert((await mobileFramesModal.locator(".frame-row").count()) === 50, "Mobile frame page does not contain 50 frames");

@@ -324,9 +324,37 @@ def test_bad_checksum_and_unsafe_tar_do_not_create_installation(harness: Harness
         assert not harness.install.exists()
 
 
-def test_bundle_manifest_is_explicit_and_clean(tmp_path: Path) -> None:
+@pytest.fixture
+def bundle_checkout(tmp_path: Path) -> Path:
+    """Stage real runtime sources without requiring a local frontend build."""
+    checkout = tmp_path / "checkout"
+    for directory in ("backend/app", "backend/migrations", "deploy", "scripts"):
+        shutil.copytree(ROOT / directory, checkout / directory)
+    for filename in ("alembic.ini", "pyproject.toml", "uv.lock"):
+        shutil.copy2(ROOT / "backend" / filename, checkout / "backend" / filename)
+    frontend_dist = checkout / "frontend" / "dist"
+    frontend_dist.mkdir(parents=True)
+    (frontend_dist / "index.html").write_text("<!doctype html><title>Bundle fixture</title>\n")
+    # Make exclusion checks meaningful even in a clean checkout without caches.
+    for relative in (
+        ".env",
+        "backend/app/__pycache__/fixture.pyc",
+        "backend/.venv/fixture",
+        "backend/tests/test_fixture.py",
+        "frontend/node_modules/fixture",
+        "frontend/src/App.jsx",
+        "fixture.blend",
+    ):
+        path = checkout / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("must not be packaged\n")
+    return checkout
+
+
+def test_bundle_manifest_is_explicit_and_clean(tmp_path: Path, bundle_checkout: Path) -> None:
     output = tmp_path / "dist"
-    run(["/bin/bash", str(ROOT / "scripts/build-release-bundle.sh"), "1.2.3", str(output)])
+    build_script = str(bundle_checkout / "scripts/build-release-bundle.sh")
+    run(["/bin/bash", build_script, "1.2.3", str(output)])
     archive = output / "render-node-linux-x64.tar.gz"
     checksum = output / "render-node-linux-x64.tar.gz.sha256"
     assert hashlib.sha256(archive.read_bytes()).hexdigest() in checksum.read_text()
@@ -343,10 +371,10 @@ def test_bundle_manifest_is_explicit_and_clean(tmp_path: Path) -> None:
         "render-node/scripts/render-node",
     }
     assert required <= names
-    forbidden = ("node_modules", ".venv", "__pycache__", "tests/", "frontend/src", ".blend")
+    forbidden = ("node_modules", ".venv", "__pycache__", "tests/", "frontend/src", ".blend", ".env")
     assert not any(any(part in name for part in forbidden) for name in names)
     second = tmp_path / "second"
-    run(["/bin/bash", str(ROOT / "scripts/build-release-bundle.sh"), "1.2.3", str(second)])
+    run(["/bin/bash", build_script, "1.2.3", str(second)])
     assert archive.read_bytes() == (second / archive.name).read_bytes()
 
 
@@ -617,6 +645,10 @@ def test_native_flow_has_no_node_docker_systemd_and_image_is_pinned() -> None:
 
 def test_publish_job_is_gated_by_all_checks() -> None:
     workflow = (ROOT / ".github/workflows/release.yml").read_text()
+    frontend_checks = workflow.split("  frontend-checks:", maxsplit=1)[1].split(
+        "  publish:", maxsplit=1
+    )[0]
+    assert "- run: npm test" in frontend_checks
     publish = workflow.split("  publish:", maxsplit=1)[1]
     assert "needs: [backend-checks, frontend-checks]" in publish
     assert "contents: write" in publish
