@@ -12,6 +12,7 @@
     "test": "node --test scripts/*.test.mjs",
     "preview": "vite preview",
     "qa:regressions": "node scripts/qa-project-regressions.mjs",
+    "qa:scene-analysis": "node scripts/qa-scene-analysis.mjs",
     "qa:smoke": "node scripts/qa-smoke.mjs",
     "qa:jobs": "node scripts/qa-jobs.mjs",
     "qa:versions": "node scripts/qa-versions.mjs",

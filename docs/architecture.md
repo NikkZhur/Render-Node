@@ -482,6 +482,27 @@ POST   /api/v1/jobs/{job_id}/uploads
 добавляется, когда реальные размеры сцен или нестабильное соединение подтвердят
 эту необходимость.
 
+Browser upload передаёт multipart `auto_configure=true`; прежние API-клиенты без
+флага сохраняют явные настройки. После сохранения input `SceneAnalysisService`
+запускает ограниченный фоновый `SceneInspector` через `SandboxRunner` на версии
+Blender, записанной в Job. Отдельные `analysis_id`, `analysis_status`,
+`analysis_error`, `scene_metadata` и `auto_configured` сохраняются в SQLite
+(миграция `20261023_0006`). Состояние рендера остаётся READY; start/update
+блокируются до окончания анализа. Замена и удаление под общим JobLock отменяют
+процесс до изменения файлов. Завершение проверяет поколение analysis_id.
+При ошибке input сохраняется и доступна ручная настройка; restart переводит
+незаконченный анализ в failed. Задачи анализа выполняются последовательно.
+
+Метаданные включают движок, camera, frame bounds/step, разрешение и признаки
+OSL/path guiding. GPU/MIG сопоставляются по UUID и проверяются отдельным
+процессом Blender с `CUDA_VISIBLE_DEVICES`. Автоподбор Cycles предпочитает
+OptiX, CUDA, CPU с учётом этих признаков, выбирает frame-per-GPU для анимации
+и shared process для одного кадра. Это эвристика без benchmark и оценки
+достаточности VRAM/RAM. Eevee/Workbench управляют графическим устройством сами.
+Файл не пересохраняется, настройки качества не меняются. Frontend обновляет
+существующую форму через `job.analysis_updated`/polling и разрешает ручное
+редактирование после анализа; обычные refetch не сбрасывают локальные правки.
+
 ### Artifacts
 
 `GET /api/v1/jobs/{id}/frames` использует SQL COUNT, LIMIT/OFFSET и один batch

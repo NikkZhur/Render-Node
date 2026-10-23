@@ -4011,3 +4011,14 @@ main {
     transition-duration: 0.01ms !important;
   }
 }
+.scene-analysis-note {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-soft);
+  overflow-wrap: anywhere;
+}
+
+.scene-analysis-note.analysis-failed {
+  color: var(--orange);
+}

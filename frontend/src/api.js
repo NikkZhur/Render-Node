@@ -105,6 +105,7 @@ export const jobsApi = {
   async upload(jobId, file) {
     const form = new FormData();
     form.append("file", file);
+    form.append("auto_configure", "true");
     return presentJob(await request(`/jobs/${jobId}/uploads`, { method: "POST", body: form }));
   },
 

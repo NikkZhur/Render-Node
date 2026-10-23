@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     blender_catalog_ttl_seconds: int = Field(default=3600, ge=60, le=86_400)
     blender_download_timeout_seconds: int = Field(default=3600, ge=30, le=86_400)
     render_scheduler_enabled: bool = True
+    scene_analysis_timeout_seconds: int = Field(default=120, ge=1, le=600)
     bundled_blender_root: Path = Path("/opt/render-node/blender")
     render_timeout_seconds: int = Field(default=21_600, ge=1, le=604_800)
     render_terminate_grace_seconds: float = Field(default=5, ge=0.1, le=60)

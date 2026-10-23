@@ -17,11 +17,12 @@ from app.jobs.models import Job, utc_now
 from app.jobs.repository import JobRepository
 from app.jobs.schemas import JobCreate, JobUpdate
 from app.jobs.state_machine import transition_job
-from app.jobs.types import ComputeDevice, GpuRenderMode, JobStatus
+from app.jobs.types import ANALYSIS_ACTIVE, AnalysisStatus, ComputeDevice, GpuRenderMode, JobStatus
 from app.storage.database import Database
 from app.storage.jobs import JobStorage
 
 if TYPE_CHECKING:
+    from app.jobs.analysis import SceneAnalysisService
     from app.jobs.manager import JobManager
 
 
@@ -53,6 +54,7 @@ class JobService:
         event_hub: EventHub,
         artifact_service: ArtifactService,
         manager: JobManager | None = None,
+        analysis: SceneAnalysisService | None = None,
     ) -> None:
         self._database = database
         self._storage = storage
@@ -60,6 +62,7 @@ class JobService:
         self._events = event_hub
         self._artifacts = artifact_service
         self._manager = manager
+        self._analysis = analysis
 
     async def create(self, payload: JobCreate) -> Job:
         values = payload.model_dump()
@@ -123,6 +126,12 @@ class JobService:
                         "job_settings_locked",
                         "Job settings cannot be changed after rendering has started",
                     )
+                self._ensure_analyzed(job)
+                if any(
+                    getattr(job, key) != value
+                    for key, value in payload.model_dump(exclude_none=True).items()
+                ):
+                    job.auto_configured = False
                 self._apply_configuration(job, payload)
         await self._events.publish("job.updated", job_id=str(job.id), status=job.status.value)
         return job
@@ -147,6 +156,10 @@ class JobService:
                         name=self._rerender_name(source.name),
                         source_filename=source.source_filename,
                         scene_path=source.scene_path,
+                        scene_metadata=source.scene_metadata,
+                        analysis_status=AnalysisStatus.COMPLETED
+                        if source.scene_metadata
+                        else AnalysisStatus.NONE,
                         status=JobStatus.READY,
                         blender_version=source.blender_version,
                         engine=source.engine,
@@ -184,6 +197,8 @@ class JobService:
                         "active_job_cannot_be_deleted",
                         "Queued or rendering jobs cannot be deleted",
                     )
+                if self._analysis is not None:
+                    await self._analysis.cancel(job_id)
                 await ArtifactRepository(session).delete_for_job(job_id)
                 await repository.delete(job)
             await self._storage.delete_job(job_id)
@@ -261,6 +276,7 @@ class JobService:
                 job = await self._require(repository, job_id)
                 next_status = transition_job(job.status, target)
                 if target is JobStatus.QUEUED:
+                    self._ensure_analyzed(job)
                     active_runtime = await BlenderRepository(session).active_runtime()
                     if active_runtime is None or active_runtime.version != job.blender_version:
                         raise JobConflictError(
@@ -275,6 +291,11 @@ class JobService:
                         self._manager.ensure_accepting_jobs()
                 job.status = next_status
             return job
+
+    @staticmethod
+    def _ensure_analyzed(job: Job) -> None:
+        if job.analysis_status in ANALYSIS_ACTIVE:
+            raise JobConflictError("scene_analysis_pending", "Wait for scene analysis to finish")
 
     @staticmethod
     async def _require(repository: JobRepository, job_id: UUID) -> Job:

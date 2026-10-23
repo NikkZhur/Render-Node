@@ -3,7 +3,7 @@
 from typing import Annotated, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile, status
 
 from app.jobs.schemas import JobResponse
 from app.jobs.upload_service import JobUploadService
@@ -34,5 +34,8 @@ async def upload_scene(
     job_id: UUID,
     file: UploadFileDependency,
     service: UploadServiceDependency,
+    auto_configure: Annotated[bool, Form()] = False,
 ) -> JobResponse:
-    return JobResponse.model_validate(await service.upload(job_id, file))
+    return JobResponse.model_validate(
+        await service.upload(job_id, file, auto_configure=auto_configure)
+    )

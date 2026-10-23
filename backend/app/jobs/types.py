@@ -13,6 +13,17 @@ class JobStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class AnalysisStatus(StrEnum):
+    NONE = "none"
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+ANALYSIS_ACTIVE = frozenset({AnalysisStatus.PENDING, AnalysisStatus.RUNNING})
+
+
 class RenderEngine(StrEnum):
     CYCLES = "CYCLES"
     BLENDER_EEVEE = "BLENDER_EEVEE"

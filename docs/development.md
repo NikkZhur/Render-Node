@@ -144,6 +144,7 @@ Other scenarios require different environments:
 | Command | Required setup | Coverage |
 |---|---|---|
 | `npm run qa:regressions` | Normal frontend; HTTP and WebSocket are replaced with isolated fixtures | Global queue summary, metric sample history, CPU/GPU selection, gallery log filtering, and desktop/mobile layout |
+| `npm run qa:scene-analysis` | Normal frontend; isolated HTTP/WebSocket fixtures | Automatic setup, disabled Start during analysis, manual edits/reload, replacement, polling, Eevee device display, and mobile failure state |
 | `npm run qa:versions-empty` | Normal `npm run dev`; the script intercepts API routes with fixtures | Empty runtime registry, installation/activation, and job controls |
 | `npm run qa:api` | Normal frontend and a disposable backend with verified 5.2.0 and 4.1.1 runtimes, with 5.2.0 active | Scene upload, `READY`, and reload persistence |
 | `npm run qa:runner` | Normal frontend and a disposable backend with an active fake Blender supporting the scenario's markers | Progress/log events, frames/previews/ZIP, reload recovery, metrics, and cancellation |

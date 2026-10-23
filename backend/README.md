@@ -146,5 +146,30 @@ Render lifecycle:
   VRAM exhaustion and a plain `SIGABRT`; cgroups do not limit VRAM;
 - `GET /api/v1/devices` returns an empty list safely when NVIDIA NVML is unavailable.
 
-Alembic head `20260818_0005` adds the non-null Job strategy column with
-`ALL_GPUS_PER_FRAME` as the server default for legacy rows.
+Scene uploads from the browser include multipart `auto_configure=true`. The
+upload returns a ready Job with a separate `analysis_status` (`pending`,
+`running`, `completed`, or `failed`). Legacy API callers omit the flag to keep
+their explicit settings. `analysis_id` identifies each file generation;
+`scene_metadata`, `analysis_error`, and `auto_configured` survive restart.
+The `job.analysis_updated` event invalidates REST job data, with frontend polling
+while analysis is pending. Start and configuration updates return `409` with
+`scene_analysis_pending` until analysis finishes; replacement and deletion cancel
+the reader before touching its input. Analysis failure preserves the upload and
+allows manual setup. Interrupted analyses become failed at startup.
+
+The recorded Blender runtime inspects the scene with autoexec disabled inside
+the existing resource boundary. Analysis is serialized, uses a separate temporary
+directory, has a 1 MiB output/log budget per process, and a total configurable
+120-second deadline (`RENDER_NODE_SCENE_ANALYSIS_TIMEOUT_SECONDS`). Each GPU/MIG
+UUID is probed in a separate clean Blender process. Cycles prefers available
+OptiX, then CUDA, then CPU; path guiding stays on CPU and OSL excludes CUDA.
+Animations distribute frames across compatible GPUs, capped by the actual frame
+count and 16 devices. Single-frame jobs use the shared process. Scene engine,
+frame step, and image quality are preserved; zero/negative bounds use ALL.
+Eevee/Workbench display Automatic device because graphics selection belongs to
+Blender, independently of Cycles device settings. Capability discovery is not a
+benchmark or a guarantee that a scene fits in VRAM/RAM.
+
+Alembic head `20261023_0006` adds scene-analysis state with `none` for legacy jobs;
+existing jobs are not reconfigured. The preceding `20260818_0005` migration adds
+the strategy column with `ALL_GPUS_PER_FRAME` as its legacy default.

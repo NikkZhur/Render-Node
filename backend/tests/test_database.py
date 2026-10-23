@@ -27,7 +27,7 @@ async def test_migrations_reach_current_head(tmp_path: Path) -> None:
             revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
     finally:
         await engine.dispose()
-    assert revision == "20260818_0005"
+    assert revision == "20261023_0006"
 
 
 async def test_gpu_render_mode_migration_preserves_existing_job_semantics(tmp_path: Path) -> None:
@@ -69,9 +69,11 @@ async def test_gpu_render_mode_migration_preserves_existing_job_semantics(tmp_pa
 
     with sqlite3.connect(database_path) as connection:
         mode = connection.execute(
-            "SELECT gpu_render_mode FROM jobs WHERE name = ?", ("Legacy multi GPU",)
+            "SELECT gpu_render_mode, analysis_status, analysis_id, scene_metadata, auto_configured "
+            "FROM jobs WHERE name = ?",
+            ("Legacy multi GPU",),
         ).fetchone()
-    assert mode == ("ALL_GPUS_PER_FRAME",)
+    assert mode == ("ALL_GPUS_PER_FRAME", "none", None, None, 0)
 
 
 async def test_lifespan_rejects_database_without_current_migration(tmp_path: Path) -> None:

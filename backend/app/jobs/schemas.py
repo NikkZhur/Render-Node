@@ -8,7 +8,15 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.jobs.types import ComputeDevice, FrameMode, GpuRenderMode, JobStatus, RenderEngine
+from app.blender.inspection_schemas import SceneMetadata
+from app.jobs.types import (
+    AnalysisStatus,
+    ComputeDevice,
+    FrameMode,
+    GpuRenderMode,
+    JobStatus,
+    RenderEngine,
+)
 
 
 class JobConfiguration(BaseModel):
@@ -86,6 +94,11 @@ class JobResponse(BaseModel):
     id: UUID
     name: str
     source_filename: str | None
+    analysis_id: UUID | None = None
+    analysis_status: AnalysisStatus = AnalysisStatus.NONE
+    analysis_error: str | None = None
+    scene_metadata: SceneMetadata | None = None
+    auto_configured: bool = False
     status: JobStatus
     blender_version: str
     engine: RenderEngine

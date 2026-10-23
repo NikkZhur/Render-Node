@@ -12,12 +12,14 @@ from app.artifacts.service import ArtifactService
 from app.blender.cgroups import CgroupIsolation, CgroupLimits
 from app.blender.command import BlenderExecutableResolver
 from app.blender.devices import GpuDiscovery, GpuScheduler
+from app.blender.inspection import SceneInspector
 from app.blender.official import OfficialCatalog
 from app.blender.runner import RunnerLimits, SandboxRunner
 from app.blender.service import BlenderService
 from app.blender.storage import BlenderStorage
 from app.config import Settings
 from app.events.hub import EventHub
+from app.jobs.analysis import SceneAnalysisService
 from app.jobs.locks import JobLocks
 from app.jobs.manager import JobManager
 from app.jobs.service import JobService
@@ -28,7 +30,7 @@ from app.storage.repository import DatabaseHealthRepository
 from app.storage.uploads import UploadStorage
 from app.system.metrics import SystemMetricsService
 
-EXPECTED_DATABASE_REVISION = "20260818_0005"
+EXPECTED_DATABASE_REVISION = "20261023_0006"
 
 
 async def _prepare_storage(settings: Settings) -> BlenderStorage:
@@ -116,10 +118,47 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.gpu_discovery = gpu_discovery
     app.state.gpu_scheduler = gpu_scheduler
     app.state.job_manager = job_manager
-    app.state.job_service = JobService(
-        database, job_storage, locks, event_hub, artifact_service, job_manager
+    scene_inspector = SceneInspector(
+        SandboxRunner(
+            RunnerLimits(
+                timeout_seconds=settings.scene_analysis_timeout_seconds,
+                terminate_grace_seconds=settings.render_terminate_grace_seconds,
+                max_output_bytes=1024 * 1024,
+                max_log_bytes=1024 * 1024,
+            ),
+            CgroupIsolation(
+                settings.resource_isolation_mode,
+                CgroupLimits(
+                    memory_bytes=settings.worker_memory_bytes,
+                    swap_bytes=settings.worker_swap_bytes,
+                    pids=settings.worker_pids_limit,
+                    cleanup_timeout_seconds=settings.render_terminate_grace_seconds,
+                ),
+                configured_root=settings.cgroup_root,
+            ),
+        ),
+        gpu_discovery,
+        gpu_scheduler,
+        timeout_seconds=settings.scene_analysis_timeout_seconds,
     )
-    job_upload_service = JobUploadService(database, upload_storage, job_storage, locks, event_hub)
+    analysis_service = SceneAnalysisService(
+        database,
+        job_storage,
+        locks,
+        event_hub,
+        scene_inspector,
+        BlenderExecutableResolver(
+            bundled_root=settings.bundled_blender_root,
+            installed_root=settings.blender_versions_root,
+        ),
+    )
+    app.state.scene_analysis_service = analysis_service
+    app.state.job_service = JobService(
+        database, job_storage, locks, event_hub, artifact_service, job_manager, analysis_service
+    )
+    job_upload_service = JobUploadService(
+        database, upload_storage, job_storage, locks, event_hub, analysis_service
+    )
     app.state.job_upload_service = job_upload_service
     blender_service = BlenderService(
         database,
@@ -158,12 +197,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await job_upload_service.recover_incomplete_uploads()
         await blender_service.initialize()
         await job_manager.start()
+        await analysis_service.initialize()
         await system_metrics_service.start()
         app.state.ready = True
         yield
     finally:
         app.state.ready = False
         await system_metrics_service.shutdown()
+        await analysis_service.shutdown()
         await job_manager.shutdown()
         await blender_service.shutdown()
         await database.dispose()

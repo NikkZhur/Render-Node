@@ -82,7 +82,8 @@ above; keep the two environment variables set when starting a new shell.
 
 1. Open **Blender versions** and download, install, then activate a runtime.
 2. Create a job and upload a `.blend` scene or ZIP archive with its assets.
-3. Choose the engine, frames, and compute devices, then start the render.
+3. Wait for scene analysis to fill the engine, frames, and compute devices.
+   Adjust any setting if needed, then start the render.
 4. Follow the preview and logs; download completed frames from **Artifacts**.
 
 The first browser to open an unclaimed node gets access. Use **Pair another
@@ -148,7 +149,8 @@ and REST/WebSocket contracts.
 | [Implementation status](docs/implementation-state.md) | Verified behavior, known issues, and outstanding checks | Russian |
 | [Configuration](.env.example) | Environment variables and resource limits | English |
 
-Real CUDA/OptiX smoke checks have run on one NVIDIA GPU. Multiple physical GPUs,
+Real CUDA/OptiX smoke checks have run on one NVIDIA GPU, and automatic setup plus
+OptiX frame distribution have been checked on two MIG devices. Full physical GPUs,
 production installation/rollback, and delegated kernel cgroup v2 isolation still
 need validation in the target environment. Fake Blender checks cover application
 behavior; they do not replace those checks. The

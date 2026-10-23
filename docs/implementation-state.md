@@ -5,6 +5,11 @@
 
 ## Текущее состояние
 
+- 2026-10-23: добавлен фоновый анализ загруженной сцены и автозаполнение текущей
+  формы. Реальный Blender 4.5.11 автоматически выбрал OptiX и два доступных
+  MIG 1g.24gb устройства RTX PRO 6000 Blackwell; тестовые кадры 11/13/15
+  успешно отрендерены в FRAME_PER_GPU, состояние проверено после restart.
+  Проверка выполнялась в trusted mode на отдельной синтетической сцене.
 - 2026-10-23: повторное ревью незакоммиченных изменений исправило два дефекта:
   изменение scene bounds при подготовке single-process ALL и несогласованную
   шкалу истории дисковых скоростей. Проверки и ограничения описаны ниже.
@@ -28,6 +33,17 @@
 
 ## Реализовано
 
+- Browser upload запускает анализ сцены через отдельный ограниченный
+  `SandboxRunner`. Engine, bounds/step, resolution, camera, OSL/path guiding
+  читаются из файла; CUDA/OptiX проверяются в записанной версии Blender отдельно
+  для каждого UUID. Выбираются совместимые GPU, режим распределения и кадры.
+  Исходный файл и параметры качества сохраняются. Eevee/Workbench показывают
+  Automatic device, поскольку Cycles backend не управляет их GPU.
+- Analysis status и metadata сохраняются в SQLite; `job.analysis_updated` и
+  polling обновляют форму. Start/update блокируются только во время анализа.
+  Замена/удаление останавливают процесс до изменения input, результат проверяется
+  по analysis_id. Ошибки/timeout/restart оставляют ручную настройку доступной.
+  Ручные правки после анализа не сбрасываются обычным обновлением данных.
 - Single-process `ALL_GPUS_PER_FRAME` (включая CPU/одну GPU) получает фактический
   `FRAME_PLAN` из Blender для RANGE/ALL: границы сцены, число кадров и `frame_step`.
   Общая доля складывается из завершённых кадров и sample fraction текущего кадра;
@@ -40,8 +56,8 @@
 - Metrics history содержит не более 60 реальных timestamped REST/WS samples.
   Повторные/запоздалые samples не добавляются; GPU привязаны к UUID, диски — к
   mount point. Неизвестные значения дают разрывы, настоящий ноль сохраняется.
-  `avg. frame` и диапазон сцены явно неизвестны, поскольку API пока не сообщает
-  эти значения. CPU mode отключает GPU controls, подсветку и allocation count;
+  `avg. frame` остаётся неизвестным; диапазон сцены показывается после успешного
+  анализа загрузки. CPU mode отключает GPU controls, подсветку и allocation count;
   выбор для GPU mode сохраняется локально при переключении обратно.
 - Галерея использует SQL COUNT и LIMIT/OFFSET для originals, один batch preview
   lookup для кадров страницы. Запрос лога фильтруется `?kind=blender_log` на уровне
@@ -229,7 +245,13 @@
 
 ## Контракты и миграции
 
-- Alembic head `20260818_0005` добавляет обязательный `jobs.gpu_render_mode` с
+- Alembic head `20261023_0006` добавляет `analysis_id`, `analysis_status`,
+  `analysis_error`, `scene_metadata`, `auto_configured`. Старые jobs получают
+  `none` и сохраняют исходную конфигурацию. Multipart `auto_configure=true`
+  включает анализ; browser выставляет флаг, прежние API-клиенты без него
+  сохраняют ручные настройки. До окончания анализа start/update возвращают
+  `409 scene_analysis_pending`.
+- Предыдущая миграция `20260818_0005` добавляет обязательный `jobs.gpu_render_mode` с
   server default `ALL_GPUS_PER_FRAME` для существующих строк; downgrade удаляет
   колонку, `alembic check` не обнаруживает новых операций.
 - Blender API schema не изменилась: frontend теперь использует существующий
@@ -281,6 +303,29 @@
   сервис.
 
 ## Последняя проверка
+
+2026-10-23, автоматическая настройка по сцене и оборудованию:
+
+- Итоговые Ruff format/check, strict mypy `app tests` и полный pytest прошли:
+  310 passed, 1 skipped (нет системных nginx/envsubst). Frontend lint, 47 unit
+  tests и production build прошли. Alembic upgrade/downgrade/upgrade и schema
+  comparison проверены в отдельной временной SQLite; schema diff отсутствует.
+- Новые API/process tests проверяют автозаполнение, ручные правки, nested ZIP,
+  отмену при замене/удалении, восстановление анализа после невалидной замены,
+  timeout/ошибки и restart. Adapter/rule tests проверяют OSL/path guiding,
+  GPU fallback, Eevee, неизвестный движок, signed frames и scene step.
+- Playwright `qa:scene-analysis` и `qa:regressions` прошли. Проверены заполнение
+  текущей формы, блокировка Start, сохранение ручных правок при WS refetch/reload,
+  замена, polling без события, ошибка анализа и мобильная вёрстка. Скриншоты
+  просмотрены; пользовательские данные не использовались.
+- Реальный Blender 4.5.11 загружен из официального архива и проверен по SHA-256.
+  Отдельная сцена 64×64, Cycles 4 samples, frames 11–15 / step 2 прошла upload,
+  анализ, автоматический OptiX + FRAME_PER_GPU на двух MIG 1g.24gb устройствах,
+  рендер трёх кадров/preview и restart. SHA-256 загруженной сцены сохранился.
+  Workspace проверки: `/tmp/render-node-auto-smoke-zujiu5k3/workspace`.
+  Это trusted smoke; strict kernel cgroup и полный GPU без MIG не проверялись.
+- В существующем тесте numbered non-frame output устранена гонка: глобальный
+  system.metrics event больше не принимается за событие рендера проверяемого job.
 
 2026-10-23, повторное ревью незакоммиченных изменений:
 
@@ -566,9 +611,13 @@
 
 ## Известные ограничения и дальнейшая работа
 
-- Backend пока не сообщает среднее время кадра и метаданные диапазона исходной
-  сцены до рендера; UI показывает неизвестные значения. История метрик хранится
+- Backend пока не сообщает среднее время кадра. Диапазон сцены доступен после
+  успешного анализа; для старых jobs без metadata остаётся неизвестным. История метрик хранится
   только в памяти браузера и начинает накапливаться заново после перезагрузки.
+- Автоподбор использует правила и capability discovery, без benchmark и точной
+  оценки пиковой RAM/VRAM. Он не гарантирует самый быстрый режим или достаточность
+  памяти на всех кадрах. Полный runtime smoke нового анализа выполнен на 4.5.11;
+  остальные поддерживаемые версии требуют отдельных реальных проверок.
 - Нативный installer ещё не прогонялся целиком на реальном Ubuntu GPU Pod;
   необходимо проверить apt/runtime libraries, обе bundled Blender версии,
   RunPod HTTPS/WebSocket proxy и CUDA/OptiX до публикации команды пользователям.
@@ -593,9 +642,9 @@
 - Реального совместного smoke `strict cgroup v2 + Blender/CUDA/OptiX` нет:
   разрешённый пользователем smoke 2026-10-22 прошёл в trusted mode без per-job
   cgroup. Целевой strict/GPU сценарий остаётся отдельной проверкой.
-- Реальный multi-GPU `FRAME_PER_GPU` smoke не выполнен: на проверенной ноде одна
-  GPU. Concurrency и lifecycle нескольких workers проверены fake Blender;
-  настоящий multi-GPU сценарий требует подходящего cloud Pod.
+- Реальный `FRAME_PER_GPU` smoke выполнен 2026-10-23 на двух доступных MIG
+  устройствах. Несколько полных физических GPU и неоднородные GPU по-прежнему
+  требуют отдельной проверки; fake Blender покрывает concurrency/lifecycle.
 - Для custom browser deployment backend должен оставаться приватным за HTTPS
   proxy на том же public origin, что и frontend. Proxy не должен подставлять
   internal Bearer в browser HTTP/WebSocket; переписывание `Host` допустимо.

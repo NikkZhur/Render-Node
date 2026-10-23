@@ -6,12 +6,19 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import JSON, DateTime, Enum, Float, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Enum, Float, Integer, String, Text
 from sqlalchemy.engine.interfaces import Dialect
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
 
-from app.jobs.types import ComputeDevice, FrameMode, GpuRenderMode, JobStatus, RenderEngine
+from app.jobs.types import (
+    AnalysisStatus,
+    ComputeDevice,
+    FrameMode,
+    GpuRenderMode,
+    JobStatus,
+    RenderEngine,
+)
 from app.storage.database import Base
 
 
@@ -55,6 +62,15 @@ class Job(Base):
     name: Mapped[str] = mapped_column(String(120))
     source_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
     scene_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    analysis_id: Mapped[UUID | None] = mapped_column(nullable=True)
+    analysis_status: Mapped[AnalysisStatus] = mapped_column(
+        enum_column(AnalysisStatus, "analysis_status"),
+        default=AnalysisStatus.NONE,
+        server_default="none",
+    )
+    analysis_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scene_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    auto_configured: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     status: Mapped[JobStatus] = mapped_column(
         enum_column(JobStatus, "job_status"), default=JobStatus.CREATED, index=True
     )

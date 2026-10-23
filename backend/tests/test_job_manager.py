@@ -1020,5 +1020,8 @@ async def test_numbered_non_frame_output_does_not_advance_progress(
             assert persisted["progress"] == 0.0
             assert persisted["current_frame"] is None
             assert (await client.get(f"/api/v1/jobs/{job_id}/frames")).json()["total"] == 0
-            assert subscription.queue.empty()
+            # System metrics are broadcast to every subscriber independently of
+            # job filters. Only a render/job event would violate this contract.
+            while not subscription.queue.empty():
+                assert (await subscription.queue.get()).get("job_id") != str(job_id)
             await app.state.event_hub.disconnect(subscription)

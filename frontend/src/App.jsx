@@ -139,6 +139,7 @@ function useRenderTiming(job) {
 
 function StatusBadge({ status }) {
   const labels = {
+    analyzing: "Analyzing",
     ready: "Ready",
     queued: "Queued",
     rendering: "Rendering",
@@ -405,10 +406,13 @@ function JobSetup({
   const editable = isDraft || job.status === "created" || job.status === "ready";
   const rerenderable = ["completed", "failed", "cancelled"].includes(job.status);
   const runtimeUnavailable = !activeVersion;
-  const controlsDisabled = !editable || operationPending || runtimeUnavailable;
+  const analyzing = ["pending", "running"].includes(job.analysis_status);
+  const fileDisabled = !editable || operationPending || runtimeUnavailable;
+  const controlsDisabled = fileDisabled || analyzing;
+  const usesCycles = engine === "Cycles";
   const activeGpuIds = selectedGpus ?? devices.map((gpu) => gpu.id);
-  const allocatedGpuIds = device === "CPU" ? [] : activeGpuIds;
-  const gpuRenderModeVisible = supportsFramePerGpu(device, allocatedGpuIds);
+  const allocatedGpuIds = device === "CPU" || !usesCycles ? [] : activeGpuIds;
+  const gpuRenderModeVisible = usesCycles && supportsFramePerGpu(device, allocatedGpuIds);
   const computeDevices = devices.length > 0 ? COMPUTE_DEVICES : [...new Set([device, "CPU"])];
   const runtimeVersion = isDraft ? activeVersion : (job.version ?? job.blender_version);
   const runnerUnavailable = !runner.available;
@@ -422,9 +426,9 @@ function JobSetup({
     name: job.name,
     blender_version: runtimeVersion,
     engine: ENGINE_API_VALUES[engine],
-    device: device.toUpperCase(),
+    device: usesCycles ? device.toUpperCase() : "CPU",
     gpu_ids: allocatedGpuIds,
-    gpu_render_mode: normalizeGpuRenderMode(device, activeGpuIds, gpuRenderMode),
+    gpu_render_mode: usesCycles ? normalizeGpuRenderMode(device, activeGpuIds, gpuRenderMode) : ALL_GPUS_PER_FRAME,
     frame_mode: frameMode.toUpperCase(),
     frame_start: frameMode === "all" ? null : Number(frameStart),
     frame_end: frameMode === "range" ? Number(frameEnd) : null,
@@ -503,7 +507,7 @@ function JobSetup({
           type="file"
           accept=".blend,.zip"
           className="sr-only"
-          disabled={controlsDisabled}
+          disabled={fileDisabled}
           onChange={async (event) => {
             const input = event.currentTarget;
             const nextFile = input.files?.[0];
@@ -524,7 +528,7 @@ function JobSetup({
         />
         <button
           className="file-drop"
-          disabled={controlsDisabled}
+          disabled={fileDisabled}
           onClick={() => fileInput.current?.click()}
           type="button"
         >
@@ -533,9 +537,11 @@ function JobSetup({
           </span>
           <span className="file-copy">
             <strong>{fileName}</strong>
-            <small>
+            <small aria-live="polite">
               {operationPending
                 ? "Saving…"
+                : analyzing
+                  ? "Analyzing scene…"
                 : runtimeUnavailable
                   ? "Activate a Blender version before uploading"
                 : !editable
@@ -553,17 +559,30 @@ function JobSetup({
                 : "Locked"}
           </span>
         </button>
+        {analyzing && (
+          <p className="scene-analysis-note" role="status">Reading scene settings and checking render devices…</p>
+        )}
+        {!analyzing && job.analysis_status === "failed" && (
+          <p className="scene-analysis-note analysis-failed" role="status">
+            Automatic setup unavailable. {job.analysis_error} You can edit the settings below.
+          </p>
+        )}
+        {!analyzing && job.auto_configured && !dirty && (
+          <p className="scene-analysis-note" role="status">Settings selected automatically. You can change them below.</p>
+        )}
       </div>
 
       <div className="two-column-fields">
         <DropdownField disabled={controlsDisabled} label="Render engine" onChange={markChanged(setEngine)} options={RENDER_ENGINES} value={engine} />
-        <DropdownField disabled={controlsDisabled} label="Compute device" onChange={changeDevice} options={computeDevices} value={device} />
+        <DropdownField disabled={controlsDisabled || !usesCycles} label="Compute device" onChange={changeDevice} options={usesCycles ? computeDevices : ["Automatic"]} value={usesCycles ? device : "Automatic"} />
       </div>
 
       <div className="field-group">
         <div className="field-label-row">
           <label>Frames</label>
-          <span>SCENE RANGE UNKNOWN</span>
+          <span>{job.scene_metadata
+            ? `${job.scene_metadata.frame_start}–${job.scene_metadata.frame_end} · STEP ${job.scene_metadata.frame_step}`
+            : "SCENE RANGE UNKNOWN"}</span>
         </div>
         <div
           className="segmented-control"
@@ -646,17 +665,17 @@ function JobSetup({
       <div className="field-group gpu-field">
         <div className="field-label-row">
           <label>GPU allocation</label>
-          <span>{device === "CPU" ? "NOT USED · CPU MODE" : `${allocatedGpuIds.length} SELECTED`}</span>
+          <span>{!usesCycles ? "MANAGED BY BLENDER" : device === "CPU" ? "NOT USED · CPU MODE" : `${allocatedGpuIds.length} SELECTED`}</span>
         </div>
         <div className="gpu-list">
-          {devices.length === 0 && <span className="gpu-empty">No NVIDIA GPUs discovered · CPU mode</span>}
+          {devices.length === 0 && <span className="gpu-empty">{usesCycles ? "No NVIDIA GPUs discovered · CPU mode" : "Graphics device is selected by Blender"}</span>}
           {devices.map((gpu) => {
             const selected = allocatedGpuIds.includes(gpu.id);
             return (
               <button
                 aria-pressed={selected}
                 className={`gpu-option ${selected ? "selected" : ""}`}
-                disabled={controlsDisabled || device === "CPU"}
+                disabled={controlsDisabled || !usesCycles || device === "CPU"}
                 key={gpu.id}
                 onClick={() => toggleGpu(gpu.id)}
                 type="button"
@@ -706,10 +725,10 @@ function JobSetup({
 
         {job.status === "ready" && editable && (
           <div className="setup-actions">
-            <button className="secondary-action" disabled={!dirty || operationPending || runtimeUnavailable} onClick={save} type="button">
+            <button className="secondary-action" disabled={!dirty || controlsDisabled} onClick={save} type="button">
               Save changes
             </button>
-            <button aria-busy={operationPending} className="primary-action" disabled={operationPending || runnerUnavailable || runtimeUnavailable} onClick={start} type="button">
+            <button aria-busy={operationPending || analyzing} className="primary-action" disabled={controlsDisabled || runnerUnavailable} onClick={start} type="button">
               <Icon name="play" size={18} /> Start render
             </button>
           </div>
@@ -833,6 +852,7 @@ function ProgressRow({ row, timing = null, tone = "worker" }) {
 }
 
 function RenderPreview({ devices = [], isMockMode, job, liveLogs = [], mockLogLines = [], sampleProgress = null }) {
+  const analyzing = ["pending", "running"].includes(job.analysis_status);
   const [frameOpen, setFrameOpen] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
   const [logPanelOpen, setLogPanelOpen] = useState(false);
@@ -956,7 +976,7 @@ function RenderPreview({ devices = [], isMockMode, job, liveLogs = [], mockLogLi
     setLogOpen(false);
     window.requestAnimationFrame(() => logToggleRef.current?.focus());
   };
-  const currentTask = isRendering
+  const currentTask = analyzing ? "Analyzing scene…" : isRendering
     ? `Rendering frame ${currentFrame}`
     : job.status === "queued"
       ? "Waiting for the render worker"
@@ -976,7 +996,7 @@ function RenderPreview({ devices = [], isMockMode, job, liveLogs = [], mockLogLi
             <Icon name="image" size={16} /> Preview
           </div>
           <div className="preview-meta">
-            <StatusBadge status={job.status} />
+            <StatusBadge status={analyzing ? "analyzing" : job.status} />
           </div>
         </div>
 
@@ -988,7 +1008,7 @@ function RenderPreview({ devices = [], isMockMode, job, liveLogs = [], mockLogLi
             <div className="preview-empty">
               <span className="empty-icon"><Icon name="image" size={24} /></span>
               <strong>Preview will appear here</strong>
-              <small>Start a ready job to run Blender on this node.</small>
+              <small>{analyzing ? "Preparing scene settings before rendering." : "Start a ready job to run Blender on this node."}</small>
             </div>
           )}
           {hasOutput && (
@@ -1069,7 +1089,7 @@ function RenderPreview({ devices = [], isMockMode, job, liveLogs = [], mockLogLi
                 <div className="progress-stats">
                   <span className="progress-stat-frame"><small>FRAME</small>{isRendering ? currentFrame : "—"}</span>
                   <span className="progress-stat-samples"><small>SAMPLES</small>{shownSamples}</span>
-                  <span className="progress-stat-state"><small>STATE</small>{job.status}</span>
+                  <span className="progress-stat-state"><small>STATE</small>{analyzing ? "analyzing" : job.status}</span>
                   <b>{shownProgress}%</b>
                 </div>
               </div>
@@ -1236,9 +1256,9 @@ function JobQueue({
                       <strong>{job.name}</strong>
                       <small>#{job.shortId}</small>
                     </span>
-                    <span className="job-detail">{job.engine} · {job.device} · {job.frame}</span>
+                    <span className="job-detail">{job.engine} · {job.engine === "Cycles" ? job.device : "Automatic device"} · {job.frame}</span>
                     <span className="job-bottom-line">
-                      <StatusBadge status={job.status} />
+                      <StatusBadge status={["pending", "running"].includes(job.analysis_status) ? "analyzing" : job.status} />
                       <small className="job-timing">
                         <span>{job.created}</span>
                         <span aria-hidden="true"> · </span>
@@ -1588,6 +1608,8 @@ export default function App({ mockApi = null }) {
     queryFn: ({ signal }) => jobsApi.page({ page: jobPage, pageSize: JOBS_PER_PAGE, signal }),
     enabled: !isMockMode,
     placeholderData: (previousData) => previousData,
+    refetchInterval: (query) => query.state.data?.items?.some((job) => ["pending", "running"].includes(job.analysis_status))
+      ? 1000 : realtime.connectionState === "connected" ? false : 5000,
   });
   const versionApi = mockApi ?? blenderApi;
   const versionsQuery = useQuery({ queryKey: ["versions"], queryFn: versionApi.getVersions });
@@ -1695,10 +1717,18 @@ export default function App({ mockApi = null }) {
     mutationFn: async ({ file, configuration, job }) => {
       if (!activeVersion) throw new Error("Activate a Blender version before uploading a scene");
       if (job.id !== "draft") {
-        await jobsApi.update(job.id, configuration);
         return jobsApi.upload(job.id, file);
       }
-      const createdJob = await jobsApi.create(configuration);
+      const createdJob = await jobsApi.create({
+        ...configuration,
+        engine: "CYCLES",
+        device: "CPU",
+        gpu_ids: [],
+        gpu_render_mode: ALL_GPUS_PER_FRAME,
+        frame_mode: "ALL",
+        frame_start: null,
+        frame_end: null,
+      });
       try {
         return await jobsApi.upload(createdJob.id, file);
       } catch (error) {
@@ -1982,7 +2012,7 @@ export default function App({ mockApi = null }) {
             activeVersion={activeVersion}
             devices={devicesQuery.data ?? []}
             job={setupJob}
-            key={setupJob.id}
+            key={`${setupJob.id}:${setupJob.analysis_id ?? "legacy"}:${setupJob.analysis_status ?? "none"}`}
             onCancel={cancelRender}
             onRerender={rerenderJob}
             onSave={saveJob}
