@@ -25,7 +25,7 @@ class GpuMetricResponse(BaseModel):
     id: int = Field(ge=0)
     uuid: str
     name: str
-    utilization_percent: float = Field(ge=0, le=100)
+    utilization_percent: float | None = Field(ge=0, le=100)
     memory_used_bytes: int = Field(ge=0)
     memory_total_bytes: int = Field(ge=0)
     temperature_celsius: float | None

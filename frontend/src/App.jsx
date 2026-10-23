@@ -1336,6 +1336,7 @@ function DeleteJobDialog({ error, job, onClose, onConfirm, pending }) {
 }
 
 function makeMetricHistory(current, seed) {
+  if (!Number.isFinite(current)) return [];
   const offsets = [-13, -5, -9, 4, -2, 9, 3, 0];
   return offsets.map((offset, index) => (
     Math.max(0, Math.min(100, current + offset * (0.55 + seed * 0.08) + ((index + seed) % 3) * 2))
@@ -1368,15 +1369,21 @@ function MetricChart({ chartId, history, tone }) {
 }
 
 function MetricCard({ chartId, history, label, percent, tone, value }) {
+  const available = Number.isFinite(percent);
   return (
     <article className="metric-item">
-      <div aria-label={`${label}: ${value}`} className="metric-ring" style={{ "--metric": percent, "--tone": `var(--${tone})` }}>
+      <div
+        aria-label={`${label}: ${available ? value : "Unavailable"}`}
+        className="metric-ring"
+        style={{ "--metric": available ? percent : 0, "--tone": `var(--${tone})` }}
+        title={available ? undefined : "Measurement unavailable"}
+      >
         <div className="metric-ring-content">
           <span>{label}</span>
-          <strong>{value}</strong>
+          <strong>{available ? value : "—"}</strong>
         </div>
       </div>
-      <MetricChart chartId={chartId} history={history} tone={tone} />
+      {available && <MetricChart chartId={chartId} history={history} tone={tone} />}
     </article>
   );
 }

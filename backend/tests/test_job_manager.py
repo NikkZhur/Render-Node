@@ -432,13 +432,16 @@ async def test_unavailable_gpu_fails_job_without_starting_blender(
     assert not await asyncio.to_thread(log_path.exists)
 
 
+@pytest.mark.parametrize("uuid_prefix", ["GPU", "MIG"])
 async def test_multi_gpu_job_uses_uuid_visibility_and_releases_every_gpu(
     render_settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
+    uuid_prefix: str,
 ) -> None:
+    first_uuid, second_uuid = f"{uuid_prefix}-stable-a", f"{uuid_prefix}-stable-b"
     devices = [
-        GpuDevice(id=0, uuid="GPU-stable-a", name="GPU A", memory_total_bytes=24 * 1024**3),
-        GpuDevice(id=1, uuid="GPU-stable-b", name="GPU B", memory_total_bytes=48 * 1024**3),
+        GpuDevice(id=0, uuid=first_uuid, name="GPU A", memory_total_bytes=24 * 1024**3),
+        GpuDevice(id=1, uuid=second_uuid, name="GPU B", memory_total_bytes=48 * 1024**3),
     ]
     monkeypatch.setattr(GpuDiscovery, "discover", lambda self: devices)
     app = create_app(render_settings)
@@ -476,7 +479,7 @@ async def test_multi_gpu_job_uses_uuid_visibility_and_releases_every_gpu(
     raw_log = await asyncio.to_thread(
         (render_settings.jobs_root / str(job_id) / "logs" / "blender.log").read_text
     )
-    assert "visible-gpus=GPU-stable-a,GPU-stable-b" in raw_log
+    assert f"visible-gpus={first_uuid},{second_uuid}" in raw_log
     joint_progress = [event for event in events if event["type"] == "render.progress"]
     assert joint_progress
     assert all("worker_progress" not in event for event in joint_progress)
@@ -484,13 +487,16 @@ async def test_multi_gpu_job_uses_uuid_visibility_and_releases_every_gpu(
     assert scheduler.reserved_uuids == set()
 
 
+@pytest.mark.parametrize("uuid_prefix", ["GPU", "MIG"])
 async def test_frame_per_gpu_renders_two_frames_concurrently_with_monotonic_events(
     render_settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
+    uuid_prefix: str,
 ) -> None:
+    first_uuid, second_uuid = f"{uuid_prefix}-stable-a", f"{uuid_prefix}-stable-b"
     devices = [
-        GpuDevice(id=0, uuid="GPU-stable-a", name="GPU A", memory_total_bytes=24 * 1024**3),
-        GpuDevice(id=1, uuid="GPU-stable-b", name="GPU B", memory_total_bytes=48 * 1024**3),
+        GpuDevice(id=0, uuid=first_uuid, name="GPU A", memory_total_bytes=24 * 1024**3),
+        GpuDevice(id=1, uuid=second_uuid, name="GPU B", memory_total_bytes=48 * 1024**3),
     ]
     monkeypatch.setattr(GpuDiscovery, "discover", lambda self: devices)
     app = create_app(render_settings)
@@ -544,9 +550,9 @@ async def test_frame_per_gpu_renders_two_frames_concurrently_with_monotonic_even
     first_log = (job_root / "logs" / "blender-gpu-0.log").read_text()
     second_log = (job_root / "logs" / "blender-gpu-1.log").read_text()
     aggregate = (job_root / "logs" / "blender.log").read_text()
-    assert "visible-gpus=GPU-stable-a" in first_log
-    assert "visible-gpus=GPU-stable-b" in second_log
-    assert "GPU-stable-a" in aggregate and "GPU-stable-b" in aggregate
+    assert f"visible-gpus={first_uuid}" in first_log
+    assert f"visible-gpus={second_uuid}" in second_log
+    assert first_uuid in aggregate and second_uuid in aggregate
     assert sorted(path.name for path in (job_root / "output").glob("frame_*.png")) == [
         "frame_0001.png",
         "frame_0002.png",
@@ -560,11 +566,11 @@ async def test_frame_per_gpu_renders_two_frames_concurrently_with_monotonic_even
     progress_events = [event for event in events if event["type"] == "render.progress"]
     assert progress_events
     assert all(
-        event.get("gpu_uuid") in {"GPU-stable-a", "GPU-stable-b"}
+        event.get("gpu_uuid") in {first_uuid, second_uuid}
         and isinstance(event.get("worker_progress"), int | float)
         for event in progress_events
     )
-    for gpu_uuid, expected_frame in (("GPU-stable-a", 1), ("GPU-stable-b", 2)):
+    for gpu_uuid, expected_frame in ((first_uuid, 1), (second_uuid, 2)):
         worker_events = [event for event in progress_events if event["gpu_uuid"] == gpu_uuid]
         assert worker_events
         assert {event["frame"] for event in worker_events} == {expected_frame}
@@ -578,7 +584,7 @@ async def test_frame_per_gpu_renders_two_frames_concurrently_with_monotonic_even
     first_finished = next(
         event
         for event in progress_events
-        if event["gpu_uuid"] == "GPU-stable-a" and event["worker_progress"] == 1.0
+        if event["gpu_uuid"] == first_uuid and event["worker_progress"] == 1.0
     )
     assert float(cast(float | int, first_finished["progress"])) < 1.0
     frame_ready = [

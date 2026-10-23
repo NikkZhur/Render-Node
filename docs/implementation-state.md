@@ -5,6 +5,9 @@
 
 ## Текущее состояние
 
+- 2026-10-23: добавлен общий GPU/MIG discovery и telemetry path. Числовые ID
+  стабильны внутри процесса по UUID; неподдерживаемые метрики сохраняют `null`
+  вплоть до UI. Scheduler и Blender workers используют прежний общий UUID-путь.
 - Обновлено: 2026-10-22 после технической ревизии. Самостоятельные frontend
   панели и dialog hooks выделены из App, job presentation объединён, модель
   multi-GPU progress вынесена из manager без изменения алгоритма.
@@ -252,6 +255,32 @@
   сервис.
 
 ## Последняя проверка
+
+2026-10-23, поддержка MIG:
+
+- Ruff check, strict mypy `app tests`, полный pytest: 259 passed, 1 skipped
+  (нет системных `nginx/envsubst`). Проверены смешанный GPU/MIG inventory,
+  недоступные устройства/метрики, sparse MIG slots, перестановка NVML-индексов,
+  пересоздание MIG с новым UUID, REST/WS и общий lifecycle резервирования.
+- Fake Blender проверяет `GPU-...` и `MIG-...` UUID для shared-process и
+  frame-per-GPU jobs: environment, worker logs, progress events и освобождение
+  всех устройств проходят через один JobManager/SandboxRunner.
+- Frontend lint, build и 38 unit-тестов прошли. Общий presenter сохраняет
+  неизвестные метрики как `null`; UI не показывает их как 0%/0° и не строит
+  для них синтетический график.
+- На текущем Pod реально обнаружены два RTX PRO 6000 Blackwell MIG `1g.24gb`,
+  каждый с `25367150592` bytes VRAM. На родительских картах NVML запрещает
+  memory queries; запросы к MIG handles успешны. Utilization, temperature и
+  power недоступны для этих разделов и возвращаются как `null`.
+- CUDA Driver API в отдельных процессах с обычным `build_worker_environment`
+  подтвердил видимость каждого выбранного MIG UUID по отдельности и обоих
+  вместе. GPU-вычисления и полноценный Blender/OptiX render на этом Pod в этой
+  проверке не запускались.
+- Dev-сервис на 5173 перезапущен с сохранением workspace и существующего job;
+  реальный REST возвращает оба MIG-устройства и nullable telemetry. Playwright
+  с реальными REST-данными и подменёнными access/WS transport проверил выбор
+  двух GPU, multi-GPU controls, неизвестные/нулевые метрики, обновление
+  inventory по `resync.required`, desktop/mobile без horizontal overflow.
 
 2026-10-22, обновление безопасности frontend-зависимостей:
 

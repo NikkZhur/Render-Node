@@ -88,8 +88,20 @@ Render lifecycle:
   queued and rendering jobs return `409` until cancelled;
 - `POST /api/v1/jobs/{id}/start` queues a ready job;
 - one scheduler task starts the oldest queued job;
-- NVML inventory is captured at startup; scheduler reservations and
-  `CUDA_VISIBLE_DEVICES` use stable GPU UUIDs even if runtime indices reorder;
+- NVML discovery and telemetry share one device enumeration: a physical GPU in
+  normal mode, or its accessible MIG compute instances in MIG mode. A MIG parent
+  is never offered alongside its children. Inaccessible devices do not hide
+  other GPUs, and cards without MIG support retain the ordinary discovery path;
+- numeric `gpu_ids` identify logical devices within the backend process. Their
+  UUID mapping is shared by inventory and metrics and survives NVML reordering or
+  temporary device loss. Scheduler reservations and `CUDA_VISIBLE_DEVICES` use
+  the same `GPU-...` or `MIG-...` UUIDs; a recreated MIG instance with a new UUID
+  cannot silently replace a selected device. New devices require a backend
+  restart before they become selectable in the startup scheduler inventory;
+- unsupported GPU utilization, temperature and power measurements are `null` in
+  REST/WebSocket metrics. They do not remove a device or turn into a measured
+  zero; the UI shows an unavailable indicator without a chart for that value.
+  Memory values belong to the selected GPU/MIG device, never its parent;
 - Job create/update/response models persist `gpu_render_mode` as
   `FRAME_PER_GPU` or `ALL_GPUS_PER_FRAME`. Omitted create requests choose frame
   distribution for CUDA/OptiX with two or more GPUs; CPU and one-GPU jobs use

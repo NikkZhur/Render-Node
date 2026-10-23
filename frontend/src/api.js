@@ -1,7 +1,9 @@
 import { presentJob } from "./jobPresentation";
+import { presentMetrics } from "./metricPresentation";
 import { withBrowserRequestPolicy } from "./requestPolicy";
 
 export { presentJob } from "./jobPresentation";
+export { presentMetrics } from "./metricPresentation";
 
 const API_PREFIX = import.meta.env.VITE_RENDER_NODE_API_URL ?? "/api/v1";
 
@@ -143,8 +145,6 @@ export const devicesApi = {
   },
 };
 
-const bytesToGb = (bytes) => Number((bytes / 1024 ** 3).toFixed(1));
-
 export const artifactsApi = {
   list(jobId, { signal } = {}) {
     return request(`/jobs/${jobId}/artifacts`, { signal });
@@ -174,39 +174,6 @@ export const artifactsApi = {
     return apiUrl(`/jobs/${jobId}/logs/blender`);
   },
 };
-
-export const presentMetrics = (metrics) => ({
-      ...metrics,
-      processors: metrics.cpus.map((cpu) => ({
-        id: cpu.id,
-        name: cpu.name,
-        utilization: Math.round(cpu.utilization_percent),
-        cores: cpu.cores,
-        memoryUsed: bytesToGb(cpu.memory_used_bytes),
-        memoryTotal: bytesToGb(cpu.memory_total_bytes),
-        temperature: Math.round(cpu.temperature_celsius ?? 0),
-      })),
-      devices: metrics.gpus.map((gpu) => ({
-        id: gpu.id,
-        name: gpu.name,
-        utilization: Math.round(gpu.utilization_percent),
-        memoryUsed: bytesToGb(gpu.memory_used_bytes),
-        memoryTotal: bytesToGb(gpu.memory_total_bytes),
-        temperature: Math.round(gpu.temperature_celsius ?? 0),
-        available: true,
-      })),
-      storages: metrics.storages.map((storage) => ({
-        id: storage.id,
-        name: storage.name,
-        mountPoint: storage.mount_point,
-        totalGb: bytesToGb(storage.total_bytes),
-        freeGb: bytesToGb(storage.free_bytes),
-        readMbps: Number(storage.read_mbps.toFixed(1)),
-        writeMbps: Number(storage.write_mbps.toFixed(1)),
-        maxThroughputMbps: Math.max(1, storage.read_mbps, storage.write_mbps, 1000),
-        status: storage.status,
-      })),
-});
 
 export const systemApi = {
   async metrics({ signal } = {}) {

@@ -1,11 +1,16 @@
-"""NVIDIA GPU discovery that degrades to an empty inventory."""
+"""Shared discovery and telemetry for physical NVIDIA GPUs and MIG devices."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,7 +26,7 @@ class GpuMetric:
     id: int
     uuid: str
     name: str
-    utilization_percent: float
+    utilization_percent: float | None
     memory_used_bytes: int
     memory_total_bytes: int
     temperature_celsius: float | None
@@ -43,84 +48,138 @@ class GpuAllocation:
         return tuple(device.uuid for device in self.devices)
 
 
+@dataclass(frozen=True, slots=True)
+class _NvmlDevice:
+    """A device sample whose handle is valid only inside the NVML session."""
+
+    device: GpuDevice
+    handle: Any
+    memory_used_bytes: int
+
+
 class GpuDiscovery:
     def __init__(self, nvml: Any | None = None) -> None:
         self._nvml = nvml
+        self._lock = Lock()
+        self._ids_by_uuid: dict[str, int] = {}
 
     def discover(self) -> list[GpuDevice]:
-        nvml = self._nvml
-        if nvml is None:
-            try:
-                import pynvml as nvml_module
-            except ImportError:
+        with self._session() as nvml:
+            if nvml is None:
                 return []
-            nvml = nvml_module
-        initialized = False
-        try:
-            nvml.nvmlInit()
-            initialized = True
-            devices: list[GpuDevice] = []
-            for index in range(int(nvml.nvmlDeviceGetCount())):
-                handle = nvml.nvmlDeviceGetHandleByIndex(index)
-                name = nvml.nvmlDeviceGetName(handle)
-                uuid = nvml.nvmlDeviceGetUUID(handle)
-                memory = nvml.nvmlDeviceGetMemoryInfo(handle)
-                devices.append(
-                    GpuDevice(
-                        id=index,
-                        uuid=self._text(uuid),
-                        name=self._text(name),
-                        memory_total_bytes=int(memory.total),
-                    )
-                )
-            return devices
-        except Exception:
-            return []
-        finally:
-            if initialized:
+            return sorted(
+                (sample.device for sample in self._devices(nvml)), key=lambda item: item.id
+            )
+
+    def metrics(self) -> list[GpuMetric]:
+        with self._session() as nvml:
+            if nvml is None:
+                return []
+            return sorted(
+                (self._metric(nvml, sample) for sample in self._devices(nvml)),
+                key=lambda item: item.id,
+            )
+
+    def _metric(self, nvml: Any, sample: _NvmlDevice) -> GpuMetric:
+        device, handle = sample.device, sample.handle
+        return GpuMetric(
+            id=device.id,
+            uuid=device.uuid,
+            name=device.name,
+            utilization_percent=self._optional_metric(
+                lambda: float(nvml.nvmlDeviceGetUtilizationRates(handle).gpu)
+            ),
+            memory_used_bytes=sample.memory_used_bytes,
+            memory_total_bytes=device.memory_total_bytes,
+            temperature_celsius=self._optional_metric(
+                lambda: float(nvml.nvmlDeviceGetTemperature(handle, nvml.NVML_TEMPERATURE_GPU))
+            ),
+            power_watts=self._optional_metric(
+                lambda: float(nvml.nvmlDeviceGetPowerUsage(handle)) / 1000
+            ),
+        )
+
+    @contextlib.contextmanager
+    def _session(self) -> Iterator[Any]:
+        # Scheduler checks and metrics run in separate threads. Keep handle lifetimes
+        # and the process-local UUID -> logical ID mapping under the same lock.
+        with self._lock:
+            nvml = self._module()
+            if nvml is None:
+                yield None
+                return
+            try:
+                nvml.nvmlInit()
+            except Exception:
+                logger.debug("NVIDIA driver is unavailable", exc_info=True)
+                yield None
+                return
+            try:
+                yield nvml
+            finally:
                 with contextlib.suppress(Exception):
                     nvml.nvmlShutdown()
 
-    def metrics(self) -> list[GpuMetric]:
-        nvml = self._module()
-        if nvml is None:
-            return []
-        initialized = False
-        try:
-            nvml.nvmlInit()
-            initialized = True
-            metrics: list[GpuMetric] = []
-            for index in range(int(nvml.nvmlDeviceGetCount())):
-                handle = nvml.nvmlDeviceGetHandleByIndex(index)
+    def _devices(self, nvml: Any) -> Iterator[_NvmlDevice]:
+        for handle in self._handles(nvml):
+            try:
+                uuid = self._text(nvml.nvmlDeviceGetUUID(handle))
+                name = self._text(nvml.nvmlDeviceGetName(handle))
                 memory = nvml.nvmlDeviceGetMemoryInfo(handle)
-                utilization = nvml.nvmlDeviceGetUtilizationRates(handle)
-                temperature: float | None = None
-                power: float | None = None
-                with contextlib.suppress(Exception):
-                    temperature = float(
-                        nvml.nvmlDeviceGetTemperature(handle, nvml.NVML_TEMPERATURE_GPU)
-                    )
-                with contextlib.suppress(Exception):
-                    power = float(nvml.nvmlDeviceGetPowerUsage(handle)) / 1000
-                metrics.append(
-                    GpuMetric(
-                        id=index,
-                        uuid=self._text(nvml.nvmlDeviceGetUUID(handle)),
-                        name=self._text(nvml.nvmlDeviceGetName(handle)),
-                        utilization_percent=float(utilization.gpu),
-                        memory_used_bytes=int(memory.used),
-                        memory_total_bytes=int(memory.total),
-                        temperature_celsius=temperature,
-                        power_watts=power,
-                    )
-                )
-            return metrics
+                total, used = int(memory.total), int(memory.used)
+            except Exception:
+                logger.debug("Skipping an inaccessible NVIDIA device", exc_info=True)
+                continue
+            yield _NvmlDevice(
+                device=GpuDevice(
+                    id=self._ids_by_uuid.setdefault(uuid, len(self._ids_by_uuid)),
+                    uuid=uuid,
+                    name=name,
+                    memory_total_bytes=total,
+                ),
+                handle=handle,
+                memory_used_bytes=used,
+            )
+
+    @staticmethod
+    def _handles(nvml: Any) -> Iterator[Any]:
+        try:
+            count = int(nvml.nvmlDeviceGetCount())
         except Exception:
-            return []
-        finally:
-            if initialized:
-                with contextlib.suppress(Exception):
-                    nvml.nvmlShutdown()
+            logger.debug("NVIDIA inventory is unavailable", exc_info=True)
+            return
+        for index in range(count):
+            try:
+                parent = nvml.nvmlDeviceGetHandleByIndex(index)
+                try:
+                    mig_mode, _pending_mode = nvml.nvmlDeviceGetMigMode(parent)
+                except (nvml.NVMLError_NotSupported, nvml.NVMLError_FunctionNotFound):
+                    mig_mode = 0
+                if mig_mode != nvml.NVML_DEVICE_MIG_ENABLE:
+                    yield parent
+                    continue
+                # A MIG-enabled parent is not a render device. Query only its
+                # accessible compute instances, including sparse MIG slot lists.
+                mig_count = int(nvml.nvmlDeviceGetMaxMigDeviceCount(parent))
+            except Exception:
+                logger.debug("Skipping NVIDIA parent device %s", index, exc_info=True)
+                continue
+            for mig_index in range(mig_count):
+                try:
+                    yield nvml.nvmlDeviceGetMigDeviceHandleByIndex(parent, mig_index)
+                except Exception:
+                    logger.debug(
+                        "MIG slot %s on NVIDIA device %s is unavailable",
+                        mig_index,
+                        index,
+                        exc_info=True,
+                    )
+
+    @staticmethod
+    def _optional_metric(query: Callable[[], float]) -> float | None:
+        with contextlib.suppress(Exception):
+            return query()
+        return None
 
     def _module(self) -> Any | None:
         if self._nvml is not None:

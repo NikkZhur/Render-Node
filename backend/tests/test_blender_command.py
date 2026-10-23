@@ -111,17 +111,20 @@ def test_executable_resolver_uses_the_selected_runtime_version(tmp_path: Path) -
     assert resolver.binary("4.5.11", RuntimeSource.OFFICIAL) == (installed_root / "4.5.11/blender")
 
 
-async def test_worker_environment_is_allowlisted_and_gpu_scoped(tmp_path: Path) -> None:
+@pytest.mark.parametrize("gpu_uuids", [["GPU-first", "GPU-second"], ["MIG-first", "MIG-second"]])
+async def test_worker_environment_is_allowlisted_and_gpu_scoped(
+    tmp_path: Path, gpu_uuids: list[str]
+) -> None:
     job_root = tmp_path / "job"
     (job_root / "temp").mkdir(parents=True)
 
     environment = await build_worker_environment(
         job_root,
         device=ComputeDevice.OPTIX,
-        gpu_uuids=["GPU-first", "GPU-second"],
+        gpu_uuids=gpu_uuids,
     )
 
-    assert environment["CUDA_VISIBLE_DEVICES"] == "GPU-first,GPU-second"
+    assert environment["CUDA_VISIBLE_DEVICES"] == ",".join(gpu_uuids)
     assert environment["PYTHONPATH"] == ""
     assert environment["PYTHONHOME"] == ""
     assert "DATABASE_URL" not in environment

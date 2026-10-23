@@ -9,6 +9,7 @@ const resync = (queryClient) => {
   queryClient.invalidateQueries({ queryKey: ["jobs"] });
   queryClient.invalidateQueries({ queryKey: ["versions"] });
   queryClient.invalidateQueries({ queryKey: ["official-versions"] });
+  queryClient.invalidateQueries({ queryKey: ["devices"] });
   queryClient.invalidateQueries({ queryKey: ["metrics"] });
   queryClient.invalidateQueries({ queryKey: ["frames"] });
   queryClient.invalidateQueries({ queryKey: ["artifacts"] });

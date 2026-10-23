@@ -2064,10 +2064,11 @@ main {
 }
 
 .queue-panel {
-  height: clamp(380px, 52vh, 620px);
   min-height: 0;
   display: flex;
   flex-direction: column;
+  /* Let the grid set the panel height while job rows scroll inside it. */
+  contain: size;
   overflow: hidden;
 }
 
@@ -3501,7 +3502,6 @@ main {
   .setup-panel .primary-action,
   .setup-panel .secondary-action { min-height: 39px; }
 
-  .queue-panel { height: clamp(330px, 45vh, 500px); }
   .artifacts-panel { height: 190px; }
 
   .app-footer {
