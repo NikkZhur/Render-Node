@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.artifacts.models import Artifact
@@ -32,10 +32,13 @@ class ArtifactRepository:
         result: Artifact | None = await self._session.scalar(statement)
         return result
 
-    async def list_for_job(self, job_id: UUID) -> list[Artifact]:
-        result = await self._session.scalars(
-            select(Artifact).where(Artifact.job_id == job_id).order_by(Artifact.created_at.asc())
-        )
+    async def list_for_job(
+        self, job_id: UUID, *, kind: ArtifactKind | None = None
+    ) -> list[Artifact]:
+        statement = select(Artifact).where(Artifact.job_id == job_id)
+        if kind is not None:
+            statement = statement.where(Artifact.kind == kind)
+        result = await self._session.scalars(statement.order_by(Artifact.created_at.asc()))
         return list(result)
 
     async def list_frames(
@@ -43,10 +46,30 @@ class ArtifactRepository:
     ) -> list[Artifact]:
         result = await self._session.scalars(
             select(Artifact)
-            .where(Artifact.job_id == job_id, Artifact.kind == kind)
-            .order_by(Artifact.frame.asc())
+            .where(Artifact.job_id == job_id, Artifact.kind == kind, Artifact.frame.is_not(None))
+            .order_by(Artifact.frame.asc(), Artifact.id.asc())
             .offset(offset)
             .limit(limit)
+        )
+        return list(result)
+
+    async def count_frames(self, job_id: UUID, kind: ArtifactKind) -> int:
+        total = await self._session.scalar(
+            select(func.count())
+            .select_from(Artifact)
+            .where(Artifact.job_id == job_id, Artifact.kind == kind, Artifact.frame.is_not(None))
+        )
+        return total or 0
+
+    async def list_by_frames(
+        self, job_id: UUID, kind: ArtifactKind, frames: list[int]
+    ) -> list[Artifact]:
+        if not frames:
+            return []
+        result = await self._session.scalars(
+            select(Artifact).where(
+                Artifact.job_id == job_id, Artifact.kind == kind, Artifact.frame.in_(frames)
+            )
         )
         return list(result)
 

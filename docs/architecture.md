@@ -434,6 +434,10 @@ Official archives после download находятся в `blender/downloads` 
 
 ### Jobs
 
+`GET /api/v1/jobs/summary` возвращает `queued_count` и `rendering_count` по всей
+очереди одним SQL aggregate query. Frontend использует эту сводку для счётчика
+очереди и признаков активности независимо от текущей страницы истории.
+
 ```text
 POST   /api/v1/jobs
 GET    /api/v1/jobs
@@ -479,6 +483,12 @@ POST   /api/v1/jobs/{job_id}/uploads
 эту необходимость.
 
 ### Artifacts
+
+`GET /api/v1/jobs/{id}/frames` использует SQL COUNT, LIMIT/OFFSET и один batch
+запрос previews только для кадров страницы. Нулевые и отрицательные номера
+кадров из ALL scenes сохраняются. `GET /api/v1/jobs/{id}/artifacts` поддерживает
+необязательный фильтр `kind`; UI запрашивает `kind=blender_log`, чтобы поиск лога
+не загружал метаданные всех кадров.
 
 ```text
 GET    /api/v1/jobs/{job_id}/artifacts
@@ -946,6 +956,12 @@ FastAPI `BackgroundTasks` не используется для длительн�
 `worker_progress`: завершённые назначенные кадры плюс sample fraction только
 текущего кадра конкретного UUID. Frontend сопоставляет snapshots по UUID;
 отсутствие transient snapshot не сбрасывает persisted Overall.
+
+Single-process RANGE/ALL (CPU, одна GPU или все GPU в одном процессе) получает
+тот же `FRAME_PLAN` после загрузки сцены. Общая доля учитывает реальное количество
+кадров с `frame_step`, fraction текущего кадра и завершённые outputs. Если план
+не получен, доля одного кадра не выдаётся за долю всей анимации. SINGLE имеет
+заранее известный план из одного кадра. ETA во frontend вычисляется из общей доли.
 
 ## 15. Preview и результаты
 

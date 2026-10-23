@@ -85,8 +85,8 @@ export default function Artifacts({ job, mockApi }) {
     enabled,
   });
   const artifactsQuery = useQuery({
-    queryKey: ["artifacts", job.id],
-    queryFn: ({ signal }) => artifactsApi.list(job.id, { signal }),
+    queryKey: ["artifacts", job.id, "blender_log"],
+    queryFn: ({ signal }) => artifactsApi.list(job.id, { signal, kind: "blender_log" }),
     enabled,
   });
   const hasMockArtifacts = isMockMode && job.id !== "draft" && job.hasArtifacts !== false;

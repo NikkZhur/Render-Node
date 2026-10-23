@@ -18,6 +18,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.blender.cgroups import MemoryEvents
 from app.blender.devices import GpuDevice, GpuDiscovery, GpuScheduler
+from app.blender.progress import FramePlan
 from app.blender.runner import (
     FailureKind,
     RunnerError,
@@ -28,6 +29,7 @@ from app.blender.runner import (
 from app.config import Environment, Settings
 from app.jobs.manager import JobManager
 from app.jobs.models import Job, utc_now
+from app.jobs.progress import _DistributedProgress, _SingleProcessProgress
 from app.jobs.repository import JobRepository
 from app.jobs.types import ComputeDevice, FrameMode, JobStatus, RenderEngine
 from app.main import create_app
@@ -153,22 +155,6 @@ def test_job_error_messages_distinguish_system_ram_vram_and_plain_abort() -> Non
     assert "cgroup system memory" in JobManager._failure_message(system_oom)
     assert "does not limit VRAM" in JobManager._failure_message(gpu_oom)
     assert "without a cgroup OOM event" in JobManager._failure_message(plain_abort)
-
-
-def test_overall_progress_combines_current_sample_and_frame_range() -> None:
-    job = Job(
-        name="Samples",
-        blender_version="4.1.1",
-        engine=RenderEngine.CYCLES,
-        device=ComputeDevice.OPTIX,
-        gpu_ids=[0],
-        frame_mode=FrameMode.RANGE,
-        frame_start=1,
-        frame_end=2,
-    )
-
-    assert JobManager._overall_progress(job, 1, 400 / 512) == pytest.approx(400 / 1024)
-    assert JobManager._overall_progress(job, 2, 400 / 512) == pytest.approx(912 / 1024)
 
 
 async def test_scheduler_runs_fake_blender_serially_and_persists_progress(
@@ -912,3 +898,127 @@ async def test_wall_time_limit_fails_job_and_clears_process(
     assert failed.error == "Render exceeded its wall-time limit"
     assert failed.process_pid is None
     assert failed.exit_code is not None and failed.exit_code != 0
+
+
+@pytest.mark.parametrize(("device", "gpu_ids"), [("CPU", []), ("CUDA", [0]), ("OPTIX", [0, 1])])
+@pytest.mark.parametrize(
+    ("frame_configuration", "scene", "expected_frames"),
+    [
+        (
+            {"frame_mode": "ALL", "frame_start": None, "frame_end": None},
+            b"BLENDER-v300 SCENE_START=2 SCENE_END=9 STEP=3 FULL_SAMPLES",
+            [2, 5, 8],
+        ),
+        (
+            {"frame_mode": "RANGE", "frame_start": 2, "frame_end": 9},
+            b"BLENDER-v300 SCENE_START=1 SCENE_END=250 STEP=3 FULL_SAMPLES",
+            [2, 5, 8],
+        ),
+        (
+            {"frame_mode": "SINGLE", "frame_start": 7, "frame_end": None},
+            b"BLENDER-v300 STEP=3 FULL_SAMPLES",
+            [7],
+        ),
+        (
+            {"frame_mode": "ALL", "frame_start": None, "frame_end": None},
+            b"BLENDER-v300 SCENE_START=-2 SCENE_END=3 STEP=2 FULL_SAMPLES",
+            [-2, 0, 2],
+        ),
+    ],
+)
+async def test_single_process_progress_covers_entire_animation_with_real_scene_step(
+    render_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    device: str,
+    gpu_ids: list[int],
+    frame_configuration: dict[str, object],
+    scene: bytes,
+    expected_frames: list[int],
+) -> None:
+    devices = [
+        GpuDevice(id=0, uuid="GPU-a", name="GPU A", memory_total_bytes=24 * 1024**3),
+        GpuDevice(id=1, uuid="GPU-b", name="GPU B", memory_total_bytes=24 * 1024**3),
+    ]
+    monkeypatch.setattr(GpuDiscovery, "discover", lambda self: devices)
+    app = create_app(render_settings)
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            assert (await client.post("/api/v1/blender/versions/5.2.0/activate")).status_code == 200
+            payload = job_payload("Single process animation")
+            payload.update(
+                {
+                    "device": device,
+                    "gpu_ids": gpu_ids,
+                    "gpu_render_mode": "ALL_GPUS_PER_FRAME",
+                    **frame_configuration,
+                }
+            )
+            created = await client.post("/api/v1/jobs", json=payload)
+            assert created.status_code == 201
+            job_id = UUID(created.json()["id"])
+            uploaded = await client.post(
+                f"/api/v1/jobs/{job_id}/uploads",
+                files={"file": ("scene.blend", scene, "application/octet-stream")},
+            )
+            assert uploaded.status_code == 200
+            subscription = await app.state.event_hub.connect()
+            await app.state.event_hub.subscribe(subscription, {job_id})
+            assert (await client.post(f"/api/v1/jobs/{job_id}/start")).status_code == 200
+            completed = await app.state.job_manager.wait_for_terminal(job_id, max_wait_seconds=5)
+            frames = (await client.get(f"/api/v1/jobs/{job_id}/frames")).json()
+            events = []
+            while not subscription.queue.empty():
+                events.append(subscription.queue.get_nowait())
+            await app.state.event_hub.disconnect(subscription)
+
+    assert completed.status is JobStatus.COMPLETED
+    assert completed.progress == 1.0
+    assert [frame["frame"] for frame in frames["items"]] == expected_frames
+    progress_events = [event for event in events if event["type"] == "render.progress"]
+    values = [event["progress"] for event in progress_events]
+    assert values == sorted(values)
+    assert all(
+        "gpu_uuid" not in event and "worker_progress" not in event for event in progress_events
+    )
+    sample_completions = [event for event in progress_events if event["sample"] == 512]
+    assert [event["frame"] for event in sample_completions] == expected_frames
+    assert [event["progress"] for event in sample_completions] == pytest.approx(
+        [(index + 1) / len(expected_frames) for index in range(len(expected_frames))]
+    )
+    first_partial = next(event for event in progress_events if event["progress"] > 0)
+    assert first_partial["progress"] == pytest.approx(0.25 / len(expected_frames))
+
+
+@pytest.mark.parametrize("distributed", [False, True])
+async def test_numbered_non_frame_output_does_not_advance_progress(
+    render_settings: Settings, distributed: bool
+) -> None:
+    app = create_app(render_settings.model_copy(update={"render_scheduler_enabled": False}))
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            job_id = await create_ready_job(client, "Auxiliary output", b"BLENDER-v300")
+            database = cast(Database, app.state.database)
+            async with database.session_factory() as session, session.begin():
+                job = await session.get(Job, job_id)
+                assert job is not None
+                job.status = JobStatus.RENDERING
+            output = render_settings.jobs_root / str(job_id) / "output" / "frame_0001.txt"
+            await asyncio.to_thread(output.write_text, "diagnostic, not a rendered frame")
+            manager = cast(JobManager, app.state.job_manager)
+            subscription = await app.state.event_hub.connect()
+            await app.state.event_hub.subscribe(subscription, {job_id})
+            if distributed:
+                await manager._record_distributed_output(
+                    job_id, _DistributedProgress(worker_ids=("GPU-a",), total_frames=1), output
+                )
+            else:
+                tracker = _SingleProcessProgress()
+                tracker.set_plan(FramePlan(total=1, worker=0, assigned=1, start=1, end=1, step=1))
+                await manager._record_output(job_id, tracker, output)
+
+            persisted = (await client.get(f"/api/v1/jobs/{job_id}")).json()
+            assert persisted["progress"] == 0.0
+            assert persisted["current_frame"] is None
+            assert (await client.get(f"/api/v1/jobs/{job_id}/frames")).json()["total"] == 0
+            assert subscription.queue.empty()
+            await app.state.event_hub.disconnect(subscription)

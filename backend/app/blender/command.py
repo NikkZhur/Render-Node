@@ -72,7 +72,7 @@ def build_render_command(
         worker.count < 1 or worker.index < 0 or worker.index >= worker.count
     ):
         raise CommandBuildError("Frame worker index is outside the worker group")
-    if worker is not None and not FRAME_DISTRIBUTION_SCRIPT.is_file():
+    if job.frame_mode is not FrameMode.SINGLE and not FRAME_DISTRIBUTION_SCRIPT.is_file():
         raise CommandBuildError("Trusted frame distribution script is missing")
 
     job_directory = contained_path(jobs_root, jobs_root / str(job.id))
@@ -95,29 +95,30 @@ def build_render_command(
         "--python",
         str(script),
     ]
-    if worker is not None and job.frame_mode is not FrameMode.SINGLE:
+    if job.frame_mode is not FrameMode.SINGLE:
         arguments.extend(("--python", str(FRAME_DISTRIBUTION_SCRIPT)))
     if job.frame_mode is FrameMode.SINGLE:
         if job.frame_start is None:
             raise CommandBuildError("Single-frame job is missing its frame")
         arguments.extend(("--render-frame", str(job.frame_start)))
-    elif job.frame_mode is FrameMode.RANGE and worker is None:
-        if job.frame_start is None or job.frame_end is None:
-            raise CommandBuildError("Frame-range job is incomplete")
-        arguments.extend(
-            (
-                "--frame-start",
-                str(job.frame_start),
-                "--frame-end",
-                str(job.frame_end),
-                "--render-anim",
-            )
-        )
     else:
         arguments.append("--render-anim")
+    frame_arguments = ["--render-node-frame-mode", job.frame_mode.value]
+    if job.frame_mode is FrameMode.RANGE:
+        if job.frame_start is None or job.frame_end is None:
+            raise CommandBuildError("Frame-range job is incomplete")
+        frame_arguments.extend(
+            (
+                "--render-node-frame-start",
+                str(job.frame_start),
+                "--render-node-frame-end",
+                str(job.frame_end),
+            )
+        )
     arguments.extend(
         (
             "--",
+            *frame_arguments,
             "--render-node-engine",
             job.engine.value,
             "--cycles-device",
@@ -127,25 +128,12 @@ def build_render_command(
     if worker is not None:
         arguments.extend(
             (
-                "--render-node-frame-mode",
-                job.frame_mode.value,
                 "--render-node-worker-index",
                 str(worker.index),
                 "--render-node-worker-count",
                 str(worker.count),
             )
         )
-        if job.frame_mode is FrameMode.RANGE:
-            if job.frame_start is None or job.frame_end is None:
-                raise CommandBuildError("Frame-range job is incomplete")
-            arguments.extend(
-                (
-                    "--render-node-frame-start",
-                    str(job.frame_start),
-                    "--render-node-frame-end",
-                    str(job.frame_end),
-                )
-            )
     return RenderCommand(
         arguments=tuple(arguments),
         job_directory=job_directory,

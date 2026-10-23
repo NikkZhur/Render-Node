@@ -77,7 +77,7 @@ try {
   assert(await headerSummary.isVisible(), "Desktop node summary is not visible in the header");
   assert(await headerSummary.getByText("0 queued", { exact: true }).isVisible(), "Queued job count is missing from the header");
   assert(await headerSummary.getByText("2 GPUs ready", { exact: true }).isVisible(), "Ready GPU count is missing from the header");
-  assert(await headerSummary.getByText("12m avg. frame", { exact: true }).isVisible(), "Average frame time is missing from the header");
+  assert(await headerSummary.getByText("— avg. frame", { exact: true }).isVisible(), "Unavailable average frame time is not marked honestly");
   assert((await headerSummary.locator(".summary-storage-warning").count()) === 0, "Healthy storage exposes a critical header warning");
   const headerControlHeights = await desktop.locator(".app-header").evaluate((header) =>
     [...header.querySelectorAll(".summary-pill, .connection-pill, .version-button, .icon-button, .theme-switch")].map(

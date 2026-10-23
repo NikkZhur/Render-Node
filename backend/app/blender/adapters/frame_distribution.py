@@ -1,27 +1,28 @@
-"""Configure one Blender process with its deterministic round-robin frame slice."""
+"""Report the scene frame plan and configure an optional round-robin frame slice."""
 
 import sys
 
 import bpy
 
 
-def _value(arguments, name):
-    return arguments[arguments.index(name) + 1]
+def _value(arguments, name, default=None):
+    return arguments[arguments.index(name) + 1] if name in arguments else default
 
 
 arguments = sys.argv[sys.argv.index("--") + 1 :]
 frame_mode = _value(arguments, "--render-node-frame-mode")
-worker_index = int(_value(arguments, "--render-node-worker-index"))
-worker_count = int(_value(arguments, "--render-node-worker-count"))
+worker_index = int(_value(arguments, "--render-node-worker-index", "0"))
+worker_count = int(_value(arguments, "--render-node-worker-count", "1"))
 scene = bpy.context.scene
 scene_step = max(int(scene.frame_step), 1)
 
 if frame_mode == "RANGE":
-    frame_start = int(_value(arguments, "--render-node-frame-start"))
-    frame_end = int(_value(arguments, "--render-node-frame-end"))
-else:
-    frame_start = int(scene.frame_start)
-    frame_end = int(scene.frame_end)
+    scene.frame_start = int(_value(arguments, "--render-node-frame-start"))
+    scene.frame_end = int(_value(arguments, "--render-node-frame-end"))
+# RNA setters clamp requested bounds. Report the effective range, and leave
+# loaded ALL bounds untouched when no worker slice is needed (including negatives).
+frame_start = int(scene.frame_start)
+frame_end = int(scene.frame_end)
 
 total = 0 if frame_end < frame_start else ((frame_end - frame_start) // scene_step) + 1
 first_frame = frame_start + worker_index * scene_step
@@ -38,6 +39,7 @@ print(
 if assigned == 0:
     raise SystemExit(0)
 
-scene.frame_start = first_frame
-scene.frame_end = frame_end
+if worker_count > 1:
+    scene.frame_start = first_frame
+    scene.frame_end = frame_end
 scene.frame_step = worker_step

@@ -7,7 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request, Response, status
 
-from app.jobs.schemas import JobCreate, JobPageResponse, JobResponse, JobUpdate
+from app.jobs.schemas import JobCreate, JobPageResponse, JobResponse, JobSummaryResponse, JobUpdate
 from app.jobs.service import JobService
 from app.schemas import ErrorResponse
 
@@ -55,6 +55,14 @@ async def page_jobs(
         page_size=result.page_size,
         total=result.total,
         pages=result.pages,
+    )
+
+
+@router.get("/summary", response_model=JobSummaryResponse)
+async def summarize_jobs(service: JobServiceDependency) -> JobSummaryResponse:
+    result = await service.summary()
+    return JobSummaryResponse(
+        queued_count=result.queued_count, rendering_count=result.rendering_count
     )
 
 

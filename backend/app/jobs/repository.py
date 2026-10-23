@@ -44,6 +44,15 @@ class JobRepository:
         )
         return job
 
+    async def queue_counts(self) -> tuple[int, int]:
+        result = await self._session.execute(
+            select(Job.status, func.count())
+            .where(Job.status.in_([JobStatus.QUEUED, JobStatus.RENDERING]))
+            .group_by(Job.status)
+        )
+        counts: dict[JobStatus, int] = {status: int(count) for status, count in result}
+        return counts.get(JobStatus.QUEUED, 0), counts.get(JobStatus.RENDERING, 0)
+
     async def list_by_status(self, status: JobStatus) -> builtins.list[Job]:
         result = await self._session.scalars(
             select(Job).where(Job.status == status).order_by(Job.created_at.asc())

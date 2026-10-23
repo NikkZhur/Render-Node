@@ -6,6 +6,7 @@ import { useDialogBehavior, useModalEntrance } from "../../ui/dialogHooks";
 export default function VersionPanel({
   versions,
   blocked,
+  blockedReason = "Finish or cancel the active render before switching versions.",
   onClose,
   onDownload,
   onUpload,
@@ -63,7 +64,7 @@ export default function VersionPanel({
         {blocked && (
           <div className="modal-notice">
             <span className="notice-pulse" />
-            Finish or cancel the active render before switching versions.
+            {blockedReason}
           </div>
         )}
 

@@ -56,8 +56,15 @@ def test_command_is_backend_owned_and_contains_mandatory_safety_flags(tmp_path: 
         "--cycles-device",
         "CUDA",
     )
-    assert command.arguments[command.arguments.index("--frame-start") + 1] == "3"
-    assert command.arguments[command.arguments.index("--frame-end") + 1] == "5"
+    assert command.arguments[command.arguments.index("--render-node-frame-start") + 1] == "3"
+    assert command.arguments[command.arguments.index("--render-node-frame-end") + 1] == "5"
+    plan_index = next(
+        index
+        for index, argument in enumerate(command.arguments)
+        if argument.endswith("frame_distribution.py")
+    )
+    assert plan_index < command.arguments.index("--render-anim")
+    assert "--render-node-worker-count" not in command.arguments
 
 
 def test_command_rejects_unverified_adapter_and_escaping_scene(tmp_path: Path) -> None:

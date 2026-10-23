@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-FRAME_RE = re.compile(r"\bFra:\s*(?P<frame>\d+)\b")
+FRAME_RE = re.compile(r"\bFra:\s*(?P<frame>-?\d+)\b")
 SAMPLE_RES = (
     re.compile(
         r"\bSample\s+(?P<sample>\d+)\s*/\s*(?P<total>\d+)\b",
@@ -18,15 +18,15 @@ SAMPLE_RES = (
 )
 FAKE_PROGRESS_RE = re.compile(
     r"^RENDER_NODE_PROGRESS\s+(?P<progress>0(?:\.\d+)?|1(?:\.0+)?)"
-    r"(?:\s+frame=(?P<frame>\d+))?$"
+    r"(?:\s+frame=(?P<frame>-?\d+))?$"
 )
 FRAME_PLAN_RE = re.compile(
     r"^RENDER_NODE_FRAME_PLAN"
     r"\s+total=(?P<total>\d+)"
     r"\s+worker=(?P<worker>\d+)"
     r"\s+assigned=(?P<assigned>\d+)"
-    r"\s+start=(?P<start>\d+)"
-    r"\s+end=(?P<end>\d+)"
+    r"\s+start=(?P<start>-?\d+)"
+    r"\s+end=(?P<end>-?\d+)"
     r"\s+step=(?P<step>\d+)$"
 )
 
@@ -53,7 +53,11 @@ def parse_frame_plan(line: str) -> FramePlan | None:
     match = FRAME_PLAN_RE.fullmatch(line.strip())
     if match is None:
         return None
-    return FramePlan(**{name: int(value) for name, value in match.groupdict().items()})
+    plan = FramePlan(**{name: int(value) for name, value in match.groupdict().items()})
+    if plan.step < 1 or plan.assigned > plan.total:
+        return None
+    expected_total = max(0, (plan.end - plan.start) // plan.step + 1)
+    return plan if plan.total == expected_total else None
 
 
 def parse_progress(line: str) -> ProgressUpdate | None:

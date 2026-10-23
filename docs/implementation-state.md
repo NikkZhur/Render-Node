@@ -5,6 +5,13 @@
 
 ## Текущее состояние
 
+- 2026-10-23: повторное ревью незакоммиченных изменений исправило два дефекта:
+  изменение scene bounds при подготовке single-process ALL и несогласованную
+  шкалу истории дисковых скоростей. Проверки и ограничения описаны ниже.
+- 2026-10-23: исправлены общий progress для single-process animation, глобальные
+  индикаторы очереди, история метрик, пагинация галереи и выбор GPU в CPU mode.
+  Подробности реализации и проверки ниже; реальные GPU/cgroup/install проверки
+  остаются отдельными задачами.
 - 2026-10-23: добавлен общий GPU/MIG discovery и telemetry path. Числовые ID
   стабильны внутри процесса по UUID; неподдерживаемые метрики сохраняют `null`
   вплоть до UI. Scheduler и Blender workers используют прежний общий UUID-путь.
@@ -21,6 +28,25 @@
 
 ## Реализовано
 
+- Single-process `ALL_GPUS_PER_FRAME` (включая CPU/одну GPU) получает фактический
+  `FRAME_PLAN` из Blender для RANGE/ALL: границы сцены, число кадров и `frame_step`.
+  Общая доля складывается из завершённых кадров и sample fraction текущего кадра;
+  ETA использует эту долю. Без плана animation не подменяет её прогрессом одного
+  кадра. SINGLE сохраняет прежнее поведение. Signed frames, включая 0, проходят
+  parser, регистрацию, галерею и скачивание без коллизий.
+- `GET /api/v1/jobs/summary` агрегирует queued/rendering по всей таблице заданий.
+  Frontend обновляет сводку после mutations, job events и reconnect; при отсутствии
+  WS использует polling. История по-прежнему загружается по 10 записей на страницу.
+- Metrics history содержит не более 60 реальных timestamped REST/WS samples.
+  Повторные/запоздалые samples не добавляются; GPU привязаны к UUID, диски — к
+  mount point. Неизвестные значения дают разрывы, настоящий ноль сохраняется.
+  `avg. frame` и диапазон сцены явно неизвестны, поскольку API пока не сообщает
+  эти значения. CPU mode отключает GPU controls, подсветку и allocation count;
+  выбор для GPU mode сохраняется локально при переключении обратно.
+- Галерея использует SQL COUNT и LIMIT/OFFSET для originals, один batch preview
+  lookup для кадров страницы. Запрос лога фильтруется `?kind=blender_log` на уровне
+  БД и не загружает метаданные всех кадров; запрос artifacts без фильтра совместим
+  с прежним API.
 - Фазы 1–5: FastAPI/SQLite/Alembic, безопасные jobs/uploads, Blender registry,
   `SandboxRunner`, FIFO Job Manager, realtime, artifacts/previews и metrics.
 - Bundled manifest допускает Blender 5.2.0 и 4.1.1, но backend регистрирует
@@ -256,6 +282,62 @@
 
 ## Последняя проверка
 
+2026-10-23, повторное ревью незакоммиченных изменений:
+
+- Убрана повторная запись scene bounds для single-process ALL: сохранённые
+  отрицательные границы больше не проходят через RNA setters, которые
+  ограничивают их нулём. Для RANGE план рассчитывается по фактическим границам
+  после применения настроек, включая верхний предел Blender. Поведение setters
+  сверено с [исходниками Blender 4.5](https://github.com/blender/blender/blob/v4.5.0/source/blender/makesrna/intern/rna_scene.cc#L963-L982).
+  Три regression cases используют модель этих setters; это не запуск реального
+  Blender.
+- История Read/Write сохраняет MB/s и строится в одной шкале по максимуму
+  видимой истории. Прежняя нормализация каждого sample отдельно превращала
+  1000 и 2000 MB/s в одинаковую высоту и могла искажать Read при изменении Write.
+  Добавлены unit regression и браузерная проверка координат обоих графиков.
+- Новые regression tests сначала воспроизвели дефекты, затем прошли с правками.
+  Итоговые Ruff format/check, strict mypy `app tests` и полный pytest успешны:
+  289 passed, 1 skipped (нет системных nginx/envsubst). Frontend lint, все
+  47 unit tests и production build успешны.
+- Playwright `qa:regressions` прошёл на отдельном Vite, порт 15175, с полностью
+  изолированными HTTP/WS fixtures: queue events/reconnect/mutations, CPU/GPU
+  selection, bounded metric history, disk throughput scale, desktop/mobile.
+- Других подтверждённых дефектов в просмотренном diff не найдено. Настоящие
+  Blender/GPU/MIG, kernel cgroup isolation и установка/rollback в этом ревью
+  не запускались; fake Blender и deployment harness не заменяют эти проверки.
+
+2026-10-23, пять исправлений progress/queue/metrics/gallery/CPU UI:
+
+- Ruff format/check и strict mypy `app tests` прошли на итоговом коде.
+  Полный pytest после интеграции: 284 passed, 1 skipped (системные nginx/envsubst
+  отсутствуют). После финального guard, исключающего вспомогательные `.txt`
+  outputs из прогресса, дополнительно прошли все 40 manager/progress tests,
+  включая два новых regression cases для обоих GPU strategies.
+- Fake Blender проверяет single-process CPU, CUDA с одной GPU и OptiX с двумя
+  GPU для SINGLE/RANGE/ALL, шаг сцены, отрицательные/нулевые кадры. Adapter unit
+  tests проверяют фактическое изменение scene bounds/step без реального Blender.
+  Существующие distributed/cancel/timeout tests также прошли.
+- SQL/API regressions проверяют глобальную queue summary при активных заданиях
+  за пределами первой страницы, галерею из 123 кадров с пропущенными previews,
+  bounded ORM loading и максимум три запроса артефактов на страницу, filtered
+  log lookup, signed frame registration/delivery.
+- Frontend lint, 46 unit tests и production build прошли. История проверена на
+  60 samples, null/zero, UUID reorder и гонку REST/WS; ETA проверен для общей
+  доли 1/3, форматирование — для отрицательных и нулевых кадров.
+- Playwright `qa:regressions` (HTTP/WS fixtures), `qa:versions-empty`, mock
+  `qa:smoke`, `qa:jobs`, `qa:versions`, `qa:multi-gpu`, `qa:render-progress`
+  прошли. Проверены global summary events/reconnect/mutations, CPU/GPU payload,
+  unknown labels, gallery log filter, desktop/mobile; screenshots просмотрены.
+- `qa:api`, `qa:runner` и `qa:jobs-pagination` прошли на отдельном backend/Vite
+  с абсолютным SQLite URL и fake Blender во временном workspace
+  `/tmp/render-node-five-fixes-bc7qr6di`. Проверены реальные REST/WS transports,
+  preview/original/ZIP, reload, отмена и постраничная загрузка. Между сценариями
+  сбрасывались только тестовые browser sessions/jobs; тестовые серверы остановлены.
+- Итоговое ревью выявило и исправило обход pagination через загрузку всех
+  artifacts ради лога и ложный progress от вспомогательных numbered outputs.
+  Миграция БД не нужна. Пользовательские сцены/данные не использовались; реальный
+  Blender/GPU, cgroup kernel isolation, install/rollback в этой проверке не запускались.
+
 2026-10-23, поддержка MIG:
 
 - Ruff check, strict mypy `app tests`, полный pytest: 259 passed, 1 skipped
@@ -484,16 +566,9 @@
 
 ## Известные ограничения и дальнейшая работа
 
-- Общий progress в `ALL_GPUS_PER_FRAME` + `ALL` может остаться на 100% после
-  первого кадра; вариант `RANGE` в этом пути не учитывает scene `frame_step`.
-  Исправление расчёта требует отдельной задачи и тестов; при cleanup алгоритм
-  сохранён. Реальный smoke подтверждает кадры и события, а не точность всех
-  вариантов процентов.
-- Некоторые frontend-индикаторы активности/очереди учитывают только текущую
-  страницу jobs и могут пропустить активную задачу на другой странице.
-- Графики metrics используют синтетическую историю также в real API mode.
-- `ArtifactService.frame_page` читает все originals и отдельно ищет previews;
-  оптимизацию больших последовательностей следует рассмотреть отдельно.
+- Backend пока не сообщает среднее время кадра и метаданные диапазона исходной
+  сцены до рендера; UI показывает неизвестные значения. История метрик хранится
+  только в памяти браузера и начинает накапливаться заново после перезагрузки.
 - Нативный installer ещё не прогонялся целиком на реальном Ubuntu GPU Pod;
   необходимо проверить apt/runtime libraries, обе bundled Blender версии,
   RunPod HTTPS/WebSocket proxy и CUDA/OptiX до публикации команды пользователям.

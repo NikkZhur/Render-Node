@@ -1,8 +1,9 @@
-import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useId, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createPairingUrl } from "./accessBootstrap";
 import { accessApi, artifactsApi, blenderApi, devicesApi, jobsApi, systemApi } from "./api";
-import { FRAMES_PER_PAGE } from "./artifactPresentation";
+import { FRAMES_PER_PAGE, paddedFrame } from "./artifactPresentation";
+import { appendMetricSample, metricChartSegments, metricPercent, metricSeries, resourceKey } from "./metricHistory";
 import { getLogLevel } from "./logPresentation";
 import {
   ALL_GPUS_PER_FRAME,
@@ -31,7 +32,6 @@ const COMPUTE_DEVICES = ["OptiX", "CUDA", "CPU"];
 const FRAME_MODES = ["single", "range", "all"];
 const RENDER_ENGINES = ["Cycles", "Eevee", "Workbench"];
 const JOBS_PER_PAGE = 10;
-const emptyListQuery = async () => [];
 const draftJob = {
   id: "draft",
   shortId: "NEW",
@@ -193,7 +193,7 @@ function Header({ activeVersion, connectionState, gpuCount, onPairDevice, onThem
           </span>
           <span className="summary-pill summary-time">
             <Icon name="clock" size={15} />
-            <strong>12m</strong> avg. frame
+            <strong title="Average frame time is unavailable">—</strong> avg. frame
           </span>
           {storageWarning && (
             <span className="summary-pill summary-storage-warning" title={`${storageWarning.mountPoint} is running low on space`}>
@@ -407,7 +407,8 @@ function JobSetup({
   const runtimeUnavailable = !activeVersion;
   const controlsDisabled = !editable || operationPending || runtimeUnavailable;
   const activeGpuIds = selectedGpus ?? devices.map((gpu) => gpu.id);
-  const gpuRenderModeVisible = supportsFramePerGpu(device, activeGpuIds);
+  const allocatedGpuIds = device === "CPU" ? [] : activeGpuIds;
+  const gpuRenderModeVisible = supportsFramePerGpu(device, allocatedGpuIds);
   const computeDevices = devices.length > 0 ? COMPUTE_DEVICES : [...new Set([device, "CPU"])];
   const runtimeVersion = isDraft ? activeVersion : (job.version ?? job.blender_version);
   const runnerUnavailable = !runner.available;
@@ -422,7 +423,7 @@ function JobSetup({
     blender_version: runtimeVersion,
     engine: ENGINE_API_VALUES[engine],
     device: device.toUpperCase(),
-    gpu_ids: device === "CPU" ? [] : activeGpuIds,
+    gpu_ids: allocatedGpuIds,
     gpu_render_mode: normalizeGpuRenderMode(device, activeGpuIds, gpuRenderMode),
     frame_mode: frameMode.toUpperCase(),
     frame_start: frameMode === "all" ? null : Number(frameStart),
@@ -562,7 +563,7 @@ function JobSetup({
       <div className="field-group">
         <div className="field-label-row">
           <label>Frames</label>
-          <span>SCENE 1–240</span>
+          <span>SCENE RANGE UNKNOWN</span>
         </div>
         <div
           className="segmented-control"
@@ -645,16 +646,17 @@ function JobSetup({
       <div className="field-group gpu-field">
         <div className="field-label-row">
           <label>GPU allocation</label>
-          <span>{activeGpuIds.length} SELECTED</span>
+          <span>{device === "CPU" ? "NOT USED · CPU MODE" : `${allocatedGpuIds.length} SELECTED`}</span>
         </div>
         <div className="gpu-list">
           {devices.length === 0 && <span className="gpu-empty">No NVIDIA GPUs discovered · CPU mode</span>}
           {devices.map((gpu) => {
-            const selected = activeGpuIds.includes(gpu.id);
+            const selected = allocatedGpuIds.includes(gpu.id);
             return (
               <button
+                aria-pressed={selected}
                 className={`gpu-option ${selected ? "selected" : ""}`}
-                disabled={controlsDisabled}
+                disabled={controlsDisabled || device === "CPU"}
                 key={gpu.id}
                 onClick={() => toggleGpu(gpu.id)}
                 type="button"
@@ -878,7 +880,7 @@ function RenderPreview({ devices = [], isMockMode, job, liveLogs = [], mockLogLi
     ? `${sampleProgress.sample} / ${sampleProgress.totalSamples}`
     : "—";
   const progressRows = buildProgressRows(job, devices, sampleProgress);
-  const frameNumber = String(currentFrame).padStart(3, "0");
+  const frameNumber = paddedFrame(currentFrame, 3);
   const rawDisplayedLogs = isMockMode
     ? mockLogLines
     : (liveLogs.length ? liveLogs : (logQuery.data?.lines ?? []))
@@ -1335,40 +1337,36 @@ function DeleteJobDialog({ error, job, onClose, onConfirm, pending }) {
   );
 }
 
-function makeMetricHistory(current, seed) {
-  if (!Number.isFinite(current)) return [];
-  const offsets = [-13, -5, -9, 4, -2, 9, 3, 0];
-  return offsets.map((offset, index) => (
-    Math.max(0, Math.min(100, current + offset * (0.55 + seed * 0.08) + ((index + seed) % 3) * 2))
-  ));
-}
-
-function MetricChart({ chartId, history, tone }) {
+function MetricChart({ chartId, history, maximum = 100, tone }) {
   const width = 240;
   const height = 88;
-  const points = history.map((value, index) => ({
-    x: (index / (history.length - 1)) * width,
-    y: 8 + ((100 - value) / 100) * (height - 18),
-  }));
-  const linePath = points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(" ");
-  const areaPath = `${linePath} L ${width} ${height} L 0 ${height} Z`;
+  const segments = metricChartSegments(history, width, height, maximum);
   const color = `var(--${tone})`;
 
   return (
-    <svg aria-hidden="true" className="metric-chart" preserveAspectRatio="none" viewBox={`0 0 ${width} ${height}`}>
+    <svg aria-hidden="true" className="metric-chart" data-samples={history.length} preserveAspectRatio="none" viewBox={`0 0 ${width} ${height}`}>
       <defs>
         <linearGradient id={chartId} x1="0" x2="0" y1="0" y2="1">
           <stop offset="0%" stopColor={color} stopOpacity="0.38" />
           <stop offset="100%" stopColor={color} stopOpacity="0" />
         </linearGradient>
       </defs>
-      <path className="metric-area" d={areaPath} fill={`url(#${chartId})`} />
-      <path className="metric-line" d={linePath} stroke={color} />
+      {segments.map((points, index) => {
+        if (points.length === 1) return <circle key={index} cx={points[0].x} cy={points[0].y} r="2" fill={color} />;
+        const linePath = points.map((point, pointIndex) => `${pointIndex === 0 ? "M" : "L"} ${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(" ");
+        const areaPath = `${linePath} L ${points.at(-1).x} ${height} L ${points[0].x} ${height} Z`;
+        return (
+          <g key={index}>
+            <path className="metric-area" d={areaPath} fill={`url(#${chartId})`} />
+            <path className="metric-line" d={linePath} stroke={color} />
+          </g>
+        );
+      })}
     </svg>
   );
 }
 
-function MetricCard({ chartId, history, label, percent, tone, value }) {
+function MetricCard({ chartId, history, label, maximum, percent, tone, value }) {
   const available = Number.isFinite(percent);
   return (
     <article className="metric-item">
@@ -1383,15 +1381,15 @@ function MetricCard({ chartId, history, label, percent, tone, value }) {
           <strong>{available ? value : "—"}</strong>
         </div>
       </div>
-      {available && <MetricChart chartId={chartId} history={history} tone={tone} />}
+      <MetricChart chartId={chartId} history={history} maximum={maximum} tone={tone} />
     </article>
   );
 }
 
-function ResourceRow({ detail, kind, metrics, name }) {
-  const resourceKey = `${kind}-${name}`.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+function ResourceRow({ detail, kind, metrics, name, id }) {
+  const chartKey = useId();
   return (
-    <div className="resource-row">
+    <div className="resource-row" data-resource-id={id}>
       <div className="resource-identity">
         <span>{kind}</span>
         <strong>{name}</strong>
@@ -1399,47 +1397,57 @@ function ResourceRow({ detail, kind, metrics, name }) {
       </div>
       <div className="resource-metrics">
         {metrics.map((metric, index) => (
-          <MetricCard chartId={`${resourceKey}-${index}`} key={metric.label} {...metric} />
+          <MetricCard chartId={`${chartKey}-${index}`} key={metric.label} {...metric} />
         ))}
       </div>
     </div>
   );
 }
 
-function Metrics({ devices, processors, storages }) {
+function Metrics({ devices, processors, storages, history }) {
   const gpuRows = devices.map((gpu) => ({
+    id: resourceKey("gpu", gpu),
     detail: `${gpu.memoryTotal} GB VRAM`,
     kind: `GPU ${String(gpu.id + 1).padStart(2, "0")}`,
     name: gpu.name.replace("NVIDIA ", ""),
     metrics: [
-      { label: "Load", value: `${gpu.utilization}%`, percent: gpu.utilization, tone: "blue", history: makeMetricHistory(gpu.utilization, gpu.id + 1) },
-      { label: "VRAM", value: `${gpu.memoryUsed} GB`, percent: (gpu.memoryUsed / gpu.memoryTotal) * 100, tone: "violet", history: makeMetricHistory((gpu.memoryUsed / gpu.memoryTotal) * 100, gpu.id + 2) },
-      { label: "Temp", value: `${gpu.temperature}°`, percent: gpu.temperature, tone: gpu.temperature < 80 ? "green" : "red", history: makeMetricHistory(gpu.temperature, gpu.id + 3) },
+      { label: "Load", value: `${gpu.utilization}%`, percent: gpu.utilization, tone: "blue", history: metricSeries(history, "gpu", gpu, "load") },
+      { label: "VRAM", value: `${gpu.memoryUsed} GB`, percent: metricPercent(gpu.memoryUsed, gpu.memoryTotal), tone: "violet", history: metricSeries(history, "gpu", gpu, "memory") },
+      { label: "Temp", value: `${gpu.temperature}°`, percent: gpu.temperature, tone: gpu.temperature < 80 ? "green" : "red", history: metricSeries(history, "gpu", gpu, "temperature") },
     ],
   }));
   const cpuRows = processors.map((cpu) => ({
+    id: resourceKey("cpu", cpu),
     detail: `${cpu.cores} cores`,
     kind: `CPU ${String(cpu.id + 1).padStart(2, "0")}`,
     name: cpu.name,
     metrics: [
-      { label: "Load", value: `${cpu.utilization}%`, percent: cpu.utilization, tone: "green", history: makeMetricHistory(cpu.utilization, cpu.id + 4) },
-      { label: "Memory", value: `${cpu.memoryUsed} GB`, percent: (cpu.memoryUsed / cpu.memoryTotal) * 100, tone: "orange", history: makeMetricHistory((cpu.memoryUsed / cpu.memoryTotal) * 100, cpu.id + 5) },
-      { label: "Temp", value: `${cpu.temperature}°`, percent: cpu.temperature, tone: cpu.temperature < 80 ? "green" : "red", history: makeMetricHistory(cpu.temperature, cpu.id + 6) },
+      { label: "Load", value: `${cpu.utilization}%`, percent: cpu.utilization, tone: "green", history: metricSeries(history, "cpu", cpu, "load") },
+      { label: "Memory", value: `${cpu.memoryUsed} GB`, percent: metricPercent(cpu.memoryUsed, cpu.memoryTotal), tone: "orange", history: metricSeries(history, "cpu", cpu, "memory") },
+      { label: "Temp", value: `${cpu.temperature}°`, percent: cpu.temperature, tone: cpu.temperature < 80 ? "green" : "red", history: metricSeries(history, "cpu", cpu, "temperature") },
     ],
   }));
   const storageRows = storages.map((storage) => {
-    const usedPercent = ((storage.totalGb - storage.freeGb) / storage.totalGb) * 100;
+    const usedPercent = metricPercent(storage.totalGb - storage.freeGb, storage.totalGb);
     const freePercent = (storage.freeGb / storage.totalGb) * 100;
     const capacity = storage.totalGb >= 1000 ? `${storage.totalGb / 1000} TB` : `${storage.totalGb} GB`;
+    const readHistory = metricSeries(history, "storage", storage, "read");
+    const writeHistory = metricSeries(history, "storage", storage, "write");
+    const throughputMaximum = Math.max(
+      storage.maxThroughputMbps || 1000,
+      ...readHistory.map((sample) => sample.value ?? 0),
+      ...writeHistory.map((sample) => sample.value ?? 0),
+    );
 
     return {
+      id: resourceKey("storage", storage),
       detail: `${storage.mountPoint} · ${storage.freeGb} GB free of ${capacity}`,
       kind: `STORAGE ${String(storage.id + 1).padStart(2, "0")}`,
       name: storage.name,
       metrics: [
-        { label: "Used", value: `${Math.round(usedPercent)}%`, percent: usedPercent, tone: freePercent < 10 ? "red" : freePercent < 20 ? "orange" : "blue", history: makeMetricHistory(usedPercent, storage.id + 7) },
-        { label: "Read", value: `${storage.readMbps} MB/s`, percent: (storage.readMbps / storage.maxThroughputMbps) * 100, tone: "green", history: makeMetricHistory((storage.readMbps / storage.maxThroughputMbps) * 100, storage.id + 8) },
-        { label: "Write", value: `${storage.writeMbps} MB/s`, percent: (storage.writeMbps / storage.maxThroughputMbps) * 100, tone: "violet", history: makeMetricHistory((storage.writeMbps / storage.maxThroughputMbps) * 100, storage.id + 9) },
+        { label: "Used", value: `${Math.round(usedPercent)}%`, percent: usedPercent, tone: freePercent < 10 ? "red" : freePercent < 20 ? "orange" : "blue", history: metricSeries(history, "storage", storage, "used") },
+        { label: "Read", value: `${storage.readMbps} MB/s`, percent: metricPercent(storage.readMbps, throughputMaximum), tone: "green", history: readHistory, maximum: throughputMaximum },
+        { label: "Write", value: `${storage.writeMbps} MB/s`, percent: metricPercent(storage.writeMbps, throughputMaximum), tone: "violet", history: writeHistory, maximum: throughputMaximum },
       ],
     };
   });
@@ -1449,7 +1457,7 @@ function Metrics({ devices, processors, storages }) {
     <section aria-label="Resource metrics" className="metrics-strip">
       <div className="metrics-scroll" style={{ "--visible-resource-rows": Math.min(2, resourceRows.length || 1) }}>
         {resourceRows.map((resource) => (
-          <ResourceRow key={`${resource.kind}-${resource.name}`} {...resource} />
+          <ResourceRow key={resource.id} {...resource} />
         ))}
         {resourceRows.length === 0 && (
           <div className="metrics-empty">No hardware metrics available</div>
@@ -1587,20 +1595,17 @@ export default function App({ mockApi = null }) {
     queryKey: ["devices"],
     queryFn: isMockMode ? mockApi.getDevices : devicesApi.list,
   });
-  const processorsQuery = useQuery({
-    queryKey: ["processors"],
-    queryFn: mockApi?.getProcessors ?? emptyListQuery,
-    enabled: isMockMode,
-  });
-  const storagesQuery = useQuery({
-    queryKey: ["storages"],
-    queryFn: mockApi?.getStorages ?? emptyListQuery,
-    enabled: isMockMode,
-  });
   const metricsQuery = useQuery({
     queryKey: ["metrics"],
-    queryFn: systemApi.metrics,
+    queryFn: isMockMode ? mockApi.getMetrics : systemApi.metrics,
+    structuralSharing: appendMetricSample,
+    refetchInterval: realtime.connectionState === "connected" ? false : 5000,
+  });
+  const jobsSummaryQuery = useQuery({
+    queryKey: ["jobs", "summary"],
+    queryFn: jobsApi.summary,
     enabled: !isMockMode,
+    refetchInterval: realtime.connectionState === "connected" ? false : 5000,
   });
   const capabilitiesQuery = useQuery({
     queryKey: ["capabilities"],
@@ -1660,6 +1665,7 @@ export default function App({ mockApi = null }) {
   const jobTotal = isMockMode ? mockJobs.length : (jobsQuery.data?.total ?? 0);
   const jobPages = isMockMode ? mockPageCount : Math.max(1, jobsQuery.data?.pages ?? 1);
   const updateJobCache = (updatedJob) => {
+    queryClient.invalidateQueries({ queryKey: ["jobs", "summary"] });
     queryClient.setQueriesData({ queryKey: ["jobs"] }, (current) => {
       if (!current?.items?.some((job) => job.id === updatedJob.id)) return current;
       return {
@@ -1737,12 +1743,16 @@ export default function App({ mockApi = null }) {
     ? null
     : (jobs.find((job) => job.id === selectedJobId) ?? jobs[0] ?? null);
   const setupJob = selectedJob ?? { ...draftJob, version: activeVersion };
-  const isRendering = jobs.some((job) => job.status === "rendering");
+  const queueSummary = isMockMode ? {
+    queued_count: mockJobs.filter((job) => job.status === "queued").length,
+    rendering_count: mockJobs.filter((job) => job.status === "rendering").length,
+  } : (jobsSummaryQuery.isError ? null : jobsSummaryQuery.data);
+  const isRendering = (queueSummary?.rendering_count ?? 0) > 0;
   const clockNow = useSecondClock(isRendering);
-  const hasActiveJob = jobs.some((job) => job.status === "queued" || job.status === "rendering");
-  const metricDevices = isMockMode ? (devicesQuery.data ?? []) : (metricsQuery.data?.devices ?? []);
-  const processors = isMockMode ? (processorsQuery.data ?? []) : (metricsQuery.data?.processors ?? []);
-  const storages = isMockMode ? (storagesQuery.data ?? []) : (metricsQuery.data?.storages ?? []);
+  const hasActiveJob = !queueSummary || queueSummary.queued_count > 0 || queueSummary.rendering_count > 0;
+  const metricDevices = metricsQuery.data?.devices ?? [];
+  const processors = metricsQuery.data?.processors ?? [];
+  const storages = metricsQuery.data?.storages ?? [];
   const storageWarning = storages.find(
     (storage) => storage.status === "low_space"
       || storage.freeGb < 50
@@ -1960,7 +1970,7 @@ export default function App({ mockApi = null }) {
         }}
         onThemeChange={setTheme}
         onVersions={() => setVersionPanelOpen(true)}
-        queuedCount={jobs.filter((job) => job.status === "queued").length}
+        queuedCount={queueSummary?.queued_count ?? "—"}
         storageWarning={storageWarning}
         theme={theme}
         versionsLoading={versionsQuery.isPending}
@@ -2028,6 +2038,7 @@ export default function App({ mockApi = null }) {
             <Artifacts job={displayJob} mockApi={mockApi} />
           </div>
           <Metrics
+            history={metricsQuery.data?.history ?? []}
             devices={metricDevices}
             processors={processors}
             storages={storages}
@@ -2051,6 +2062,7 @@ export default function App({ mockApi = null }) {
           }
           activating={activateMutation.isPending}
           blocked={hasActiveJob}
+          blockedReason={!queueSummary ? "Queue status is unavailable. Waiting before switching versions." : undefined}
           catalogQueryFn={versionApi.getOfficialVersions}
           downloadingVersion={downloadMutation.isPending ? downloadMutation.variables : null}
           installingVersion={installMutation.isPending ? installMutation.variables : null}

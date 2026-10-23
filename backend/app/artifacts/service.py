@@ -26,7 +26,7 @@ from app.jobs.repository import JobRepository
 from app.storage.database import Database
 from app.storage.jobs import JobStorage, contained_path
 
-FRAME_PATTERN = re.compile(r"(?P<frame>\d{1,8})(?=\.[^.]+$)")
+FRAME_PATTERN = re.compile(r"(?P<frame>-?\d{1,8})(?=\.[^.]+$)")
 ORIGINAL_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".exr"}
 PREVIEW_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff"}
 
@@ -197,24 +197,37 @@ class ArtifactService:
         )
         return artifact
 
-    async def list_artifacts(self, job_id: UUID) -> list[Artifact]:
+    async def list_artifacts(
+        self, job_id: UUID, *, kind: ArtifactKind | None = None
+    ) -> list[Artifact]:
         await self._require_job(job_id)
         async with self._database.session_factory() as session:
-            return await ArtifactRepository(session).list_for_job(job_id)
+            return await ArtifactRepository(session).list_for_job(job_id, kind=kind)
 
     async def frame_page(self, job_id: UUID, *, page: int, page_size: int) -> FramePageResponse:
         await self._require_job(job_id)
         async with self._database.session_factory() as session:
             repository = ArtifactRepository(session)
-            all_originals = await repository.list_all_frames(job_id, ArtifactKind.FRAME_ORIGINAL)
-            originals = all_originals[(page - 1) * page_size : page * page_size]
+            total = await repository.count_frames(job_id, ArtifactKind.FRAME_ORIGINAL)
+            originals = await repository.list_frames(
+                job_id,
+                ArtifactKind.FRAME_ORIGINAL,
+                offset=(page - 1) * page_size,
+                limit=page_size,
+            )
+            previews = {
+                preview.frame: preview
+                for preview in await repository.list_by_frames(
+                    job_id,
+                    ArtifactKind.FRAME_PREVIEW,
+                    [original.frame for original in originals if original.frame is not None],
+                )
+            }
             items: list[FrameResponse] = []
             for original in originals:
                 if original.frame is None:
                     continue
-                preview = await repository.get_by_kind_frame(
-                    job_id, ArtifactKind.FRAME_PREVIEW, original.frame
-                )
+                preview = previews.get(original.frame)
                 items.append(
                     FrameResponse(
                         frame=original.frame,
@@ -230,7 +243,6 @@ class ArtifactService:
                         ),
                     )
                 )
-        total = len(all_originals)
         return FramePageResponse(
             items=items,
             page=page,

@@ -84,6 +84,8 @@ Render lifecycle:
 
 - `GET /api/v1/jobs/page?page=1&page_size=10` returns one ordered history page;
   `page_size` is capped at 10 and subsequent pages are fetched on demand;
+- `GET /api/v1/jobs/summary` returns global `queued_count` and `rendering_count`
+  independently of the current history page;
 - `DELETE /api/v1/jobs/{id}` removes the job directory and artifact metadata;
   queued and rendering jobs return `409` until cancelled;
 - `POST /api/v1/jobs/{id}/start` queues a ready job;
@@ -113,6 +115,9 @@ Render lifecycle:
 - RANGE and ALL workers are partitioned deterministically round-robin by a
   trusted Blender adapter after the scene loads, so the actual scene
   `frame_step` is respected;
+- single-process RANGE/ALL runs use the same adapter's scene frame plan to
+  calculate overall progress and ETA, including CPU and one-GPU runs. A missing
+  plan never treats a per-frame fraction as the whole animation's progress;
 - a distributed run has one job cgroup, absolute deadline, output limit and
   shared log budget. Startup failure, non-zero exit, cancellation, timeout, or a
   shared limit terminates every worker process group before releasing all GPUs;

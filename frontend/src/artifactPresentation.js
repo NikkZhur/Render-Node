@@ -1,8 +1,11 @@
 export const FRAMES_PER_PAGE = 50;
 
-const validFrame = (value) => Number.isInteger(value) && value >= 1;
+const validFrame = (value) => Number.isInteger(value);
 
-const paddedFrame = (frame) => String(frame).padStart(4, "0");
+export const paddedFrame = (frame, width = 4) => {
+  const sign = frame < 0 ? "-" : "";
+  return `${sign}${String(Math.abs(frame)).padStart(width - sign.length, "0")}`;
+};
 
 export const frameSequencePresentation = (job, framePage, fallbackTotal = 0) => {
   const total = framePage?.total ?? fallbackTotal;

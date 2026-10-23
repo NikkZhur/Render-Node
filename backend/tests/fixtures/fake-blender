@@ -89,12 +89,14 @@ elif [ -n "$scene" ] && grep -q 'BROWSER' "$scene"; then
     printf 'RENDER_NODE_PROGRESS 0.75 frame=1\n'
     sleep 0.8
     write_frame 1
-elif [ -n "$worker_index" ]; then
+elif [ -n "$frame_mode" ]; then
+    worker_index="${worker_index:-0}"
+    worker_count="${worker_count:-1}"
     scene_step="$(sed -n 's/.*STEP=\([0-9][0-9]*\).*/\1/p' "$scene" | head -n 1)"
     scene_step="${scene_step:-1}"
     if [ "$frame_mode" = "ALL" ]; then
-        frame_start="$(sed -n 's/.*SCENE_START=\([0-9][0-9]*\).*/\1/p' "$scene" | head -n 1)"
-        frame_end="$(sed -n 's/.*SCENE_END=\([0-9][0-9]*\).*/\1/p' "$scene" | head -n 1)"
+        frame_start="$(sed -n 's/.*SCENE_START=\(-\{0,1\}[0-9][0-9]*\).*/\1/p' "$scene" | head -n 1)"
+        frame_end="$(sed -n 's/.*SCENE_END=\(-\{0,1\}[0-9][0-9]*\).*/\1/p' "$scene" | head -n 1)"
         frame_start="${frame_start:-1}"
         frame_end="${frame_end:-4}"
     fi
@@ -142,6 +144,9 @@ elif [ -n "$worker_index" ]; then
             printf 'Fra:%s | Sample 384/512\n' "$frame"
         else
             printf 'RENDER_NODE_PROGRESS 0.75 frame=%s\n' "$frame"
+        fi
+        if grep -q 'FULL_SAMPLES' "$scene"; then
+            printf 'Fra:%s | Sample 512/512\n' "$frame"
         fi
         write_frame "$frame"
         frame=$(( frame + worker_step ))

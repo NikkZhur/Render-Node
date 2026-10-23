@@ -9,11 +9,11 @@ from uuid import UUID
 
 import aiofiles
 
-from app.artifacts.service import ArtifactService, frame_number_from_output
+from app.artifacts.service import ORIGINAL_EXTENSIONS, ArtifactService, frame_number_from_output
 from app.blender.cgroups import ResourceIsolationStatus
 from app.blender.command import BlenderExecutableResolver, FrameWorker, build_render_command
 from app.blender.devices import GpuAllocation, GpuReservationError, GpuScheduler
-from app.blender.progress import parse_frame_plan, parse_progress
+from app.blender.progress import FramePlan, parse_frame_plan, parse_progress
 from app.blender.repository import BlenderRepository
 from app.blender.runner import (
     FailureKind,
@@ -28,7 +28,7 @@ from app.blender.types import RuntimeSource, RuntimeState
 from app.events.hub import EventHub
 from app.jobs.exceptions import JobConflictError, JobNotFoundError, ServiceError
 from app.jobs.models import Job, utc_now
-from app.jobs.progress import _DistributedProgress, _WorkerProgress
+from app.jobs.progress import _DistributedProgress, _SingleProcessProgress, _WorkerProgress
 from app.jobs.repository import JobRepository
 from app.jobs.state_machine import transition_job
 from app.jobs.types import ComputeDevice, FrameMode, GpuRenderMode, JobStatus
@@ -211,6 +211,9 @@ class JobManager:
                 )
             else:
                 command = build_render_command(job, binary=binary, jobs_root=self._jobs_root)
+                tracker = _SingleProcessProgress()
+                if job.frame_mode is FrameMode.SINGLE and job.frame_start is not None:
+                    tracker.set_plan(FramePlan(1, 0, 1, job.frame_start, job.frame_start, 1))
                 gpu_uuids = list(gpu_allocation.uuids) if gpu_allocation is not None else []
                 environment = await build_worker_environment(
                     command.job_directory,
@@ -222,10 +225,10 @@ class JobManager:
                     await self._set_pid(job_id, pid)
 
                 async def on_line(line: str) -> None:
-                    await self._record_progress(job_id, job, line, gpu_uuids=gpu_uuids)
+                    await self._record_progress(job_id, tracker, line, gpu_uuids=gpu_uuids)
 
                 async def on_output(path: Path) -> None:
-                    await self._artifacts.register_output(job_id, path)
+                    await self._record_output(job_id, tracker, path)
 
                 result = await self._runner.run(
                     command,
@@ -390,7 +393,7 @@ class JobManager:
     async def _record_progress(
         self,
         job_id: UUID,
-        original_job: Job,
+        tracker: _SingleProcessProgress,
         line: str,
         *,
         gpu_uuids: list[str],
@@ -408,23 +411,22 @@ class JobManager:
             line=visible_line,
             gpu_uuids=gpu_uuids,
         )
+        plan = parse_frame_plan(line)
+        if plan is not None:
+            async with tracker.lock:
+                tracker.set_plan(plan)
+            return
         try:
             update = parse_progress(line)
         except Exception:
             return
         if update is None:
             return
-        progress = self._overall_progress(original_job, update.frame, update.frame_progress)
-        async with self._database.session_factory() as session, session.begin():
-            job = await self._require_job(JobRepository(session), job_id)
-            if job.status is not JobStatus.RENDERING:
-                return
-            if update.frame is not None:
-                job.current_frame = update.frame
-            if progress is not None:
-                job.progress = max(job.progress, min(progress, 1.0))
-            persisted_progress = job.progress
-            current_frame = job.current_frame
+        async with tracker.lock:
+            progress = tracker.record(update)
+            persisted_progress, current_frame, _ = await self._persist_progress(
+                job_id, frame=tracker.active_frame, progress=progress
+            )
         await self._events.publish(
             "render.progress",
             job_id=str(job_id),
@@ -433,6 +435,33 @@ class JobManager:
             total_samples=update.total_samples,
             progress=persisted_progress,
         )
+
+    async def _record_output(
+        self, job_id: UUID, tracker: _SingleProcessProgress, path: Path
+    ) -> None:
+        if path.suffix.lower() not in ORIGINAL_EXTENSIONS:
+            return
+        frame = frame_number_from_output(path)
+        if frame is not None:
+            async with tracker.lock:
+                progress = tracker.complete_frame(frame)
+                persisted, _, changed = await self._persist_progress(
+                    job_id,
+                    frame=max(tracker.active_frame, frame)
+                    if tracker.active_frame is not None
+                    else frame,
+                    progress=progress,
+                )
+            if changed:
+                await self._events.publish(
+                    "render.progress",
+                    job_id=str(job_id),
+                    frame=frame,
+                    sample=None,
+                    total_samples=None,
+                    progress=persisted,
+                )
+        await self._artifacts.register_output(job_id, path)
 
     async def _record_distributed_progress(
         self,
@@ -525,6 +554,8 @@ class JobManager:
         tracker: _DistributedProgress,
         path: Path,
     ) -> None:
+        if path.suffix.lower() not in ORIGINAL_EXTENSIONS:
+            return
         frame_number = frame_number_from_output(path)
         if frame_number is None:
             return
@@ -581,19 +612,6 @@ class JobManager:
             if progress is not None:
                 job.progress = max(job.progress, min(progress, 1.0))
             return job.progress, job.current_frame, job.progress > before
-
-    @staticmethod
-    def _overall_progress(
-        job: Job, frame: int | None, frame_progress: float | None
-    ) -> float | None:
-        if frame_progress is None:
-            return None
-        if job.frame_mode is FrameMode.RANGE and job.frame_start is not None and job.frame_end:
-            current = frame if frame is not None else job.frame_start
-            total = job.frame_end - job.frame_start + 1
-            offset = min(max(current - job.frame_start, 0), total - 1)
-            return (offset + frame_progress) / total
-        return frame_progress
 
     async def _finish_from_result(self, job_id: UUID, result: RunResult) -> None:
         async with self._database.session_factory() as session, session.begin():

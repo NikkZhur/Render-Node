@@ -49,6 +49,20 @@ test("guards raw ETA against unstable and non-finite inputs", () => {
   assert.equal(rawEtaSeconds(10, 0.5), 10);
 });
 
+test("ETA uses whole-job progress after the first stepped frame completes", () => {
+  for (const device of ["CPU", "CUDA", "OptiX"]) {
+    for (const frameMode of ["ALL", "RANGE"]) {
+      const timing = renderTimingPresentation({
+        id: "stepped", status: "rendering", started_at: startedAt,
+        device, frame_mode: frameMode, gpu_render_mode: "ALL_GPUS_PER_FRAME",
+        progress: 100 / 3, current_frame: 1,
+      }, Date.parse(startedAt) + 10_000, new EtaSmoother());
+      assert(Math.abs(timing.remainingSeconds - 20) < 1e-9);
+      assert.equal(timing.remaining, "~20s remaining");
+    }
+  }
+});
+
 test("EWMA is deterministic and ignores a brief progress regression", () => {
   const smoother = new EtaSmoother(0.2);
   const first = smoother.update({

@@ -68,6 +68,7 @@ const installApiRoutes = async (page) => {
     if (apiPath === "/api/v1/jobs/page" && method === "GET") {
       return json(route, { items: jobs, page: 1, page_size: 10, total: jobs.length, pages: 1 });
     }
+    if (apiPath === "/api/v1/jobs/summary" && method === "GET") return json(route, { queued_count: 0, rendering_count: 0 });
     if (apiPath === "/api/v1/devices" && method === "GET") return json(route, []);
     if (apiPath === "/api/v1/system/capabilities" && method === "GET") {
       return json(route, {
@@ -75,7 +76,7 @@ const installApiRoutes = async (page) => {
       });
     }
     if (apiPath === "/api/v1/system/metrics" && method === "GET") {
-      return json(route, { collected_at: now, cpus: [], gpus: [], storages: [], websocket_clients: 0 });
+      return json(route, { timestamp: now, cpus: [], gpus: [], storages: [], websocket_clients: 0 });
     }
     if (apiPath === "/api/v1/blender/versions" && method === "GET") {
       return json(route, state.installed ? [{

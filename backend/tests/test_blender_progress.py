@@ -58,3 +58,20 @@ def test_parse_frame_plan_accepts_only_complete_backend_marker() -> None:
         2,
     )
     assert parse_frame_plan("RENDER_NODE_FRAME_PLAN total=4") is None
+
+
+def test_negative_scene_frames_and_invalid_frame_plans() -> None:
+    plan = parse_frame_plan(
+        "RENDER_NODE_FRAME_PLAN total=3 worker=0 assigned=3 start=-2 end=3 step=2"
+    )
+    assert plan is not None and plan.start == -2
+    update = parse_progress("Fra:-2 | Sample 256/512")
+    assert update is not None and update.frame == -2
+    assert (
+        parse_frame_plan("RENDER_NODE_FRAME_PLAN total=3 worker=0 assigned=3 start=1 end=3 step=0")
+        is None
+    )
+    assert (
+        parse_frame_plan("RENDER_NODE_FRAME_PLAN total=9 worker=0 assigned=9 start=1 end=3 step=1")
+        is None
+    )

@@ -77,6 +77,10 @@ export const accessApi = {
 };
 
 export const jobsApi = {
+  summary({ signal } = {}) {
+    return request("/jobs/summary", { signal });
+  },
+
   async list({ signal } = {}) {
     const jobs = await request("/jobs", { signal });
     return jobs.map(presentJob);
@@ -146,8 +150,9 @@ export const devicesApi = {
 };
 
 export const artifactsApi = {
-  list(jobId, { signal } = {}) {
-    return request(`/jobs/${jobId}/artifacts`, { signal });
+  list(jobId, { signal, kind } = {}) {
+    const query = kind ? `?kind=${encodeURIComponent(kind)}` : "";
+    return request(`/jobs/${jobId}/artifacts${query}`, { signal });
   },
 
   frames(jobId, { page = 1, pageSize = 50, signal } = {}) {

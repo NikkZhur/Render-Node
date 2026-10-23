@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { frameSequencePresentation } from "../src/artifactPresentation.js";
+import { frameSequencePresentation, paddedFrame } from "../src/artifactPresentation.js";
+
+test("preserves negative and zero scene frames with sign-aware labels", () => {
+  assert.deepEqual(
+    frameSequencePresentation({ frame_mode: "ALL" }, { total: 3, items: [{ frame: -2 }, { frame: 0 }, { frame: 2 }] }),
+    { countText: "3 frames", name: "frames_-002–0002", title: "Frames -2–2" },
+  );
+  assert.equal(frameSequencePresentation({ frame_mode: "ALL" }, { total: 1, items: [{ frame: 0 }] }).name, "frame_0000");
+  assert.equal(paddedFrame(-2, 3), "-02");
+  assert.equal(paddedFrame(0, 3), "000");
+});
 
 test("uses the registered frame number for a partial one-frame result", () => {
   assert.deepEqual(

@@ -20,7 +20,7 @@ class ArtifactResponse(BaseModel):
 
 
 class FrameResponse(BaseModel):
-    frame: int = Field(ge=1)
+    frame: int
     filename: str
     size_bytes: int = Field(ge=0)
     original_artifact_id: UUID

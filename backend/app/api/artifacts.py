@@ -43,9 +43,11 @@ def _file_response(
 
 @router.get("/artifacts", response_model=list[ArtifactResponse])
 async def list_artifacts(
-    job_id: UUID, service: ArtifactServiceDependency
+    job_id: UUID,
+    service: ArtifactServiceDependency,
+    kind: ArtifactKind | None = None,
 ) -> list[ArtifactResponse]:
-    artifacts = await service.list_artifacts(job_id)
+    artifacts = await service.list_artifacts(job_id, kind=kind)
     return [
         ArtifactResponse(
             id=item.id,

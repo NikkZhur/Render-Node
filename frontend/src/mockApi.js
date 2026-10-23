@@ -342,6 +342,11 @@ export const mockApi = {
     return { version: versionNumber };
   },
 
+  async getMetrics() {
+    await wait(120);
+    return { timestamp: new Date().toISOString(), devices, processors, storages };
+  },
+
   async getDevices() {
     await wait(120);
     return devices.map((device) => ({ ...device }));

@@ -38,6 +38,12 @@ class JobPage:
     pages: int
 
 
+@dataclass(frozen=True, slots=True)
+class JobSummary:
+    queued_count: int
+    rendering_count: int
+
+
 class JobService:
     def __init__(
         self,
@@ -80,6 +86,11 @@ class JobService:
     async def list(self) -> list[Job]:
         async with self._database.session_factory() as session:
             return await JobRepository(session).list()
+
+    async def summary(self) -> JobSummary:
+        async with self._database.session_factory() as session:
+            queued_count, rendering_count = await JobRepository(session).queue_counts()
+        return JobSummary(queued_count=queued_count, rendering_count=rendering_count)
 
     async def page(self, *, page: int, page_size: int) -> JobPage:
         async with self._database.session_factory() as session:

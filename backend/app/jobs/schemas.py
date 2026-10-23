@@ -111,3 +111,8 @@ class JobPageResponse(BaseModel):
     page_size: int = Field(ge=1, le=10)
     total: int = Field(ge=0)
     pages: int = Field(ge=0)
+
+
+class JobSummaryResponse(BaseModel):
+    queued_count: int = Field(ge=0)
+    rendering_count: int = Field(ge=0)
