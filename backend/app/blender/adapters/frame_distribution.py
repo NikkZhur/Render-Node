@@ -24,6 +24,12 @@ if frame_mode == "RANGE":
 frame_start = int(scene.frame_start)
 frame_end = int(scene.frame_end)
 
+if worker_count > 1 and frame_start < 0:
+    raise RuntimeError(
+        "Negative scene frames cannot be distributed across GPU processes; "
+        "choose All GPUs per frame"
+    )
+
 total = 0 if frame_end < frame_start else ((frame_end - frame_start) // scene_step) + 1
 first_frame = frame_start + worker_index * scene_step
 worker_step = scene_step * worker_count
@@ -41,5 +47,7 @@ if assigned == 0:
 
 if worker_count > 1:
     scene.frame_start = first_frame
-    scene.frame_end = frame_end
+    # RNA also clamps frame_step. A one-frame slice must stay bounded to that
+    # frame even when the multiplied step exceeds Blender's allowed maximum.
+    scene.frame_end = first_frame if assigned == 1 else frame_end
 scene.frame_step = worker_step

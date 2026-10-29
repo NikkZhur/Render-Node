@@ -169,7 +169,7 @@ def test_blender_4_5_adapter_maps_stable_eevee_engine_name(
         (
             ["--render-node-frame-mode", "ALL"],
             (10, 18, 4),
-            (14, 18, 8, "total=3 worker=1 assigned=1 start=10 end=18 step=4"),
+            (14, 14, 8, "total=3 worker=1 assigned=1 start=10 end=18 step=4"),
         ),
     ],
 )
@@ -271,6 +271,34 @@ def test_all_frames_does_not_reassign_and_clamp_loaded_scene_bounds(
     assert (scene.frame_start, scene.frame_end) == bounds
     total = (bounds[1] - bounds[0]) // scene.frame_step + 1
     assert f"total={total} worker=0 assigned={total}" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("bounds", [(-3, 9), (-4, -1)])
+@pytest.mark.parametrize("worker_index", [0, 1])
+def test_distributed_negative_scene_frames_fail_before_changing_bounds(
+    bounds: tuple[int, int], worker_index: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scene = ClampedSceneRange(*bounds, step=2)
+    monkeypatch.setitem(sys.modules, "bpy", SimpleNamespace(context=SimpleNamespace(scene=scene)))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "blender",
+            "--",
+            "--render-node-frame-mode",
+            "ALL",
+            "--render-node-worker-index",
+            str(worker_index),
+            "--render-node-worker-count",
+            "2",
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="All GPUs per frame"):
+        runpy.run_path(str(FRAME_DISTRIBUTION_SCRIPT))
+
+    assert (scene.frame_start, scene.frame_end, scene.frame_step) == (*bounds, 2)
 
 
 def test_range_frame_plan_uses_bounds_after_blender_clamps_them(

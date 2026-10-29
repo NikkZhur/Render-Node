@@ -13,6 +13,7 @@ from app.blender.inspection import InspectionError, SceneInspector
 from app.blender.repository import BlenderRepository
 from app.blender.types import RuntimeState
 from app.events.hub import EventHub
+from app.jobs.exceptions import JobConflictError
 from app.jobs.locks import JobLocks
 from app.jobs.models import Job
 from app.jobs.repository import JobRepository
@@ -63,20 +64,30 @@ class SceneAnalysisService:
         self._tasks[job_id] = task
 
         def finished(completed: asyncio.Task[None]) -> None:
-            if self._tasks.get(job_id) is completed:
+            error = None if completed.cancelled() else completed.exception()
+            stop_failed = completed.cancelling() > 0 and error is not None
+            # Retain failed cancellation so a repeated request cannot mutate
+            # input whose reader was not confirmed to have stopped safely.
+            if self._tasks.get(job_id) is completed and not stop_failed:
                 self._tasks.pop(job_id, None)
-            if not completed.cancelled() and completed.exception() is not None:
-                logger.error("Scene analysis task failed", exc_info=completed.exception())
+            if error is not None:
+                logger.error("Scene analysis task failed for job %s", job_id, exc_info=error)
 
         task.add_done_callback(finished)
 
     async def cancel(self, job_id: UUID) -> None:
-        # Call under the shared job lock. Cancellation also interrupts a task
-        # waiting to acquire that lock, so waiting here cannot deadlock completion.
-        task = self._tasks.pop(job_id, None)
+        # Call under the shared job lock. Failed cleanup must propagate without
+        # attempting to reacquire that lock or allowing the caller to alter input.
+        task = self._tasks.get(job_id)
         if task is not None:
             task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+            (result,) = await asyncio.gather(task, return_exceptions=True)
+            if isinstance(result, Exception):
+                raise JobConflictError(
+                    "scene_analysis_stop_failed",
+                    "Scene analysis cleanup failed; the original input was preserved. "
+                    "Check the service logs and restart the service before retrying.",
+                ) from result
 
     async def shutdown(self) -> None:
         tasks = list(self._tasks.values())
@@ -122,6 +133,11 @@ class SceneAnalysisService:
                         job.auto_configured = True
                 await self._publish(job_id)
         except Exception as exc:
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                # Runner cleanup can replace CancelledError with its own error.
+                # The cancelling upload/delete already holds the shared lock.
+                raise
             message = (
                 str(exc)
                 if isinstance(exc, InspectionError)

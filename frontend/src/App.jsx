@@ -400,7 +400,24 @@ function JobSetup({
   const [frameStart, setFrameStart] = useState(job.frame_start ?? 1);
   const [frameEnd, setFrameEnd] = useState(job.frame_end ?? 240);
   const [dirty, setDirty] = useState(false);
+  const analysisRevision = `${job.analysis_id ?? "legacy"}:${job.analysis_status ?? "none"}`;
+  const [loadedAnalysisRevision, setLoadedAnalysisRevision] = useState(analysisRevision);
   const fileInput = useRef(null);
+
+  // Apply analysis results without replacing the file input: a replacement
+  // picker may still be open when the current analysis finishes.
+  if (loadedAnalysisRevision !== analysisRevision) {
+    setLoadedAnalysisRevision(analysisRevision);
+    setEngine(job.engine ?? "Cycles");
+    setDevice(job.device ?? "OptiX");
+    setFrameMode(job.frame_mode?.toLowerCase() ?? "range");
+    setSelectedGpus(job.gpu_ids ?? null);
+    setGpuRenderMode(job.gpu_render_mode ?? ALL_GPUS_PER_FRAME);
+    setFileName(job.file);
+    setFrameStart(job.frame_start ?? 1);
+    setFrameEnd(job.frame_end ?? 240);
+    setDirty(false);
+  }
   const isActive = job.status === "queued" || job.status === "rendering";
   const isDraft = job.id === "draft";
   const editable = isDraft || job.status === "created" || job.status === "ready";
@@ -516,8 +533,9 @@ function JobSetup({
             if (isDraft) nextConfiguration.name = nextFile.name.replace(/\.(blend|zip)$/i, "");
             try {
               const uploadedJob = await onSceneUpload(job, nextFile, nextConfiguration);
-              syncSavedGpuRenderMode(uploadedJob);
-              setFileName(nextFile.name);
+              // Analysis owns the configuration once this upload starts it.
+              if (!uploadedJob?.analysis_id) syncSavedGpuRenderMode(uploadedJob);
+              setFileName(uploadedJob?.file ?? nextFile.name);
               setDirty(false);
             } catch {
               // The mutation exposes its user-facing error below the action controls.
@@ -2012,7 +2030,7 @@ export default function App({ mockApi = null }) {
             activeVersion={activeVersion}
             devices={devicesQuery.data ?? []}
             job={setupJob}
-            key={`${setupJob.id}:${setupJob.analysis_id ?? "legacy"}:${setupJob.analysis_status ?? "none"}`}
+            key={setupJob.id}
             onCancel={cancelRender}
             onRerender={rerenderJob}
             onSave={saveJob}

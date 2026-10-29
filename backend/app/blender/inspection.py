@@ -60,7 +60,10 @@ def choose_configuration(
                 break
     if scene.frame_count > 1:
         selected = selected[: scene.frame_count]
-    distributed = len(selected) >= 2 and scene.frame_count > 1
+    # Distributed workers rewrite their frame bounds through RNA, whose setters
+    # clamp negative values to zero. Keep such scenes in one Blender process so
+    # ALL can preserve the loaded bounds and every saved frame is rendered once.
+    distributed = len(selected) >= 2 and scene.frame_count > 1 and scene.frame_start >= 0
     # ALL preserves saved zero/negative bounds without rewriting them via RNA
     # setters (which clamp to zero). Positive bounds remain editable in the form.
     frame_mode = (
@@ -127,6 +130,9 @@ class SceneInspector:
                             )
                             capabilities[gpu.uuid] = DeviceCapabilities.model_validate_json(raw)
                         except (InspectionError, ValidationError):
+                            task = asyncio.current_task()
+                            if task is not None and task.cancelling():
+                                raise
                             # A broken device must not hide other usable GPUs.
                             continue
                 configuration = choose_configuration(

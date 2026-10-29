@@ -15,6 +15,7 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from app.blender.cgroups import CgroupHandle, CgroupIsolationError, MemoryEvents
 from app.blender.command import ADAPTER_ROOT
 from app.blender.devices import GpuDevice, GpuDiscovery, GpuScheduler
 from app.blender.inspection import InspectionError, choose_configuration
@@ -137,7 +138,7 @@ async def child_pid(settings: Settings, job_id: str) -> int:
             "ALL_GPUS_PER_FRAME",
             "RANGE",
         ),
-        ({"frame_start": -2}, GPUS, CAPABILITIES, "OPTIX", [1, 0], "FRAME_PER_GPU", "ALL"),
+        ({"frame_start": -2}, GPUS, CAPABILITIES, "OPTIX", [1, 0], "ALL_GPUS_PER_FRAME", "ALL"),
         ({"frame_start": 0}, GPUS, CAPABILITIES, "OPTIX", [1, 0], "FRAME_PER_GPU", "ALL"),
     ],
 )
@@ -234,6 +235,83 @@ async def test_delete_stops_analysis_before_removing_input(
     assert response.status_code == 204
     await assert_process_stopped(pid)
     assert not (job_settings.jobs_root / job_id).exists()
+
+
+@pytest.mark.parametrize("action", ["delete", "replace"])
+@pytest.mark.parametrize("stage", ["scene", "devices"])
+async def test_failed_analysis_cleanup_blocks_input_mutation_without_deadlock(
+    action: str,
+    stage: str,
+    analysis_client: AsyncClient,
+    job_settings: Settings,
+    job_app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailedCleanup:
+        def __init__(self, fail: bool) -> None:
+            self.fail = fail
+
+        def attach_current_process_in_child(self) -> None:
+            pass
+
+        async def memory_events(self) -> MemoryEvents:
+            return MemoryEvents()
+
+        async def cleanup(self) -> None:
+            if self.fail:
+                raise CgroupIsolationError("Could not remove the worker cgroup")
+
+    runs = 0
+
+    async def create(_job_id: UUID) -> CgroupHandle:
+        nonlocal runs
+        runs += 1
+        return cast(CgroupHandle, FailedCleanup(fail=stage == "scene" or runs > 1))
+
+    if stage == "devices":
+        binary = job_settings.bundled_blender_root / "5.2.0" / "blender"
+        binary.write_text(
+            binary.read_text().replace(
+                'if script == "inspect_devices.py":',
+                'if script == "inspect_devices.py":\n'
+                '    child = subprocess.Popen(["sleep", "60"])\n'
+                '    (Path.cwd().parent.parent / "inspection-child.pid")'
+                ".write_text(str(child.pid))\n"
+                "    child.wait()",
+            )
+        )
+
+    service = cast(SceneAnalysisService, job_app.state.scene_analysis_service)
+    monkeypatch.setattr(service._inspector._runner._resource_isolation, "create", create)
+    original = b"BLENDER\nHANG" if stage == "scene" else scene()
+    uploaded = await upload(analysis_client, original)
+    job_id = uploaded["id"]
+    pid = await child_pid(job_settings, job_id)
+
+    # A second request must not bypass an earlier failure to confirm cleanup.
+    for _attempt in range(2):
+        async with asyncio.timeout(2):
+            if action == "delete":
+                response = await analysis_client.delete(f"/api/v1/jobs/{job_id}")
+            else:
+                response = await analysis_client.post(
+                    f"/api/v1/jobs/{job_id}/uploads",
+                    data={"auto_configure": "true"},
+                    files={"file": ("replacement.blend", scene(), "application/octet-stream")},
+                )
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "scene_analysis_stop_failed"
+        assert (job_settings.jobs_root / job_id / "input/scene.blend").read_bytes() == original
+        saved = (await analysis_client.get(f"/api/v1/jobs/{job_id}")).json()
+        assert saved["analysis_id"] == uploaded["analysis_id"]
+        assert saved["analysis_status"] == "running"
+        assert saved["status"] == "ready"
+        blocked = await analysis_client.post(f"/api/v1/jobs/{job_id}/start")
+        assert blocked.status_code == 409
+        assert blocked.json()["error"]["code"] == "scene_analysis_pending"
+
+    await assert_process_stopped(pid)
+    assert UUID(job_id) in service._tasks
 
 
 async def test_rejected_replacement_resumes_analysis_of_original_file(

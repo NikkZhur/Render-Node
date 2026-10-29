@@ -110,9 +110,21 @@ try {
 
   await upload();
   await setup.getByText("Analyzing scene…", { exact: true }).waitFor();
+  // Analysis may finish while the native replacement picker is still open.
+  const chooserPromise = page.waitForEvent("filechooser");
+  await setup.locator(".file-drop").click();
+  const chooser = await chooserPromise;
+  complete(); state.send();
+  await setup.getByText("Settings selected automatically. You can change them below.").waitFor();
+  assert(await chooser.element().evaluate((input) => input.isConnected));
+  const replacementResponse = page.waitForResponse((response) => response.url().endsWith("/uploads"));
+  await chooser.setFiles({ name: "replacement.blend", mimeType: "application/octet-stream", buffer: Buffer.from("BLENDER replacement") });
+  assert.equal((await replacementResponse).status(), 200);
+  await setup.locator(".file-copy strong").getByText("scene-3.blend", { exact: true }).waitFor();
+  await setup.getByText("Analyzing scene…", { exact: true }).waitFor();
   // Replacement remains available while a previous analysis is running.
   await upload();
-  assert.equal(state.uploads, 3);
+  assert.equal(state.uploads, 4);
   complete({ engine: "BLENDER_EEVEE", device: "CPU", gpu_ids: [], frame_mode: "SINGLE", frame_start: 7, frame_end: null,
     scene_metadata: { ...sceneMetadata, engine: "BLENDER_EEVEE_NEXT", frame_start: 7, frame_end: 7 } });
   // Deliberately omit the event: polling must complete setup even with a live WS.
@@ -131,7 +143,7 @@ try {
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
   await page.screenshot({ path: `${output}/failure-mobile.png`, fullPage: true });
   assert.deepEqual(state.errors, []); assert.deepEqual(state.unexpected, []);
-  console.log("Scene analysis QA passed: upload, async setup, manual edits/reload, replacement, polling, Eevee, failure and mobile.");
+  console.log("Scene analysis QA passed: upload, async setup, manual edits/reload, replacement/picker race, polling, Eevee, failure and mobile.");
   await context.close();
 } finally {
   await browser.close();
